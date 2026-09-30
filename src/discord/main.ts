@@ -408,21 +408,7 @@ async function main(): Promise<void> {
 					},
 				}
 			: {}),
-		transport: {
-			sendMessage: async (input) => {
-				const result = await pool.sendMessage({
-					personaId: input.personaId,
-					channelId: input.channelId,
-					content: input.content,
-					replyToMessageId: input.replyToMessageId,
-					allowedMentions: input.allowedMentions,
-					attachments: input.attachments,
-				});
-				return result;
-			},
-			startTyping: (personaId, channelId) => pool.startTyping(personaId, channelId),
-			addReaction: (personaId, channelId, messageId, emoji) => pool.addReaction(personaId, channelId, messageId, emoji),
-		},
+		transport: pool,
 		modelRuntime: runtime,
 	});
 	const scheduler = new DiscordCelebrationScheduler({
