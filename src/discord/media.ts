@@ -1,6 +1,7 @@
 /** Discord image attachment helpers shared by message ingestion and REST transport. */
 
 import { convertToPng, resizeImage } from "@earendil-works/pi-coding-agent";
+import { readBoundedBody } from "../net/read-bounded-body.ts";
 
 export const DISCORD_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 export const DISCORD_PI_IMAGE_RESIZE = { maxWidth: 1024, maxHeight: 1024, maxBytes: 200_000, jpegQuality: 80 } as const;
@@ -69,40 +70,6 @@ function detectImageMime(bytes: Uint8Array): DiscordImageMime | null {
 	return null;
 }
 
-async function readBounded(response: Response, maxBytes: number): Promise<Uint8Array | null> {
-	const length = Number(response.headers.get("content-length"));
-	if (Number.isFinite(length) && length > maxBytes) throw new RangeError("oversize");
-	if (!response.body) {
-		const bytes = new Uint8Array(await response.arrayBuffer());
-		if (bytes.byteLength > maxBytes) throw new RangeError("oversize");
-		return bytes;
-	}
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > maxBytes) {
-				await reader.cancel();
-				throw new RangeError("oversize");
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
-}
-
 /** Download only Discord CDN image attachments and verify the actual bytes before use. */
 export async function downloadDiscordImage(
 	attachment: DiscordImageAttachment,
@@ -134,8 +101,9 @@ export async function downloadDiscordImage(
 			headers: { accept: "image/png,image/jpeg,image/webp,image/gif" },
 		});
 		if (!response.ok) return { ok: false, reason: "download_failed" };
-		const bytes = await readBounded(response, maxBytes);
-		if (!bytes?.byteLength) return { ok: false, reason: "invalid_image" };
+		const bytes = await readBoundedBody(response, maxBytes);
+		if (!bytes) return { ok: false, reason: "oversize" };
+		if (!bytes.byteLength) return { ok: false, reason: "invalid_image" };
 		const mimeType = detectImageMime(bytes);
 		if (!mimeType) return { ok: false, reason: "invalid_image" };
 		return { ok: true, bytes, mimeType, filename: safeFilename(attachment.filename, mimeType) };

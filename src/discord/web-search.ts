@@ -1,3 +1,5 @@
+import { readBoundedBody } from "../net/read-bounded-body.ts";
+
 const DEFAULT_ENDPOINT = "https://api.deepseek.com/anthropic/v1/messages";
 const MAX_QUERY_LENGTH = 500;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -60,36 +62,6 @@ function isPublicHttpUrl(value: unknown): value is string {
 	}
 }
 
-async function readBoundedBody(response: Response): Promise<Uint8Array | null> {
-	const declaredLength = Number(response.headers.get("content-length"));
-	if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) return null;
-	if (!response.body) return new Uint8Array();
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > MAX_RESPONSE_BYTES) {
-				await reader.cancel();
-				return null;
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return bytes;
-}
-
 /** Runs one DeepSeek server-side web search and returns bounded, untrusted research text. */
 export async function runDeepSeekWebSearch(
 	apiKey: string,
@@ -134,7 +106,7 @@ export async function runDeepSeekWebSearch(
 			signal: controller.signal,
 		});
 		if (!response.ok) return failure("http_error");
-		const bytes = await readBoundedBody(response);
+		const bytes = await readBoundedBody(response, MAX_RESPONSE_BYTES);
 		if (!bytes) return failure("response_too_large");
 		let payload: unknown;
 		try {

@@ -1,3 +1,5 @@
+import { readBoundedBody } from "../net/read-bounded-body.ts";
+
 const DEFAULT_ENDPOINT = "https://api.fish.audio/v1/tts";
 const DEFAULT_MODEL = "s2.1-pro-free";
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -34,36 +36,9 @@ async function readAudioBounded(response: Response): Promise<Uint8Array> {
 	if (contentType.includes("application/json") || contentType.includes("text/")) {
 		throw new FishAudioTtsError("invalid_response");
 	}
-	const declaredLength = Number(response.headers.get("content-length"));
-	if (Number.isFinite(declaredLength) && declaredLength > MAX_AUDIO_BYTES) {
-		throw new FishAudioTtsError("audio_too_large");
-	}
-	if (!response.body) throw new FishAudioTtsError("invalid_response");
-
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			total += value.byteLength;
-			if (total > MAX_AUDIO_BYTES) {
-				await reader.cancel();
-				throw new FishAudioTtsError("audio_too_large");
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	if (total === 0) throw new FishAudioTtsError("invalid_response");
-	const audio = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		audio.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
+	const audio = await readBoundedBody(response, MAX_AUDIO_BYTES);
+	if (!audio) throw new FishAudioTtsError("audio_too_large");
+	if (audio.byteLength === 0) throw new FishAudioTtsError("invalid_response");
 	return audio;
 }
 
