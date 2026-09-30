@@ -941,9 +941,9 @@ export class DiscordConversationCore {
 					};
 				}
 				turn.reply = { status: "sending", kind: "image" };
-				const bytes = readFileSync(asset.path);
 				let sent: { id: string };
 				try {
+					const bytes = readFileSync(asset.path);
 					sent = await this.transport.sendMessage({
 						personaId: persona.id,
 						channelId,

@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
 	DiscordConversationCore,
@@ -46,6 +47,41 @@ function message(overrides: Partial<DiscordInboundMessage> = {}): DiscordInbound
 }
 
 describe("Discord conversation routing", () => {
+	test("a failed reaction image read permits another send attempt", async () => {
+		const db = new Database(":memory:");
+		const persona = personas[0]!;
+		const current = message();
+		const core = new DiscordConversationCore({
+			db,
+			dataDir: "/unused",
+			routingSecret: "fixture",
+			personas: [persona],
+			modelRuntime: {} as ModelRuntime,
+			transport: {
+				sendMessage: async () => {
+					throw new Error("must not send unread image");
+				},
+			},
+		});
+		(core as any).activeTurns.set([persona.id, current.guildId, current.channelId].join("\0"), {
+			reply: { status: "idle" },
+			replyToMessageId: current.messageId,
+		});
+		const read = fs.readFileSync;
+		const missing = spyOn(fs, "readFileSync").mockImplementation((path: any, ...args: any[]) => {
+			if (String(path).endsWith("/assets/reactions/hello.png")) throw new Error("fixture missing image");
+			return (read as any)(path, ...args);
+		});
+		try {
+			const tool = (core as any).createReactionImageTool(persona, current.guildId, current.channelId);
+			for (const call of ["first", "retry"])
+				await expect(tool.execute(call, { asset_id: "hello" })).rejects.toThrow("fixture missing image");
+		} finally {
+			missing.mockRestore();
+			await core.close();
+			db.close();
+		}
+	});
 	test("routes names and aliases only within each persona's configured guilds", () => {
 		const stanley: DiscordPersona = {
 			...personas[0]!,
