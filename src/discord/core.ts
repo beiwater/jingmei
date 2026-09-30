@@ -105,6 +105,23 @@ export interface DiscordDispatch {
 	responseMessageId?: string;
 }
 
+type ReplyKind = "image" | "reaction" | "voice";
+
+interface ActiveTurn {
+	guildId: string;
+	authorId: string;
+	sourceChannelId: string;
+	sourceMessageId: string;
+	visibleMemberIds: ReadonlySet<string>;
+	memoryRecallCount: number;
+	replyToMessageId: string;
+	reply:
+		| { status: "idle" }
+		| { status: "sending"; kind: ReplyKind }
+		| { status: "sent"; kind: "reaction"; messageId?: never }
+		| { status: "sent"; kind: "image" | "voice"; messageId: string };
+}
+
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
 const DISCORD_CONTEXT_TYPE = "discord_context_v1";
 const DISCORD_PENDING_SOUL_TYPE = "discord_pending_soul_v1";
@@ -194,26 +211,7 @@ export class DiscordConversationCore {
 	private readonly soulRevisions = new Map<string, number>();
 	private readonly sessionSoulRevisions = new Map<string, number>();
 	private readonly sessionFormalSouls = new Map<string, string>();
-	private readonly activeTurns = new Map<
-		string,
-		{
-			guildId: string;
-			authorId: string;
-			sourceChannelId: string;
-			sourceMessageId: string;
-			visibleMemberIds: ReadonlySet<string>;
-			memoryRecallCount: number;
-			replyToMessageId: string;
-			imageSent: boolean;
-			imageSendStarted: boolean;
-			imageMessageId?: string;
-			reactionSent: boolean;
-			reactionStarted: boolean;
-			voiceSent: boolean;
-			voiceSendStarted: boolean;
-			voiceMessageId?: string;
-		}
-	>();
+	private readonly activeTurns = new Map<string, ActiveTurn>();
 	private closed = false;
 
 	constructor(options: DiscordCoreOptions) {
@@ -358,23 +356,7 @@ export class DiscordConversationCore {
 			const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 			let pendingSoulAtCompaction: string | null = null;
 			const turnKey = sessionKey(persona.id, message.guildId, message.channelId);
-			const turn: {
-				guildId: string;
-				authorId: string;
-				sourceChannelId: string;
-				sourceMessageId: string;
-				visibleMemberIds: ReadonlySet<string>;
-				memoryRecallCount: number;
-				replyToMessageId: string;
-				imageSent: boolean;
-				imageSendStarted: boolean;
-				imageMessageId?: string;
-				reactionSent: boolean;
-				reactionStarted: boolean;
-				voiceSent: boolean;
-				voiceSendStarted: boolean;
-				voiceMessageId?: string;
-			} | null =
+			const turn: ActiveTurn | null =
 				route.personaId === persona.id
 					? {
 							guildId: message.guildId,
@@ -384,12 +366,7 @@ export class DiscordConversationCore {
 							visibleMemberIds: this.getRecentVisibleMemberIds(message),
 							memoryRecallCount: 0,
 							replyToMessageId: message.messageId,
-							imageSent: false,
-							imageSendStarted: false,
-							reactionSent: false,
-							reactionStarted: false,
-							voiceSent: false,
-							voiceSendStarted: false,
+							reply: { status: "idle" },
 						}
 					: null;
 			if (turn) {
@@ -447,13 +424,8 @@ export class DiscordConversationCore {
 					pendingSoulAtCompaction,
 				);
 			if (sendFailed) throw sendFailure;
-			if (turn?.imageSent) {
-				responseMessageId = turn.imageMessageId;
-				continue;
-			}
-			if (turn?.reactionSent) continue;
-			if (turn?.voiceSent) {
-				responseMessageId = turn.voiceMessageId;
+			if (turn?.reply.status === "sent") {
+				responseMessageId = turn.reply.messageId;
 				continue;
 			}
 			if (!answer) continue;
@@ -726,21 +698,14 @@ export class DiscordConversationCore {
 					.get(guildId, channelId, target, guildId, channelId) as { is_bot: number } | null;
 				if (!row || row.is_bot !== 0)
 					return fail("Target must be a stored human message in this channel.", "message_not_reactable");
-				if (
-					turn.reactionSent ||
-					turn.reactionStarted ||
-					turn.imageSent ||
-					turn.imageSendStarted ||
-					turn.voiceSent ||
-					turn.voiceSendStarted
-				)
+				if (turn.reply.status !== "idle")
 					return fail("A reaction was already applied this turn.", "reaction_already_sent");
-				turn.reactionStarted = true;
+				turn.reply = { status: "sending", kind: "reaction" };
 				try {
 					await this.transport.addReaction(persona.id, channelId, target, params.emoji);
-					turn.reactionSent = true;
+					turn.reply = { status: "sent", kind: "reaction" };
 				} catch (error) {
-					turn.reactionStarted = false;
+					turn.reply = { status: "idle" };
 					throw error;
 				}
 				return {
@@ -918,27 +883,18 @@ export class DiscordConversationCore {
 				});
 				if (!turn) return fail("no_active_turn");
 				if (!this.voice) return fail("voice_not_configured");
-				if (
-					turn.voiceSent ||
-					turn.voiceSendStarted ||
-					turn.imageSent ||
-					turn.imageSendStarted ||
-					turn.reactionSent ||
-					turn.reactionStarted
-				)
-					return fail("reply_already_sent");
-				turn.voiceSendStarted = true;
+				if (turn.reply.status !== "idle") return fail("reply_already_sent");
+				turn.reply = { status: "sending", kind: "voice" };
 				try {
 					const messageId = await this.sendVoiceReply(persona.id, channelId, turn.replyToMessageId, params.text);
-					turn.voiceSent = true;
-					turn.voiceMessageId = messageId;
+					turn.reply = { status: "sent", kind: "voice", messageId };
 					return {
 						content: [{ type: "text" as const, text: "Voice reply sent." }],
 						details: { messageId },
 						terminate: true as const,
 					};
 				} catch (error) {
-					turn.voiceSendStarted = false;
+					turn.reply = { status: "idle" };
 					return fail(error instanceof FishAudioTtsError ? error.code : "send_failed");
 				}
 			},
@@ -981,21 +937,14 @@ export class DiscordConversationCore {
 						isError: true,
 					};
 				}
-				if (
-					turn.imageSent ||
-					turn.imageSendStarted ||
-					turn.reactionSent ||
-					turn.reactionStarted ||
-					turn.voiceSent ||
-					turn.voiceSendStarted
-				) {
+				if (turn.reply.status !== "idle") {
 					return {
 						content: [{ type: "text" as const, text: "A reaction image was already sent this turn." }],
 						details: { error: "image_already_sent" },
 						isError: true,
 					};
 				}
-				turn.imageSendStarted = true;
+				turn.reply = { status: "sending", kind: "image" };
 				const bytes = readFileSync(asset.path);
 				let sent: { id: string };
 				try {
@@ -1007,10 +956,9 @@ export class DiscordConversationCore {
 						allowedMentions: [],
 						attachments: [{ name: `${params.asset_id}.png`, data: bytes, contentType: "image/png" }],
 					});
-					turn.imageSent = true;
-					turn.imageMessageId = sent.id;
+					turn.reply = { status: "sent", kind: "image", messageId: sent.id };
 				} catch (error) {
-					turn.imageSendStarted = false;
+					turn.reply = { status: "idle" };
 					throw error;
 				}
 				return {
