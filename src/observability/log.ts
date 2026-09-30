@@ -1,5 +1,3 @@
-import { chmodSync, existsSync, openSync, closeSync, readSync, renameSync, rmSync, statSync } from "node:fs";
-
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogFields = Readonly<Record<string, unknown>>;
 
@@ -7,8 +5,6 @@ export const LOG_SCHEMA_VERSION = 1;
 const MAX_LOG_FIELDS = 24;
 const MAX_LOG_STRING = 256;
 const MAX_LOG_LINE_BYTES = 4096;
-const DEFAULT_LOG_MAX_BYTES = 8 * 1024 * 1024;
-const DEFAULT_LOG_GENERATIONS = 3;
 
 const SENSITIVE_KEY =
 	/(?:^|_)(?:token|secret|password|authorization|cookie|api[_-]?key|prompt|content|body|response|query|url|path|stack|persona)(?:$|_)/i;
@@ -123,69 +119,4 @@ export const log = {
 export function errorCategory(error: unknown): string {
 	if (error instanceof Error) return safeName(error.name, "error");
 	return typeof error === "string" ? "string_error" : "unknown_error";
-}
-
-/** Rotate before daemon spawn. `daemon.log` is generation 0; `.1` is the newest archive. */
-export function rotateLogFile(
-	logPath: string,
-	maxBytes = DEFAULT_LOG_MAX_BYTES,
-	generations = DEFAULT_LOG_GENERATIONS,
-): void {
-	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be a positive integer");
-	if (!Number.isSafeInteger(generations) || generations < 1 || generations > 16) {
-		throw new Error("generations must be an integer in [1,16]");
-	}
-	if (existsSync(logPath) && statSync(logPath).size >= maxBytes) {
-		rmSync(`${logPath}.${generations}`, { force: true });
-		for (let index = generations - 1; index >= 1; index--) {
-			if (existsSync(`${logPath}.${index}`)) renameSync(`${logPath}.${index}`, `${logPath}.${index + 1}`);
-		}
-		renameSync(logPath, `${logPath}.1`);
-	}
-	for (const candidate of [logPath, ...Array.from({ length: generations }, (_, index) => `${logPath}.${index + 1}`)]) {
-		if (existsSync(candidate)) chmodSync(candidate, 0o600);
-	}
-}
-
-export function readStructuredLogTail(logPath: string, maxBytes = 64 * 1024, maxRecords = 100): LogRecord[] {
-	if (!existsSync(logPath)) return [];
-	let fd: number | null = null;
-	try {
-		fd = openSync(logPath, "r");
-		const size = statSync(logPath).size;
-		const start = Math.max(0, size - maxBytes);
-		const buffer = Buffer.alloc(size - start);
-		readSync(fd, buffer, 0, buffer.length, start);
-		const raw = buffer.toString("utf8");
-		const lines = raw.split("\n");
-		if (start > 0) lines.shift();
-		return lines
-			.slice(-maxRecords - 1)
-			.flatMap((line): LogRecord[] => {
-				try {
-					const parsed = JSON.parse(line) as Partial<LogRecord>;
-					if (
-						parsed.schema !== LOG_SCHEMA_VERSION ||
-						typeof parsed.ts !== "string" ||
-						typeof parsed.level !== "string" ||
-						typeof parsed.component !== "string" ||
-						typeof parsed.event !== "string"
-					)
-						return [];
-					return [parsed as LogRecord];
-				} catch {
-					return [];
-				}
-			})
-			.slice(-maxRecords);
-	} catch {
-		return [];
-	} finally {
-		if (fd != null)
-			try {
-				closeSync(fd);
-			} catch {
-				/* already closed */
-			}
-	}
 }

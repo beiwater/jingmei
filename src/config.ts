@@ -1,885 +1,541 @@
-// Central configuration loader (REQ-CONF-0001).
-//
-// Two sources:
-//   1. `telegram.config.ts` (project root) — trusted local bot list:
-//      arbitrary number of bots, persona paths (abs / ~ / relative to project root), optional
-//      Pi provider/model selection, routing & tool switches.
-//   2. `.env` (`key: value` colon format) — Telegram/TinyFish/router secrets only. LLM
-//      credentials belong exclusively to Pi's auth storage (REQ-PLAT-0002).
-//
-// Validation collects ALL errors and throws ConfigError listing each one (REQ-OPS-0001 R2
-// framework, shared with the JSON schema checks per REQ-CONF-0001 R6).
-
-import { readFileSync, existsSync, statSync } from "node:fs";
-import { join, resolve, isAbsolute } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { createJiti } from "jiti";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { isPiThinkingLevel, loadPiModelDefaults, type PiModelDefaults } from "./agent/model-settings.ts";
-import {
-	canonicalPiModelReference,
-	DEFAULT_AUXILIARY_VISUAL_MODEL,
-	DEFAULT_COMPACTION_MODEL,
-} from "./agent/model-ref.ts";
+import type { Persona, Platform, SpaceId } from "./core/types.ts";
 
-// Minimum reserve Pi keeps for the next response + compaction output. The highest meaningful
-// compaction threshold is contextWindow - MIN_COMPACTION_RESERVE: any value above it behaves
-// identically (silently clamped by max() in BotRuntime). Config must reject values above the
-// cap instead of letting a requested/effective fork go unnoticed (same stance as
-// model-runtime.ts on reasoning).
-export const MIN_COMPACTION_RESERVE = 16_384;
-export const DEFAULT_CONTEXT_WINDOW = 65_536;
-export const DEFAULT_MAX_IMAGES_PER_TURN = 4;
-export const DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY = 2;
+export const CONFIG_FILE = "jingmei.config.json";
 
-export interface TelegramToolsConfigInput {
-	send?: boolean;
-	search?: boolean;
-	run_js?: boolean;
+export type ConfiguredPersona = Omit<Persona, "accounts"> & {
+	/** Resolved secret bot tokens; never log. */
+	tokens: Partial<Record<Platform, string>>;
+};
+
+export interface CelebrationTarget {
+	spaceId: SpaceId;
+	channelId: string;
+	personaId: string;
+	timeZone: string;
+	calendar: "china" | "australia" | "both";
 }
 
-/** How media reaches the model: "vision" = auxiliary model describes media as text (default,
- *  historical behavior, still gated by `vision.enabled`); "context" = images/frames are attached
- *  directly to the main-model context and requires a chat model with image input. */
-export type MediaMode = "vision" | "context";
-
-export interface TelegramMediaConfigInput {
-	/** Media pipeline mode; defaults to "vision" (the auxiliary-model pipeline). */
-	mode?: MediaMode;
-	/** Context mode only: max images (incl. video frames) attached to the main-model context per turn. */
-	max_images_per_turn?: number;
-	/** Context mode only: parallel Telegram downloads/transcodes while preparing context media. */
-	download_concurrency?: number;
-}
-
-export interface TelegramVisionConfigInput {
-	enabled?: boolean;
-	foreground_media_limit?: number;
-	concurrency?: number;
-}
-
-export type TelegramAdminInput = number | `@${string}`;
-
-export interface TelegramBotConfigInput {
-	/** Stable local id used by commands, sessions, routing, and telemetry. */
-	id: string;
-	/** Display name and explicit name trigger. Defaults to id. */
-	name?: string;
-	/** Name of the .env entry containing this Telegram bot token. */
-	token_env: string;
-	/** Absolute, home-relative, or project-relative trusted local Markdown file. */
-	persona_path: string;
-	/** Probability for unaddressed human messages; all bots together must total <= 1. */
-	routing_p?: number;
-	/** Probability-route cooldown after a completed turn. */
-	sampling_cooldown_ms?: number;
-	provider?: string;
-	model?: string;
-	reasoning_effort?: ThinkingLevel;
-	compaction_threshold?: number;
-	compaction_keep_recent?: number;
-	/** Cheap task model used only for compaction: provider/model:effort. */
-	compaction_model?: string;
-	/** Per-attempt provider call timeout in ms before the request is aborted and retried (exponential backoff). */
-	provider_timeout_ms?: number;
-	/** Extra Pi attempts for retryable provider failures (0 disables all automatic retries). */
-	provider_retries?: number;
-	cache_retention?: "none" | "short" | "long";
-	max_suffix_tokens?: number;
-	max_message_tokens?: number;
-	tools?: TelegramToolsConfigInput;
-	sticker_sets?: readonly string[];
-}
-
-/** Trusted local deployment config. Secret values belong in .env, never in this object. */
-export interface TelegramConfigInput {
-	group_peer_id: string | number;
-	router_secret_env?: string;
-	db_path?: string;
-	tinyfish_key_env?: string;
-	/** Pi task model reference for photo/sticker/video vision mode: provider/model:effort. */
-	auxiliary_visual_model?: string;
-	provider?: string;
-	model?: string;
-	reasoning_effort?: ThinkingLevel;
-	/** Cap on the main model's effective context window; also caps compaction_threshold. */
-	context_window?: number;
-	compaction_threshold?: number;
-	compaction_keep_recent?: number;
-	compaction_model?: string;
-	cache_retention?: "none" | "short" | "long";
-	/** Total on-disk bytes of context images that triggers compaction (base64 transport cost). */
-	context_image_budget_bytes?: number;
-	provider_timeout_ms?: number;
-	provider_retries?: number;
-	max_suffix_tokens?: number;
-	max_message_tokens?: number;
-	sampling_cooldown_ms?: number;
-	vision?: TelegramVisionConfigInput;
-	media?: TelegramMediaConfigInput;
-	telemetry_retention_days?: number;
-	raw_update_retention_days?: number;
-	message_event_retention_days?: number;
-	telegram_admins?: readonly TelegramAdminInput[];
-	bots: readonly TelegramBotConfigInput[];
-}
-
-/** Identity helper that supplies editor types without changing runtime configuration bytes. */
-export function defineConfig<const T extends TelegramConfigInput>(config: T): T {
-	return config;
-}
-
-export interface BotToolsConfig {
-	send: boolean;
-	search: boolean;
-	runJs: boolean;
-}
-
-export type TelegramAdmin = number | `@${string}`;
-
-/** Normalize the only two trusted Telegram admin identities accepted by deployment config. */
-export function normalizeTelegramAdmin(value: unknown): TelegramAdmin | null {
-	if (typeof value === "number") {
-		return Number.isSafeInteger(value) && value > 0 ? value : null;
-	}
-	if (typeof value !== "string") return null;
-	const username = value.trim().toLowerCase();
-	return /^@[a-z0-9_]{5,32}$/.test(username) ? (username as `@${string}`) : null;
-}
-
-export interface BotConfig {
-	id: string;
-	name: string; // display name + name-keyword trigger; defaults to id
-	token: string; // resolved from token_env
-	personaPath: string; // resolved absolute path
-	routingP: number; // probability a plain human message triggers this bot (cumulative thresholds)
-	samplingCooldownMs: number; // probability-only cooldown after a completed run (REQ-ROUTE-0001)
-	provider: string;
+export interface JevSettings {
+	apiKey: string;
 	model: string;
-	reasoningEffort: ThinkingLevel;
-	compactionThreshold: number;
-	compactionKeepRecent: number;
-	compactionModel: string;
-	cacheRetention: "none" | "short" | "long";
-	/** Total on-disk bytes of context images that triggers compaction (base64 transport cost). */
-	contextImageBudgetBytes: number;
-	/** Per-attempt provider call timeout in ms (abort + exponential-retry on timeout). */
-	providerTimeoutMs: number;
-	/** Extra Pi attempts for retryable provider failures; shared by chat and compaction. */
-	providerRetries: number;
-	maxSuffixTokens: number;
-	maxMessageTokens: number;
-	tools: BotToolsConfig;
-	/** Telegram sticker set names pinned as this bot's stable identity + format catalog. */
-	stickerSets: string[];
-}
-
-export interface VisionConfig {
-	enabled: boolean;
-	foregroundMediaLimit: number;
-	concurrency: number;
-}
-
-export interface MediaConfig {
-	mode: MediaMode;
-	maxImagesPerTurn: number;
-	downloadConcurrency: number;
-}
-
-export interface RetentionConfig {
-	telemetryDays: number;
-	rawUpdateDays: number;
-	messageEventDays: number;
+	quickReactions: boolean;
+	memoryScoring: boolean;
+	threshold: number;
+	minIntervalMs: number;
+	/** Overrides of the platform default quick-reaction tables (emoji → meaning). */
+	emojis?: Partial<Record<Platform, Record<string, string>>>;
 }
 
 export interface AppConfig {
+	rootDir: string;
 	dataDir: string;
-	dbPath: string;
-	groupPeerId: number;
-	/** `-100<groupPeerId>`: the one chat id ingestion accepts and every send targets. */
-	groupChatId: number;
-	bots: BotConfig[];
-	tinyfishApiKey: string;
-	auxiliaryVisualModel: string;
-	vision: VisionConfig;
-	contextWindow: number;
-	media: MediaConfig;
-	retention: RetentionConfig;
-	routerSecret: string | null; // generated+persisted by daemon if absent
-	telegramAdmins: TelegramAdmin[]; // deny-by-default deterministic control allowlist
+	routingSecret: string;
+	discord?: { guilds: Array<{ guildId: string; channelIds: string[] }> };
+	/** Telegram group chat ids like "-1001234567890". */
+	telegram?: { chatIds: string[] };
+	voice?: { apiKey: string; referenceId: string; model: "s2.1-pro-free" | "s2.1-pro" };
+	/** DEEPSEEK_API_KEY, used by server-side web search. */
+	webSearchApiKey?: string;
+	/** Optional image describer for personas whose main model is text-only. */
+	visionModel?: { provider: string; model: string };
+	jev?: JevSettings;
+	celebrations: CelebrationTarget[];
+	personas: ConfiguredPersona[];
 }
 
+/** All validation problems of one load, listed together. Messages never contain secret values. */
 export class ConfigError extends Error {
-	constructor(public readonly errors: string[]) {
-		super(`invalid configuration:\n${errors.join("\n")}`);
+	constructor(public readonly errors: readonly string[]) {
+		super(`invalid configuration:\n${errors.map((error) => `- ${error}`).join("\n")}`);
 		this.name = "ConfigError";
 	}
 }
 
+const PLATFORMS: readonly Platform[] = ["discord", "telegram"];
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PERSONA_ID = /^[a-z0-9_-]+$/;
+const DISCORD_ID = /^\d{17,20}$/;
+const TELEGRAM_CHAT_ID = /^-?\d+$/;
+const TELEGRAM_USER_ID = /^\d+$/;
+const FISH_REFERENCE_ID = /^[0-9a-f]{32}$/i;
+const DEFAULT_ROUTING_SECRET_ENV = "ROUTING_SECRET";
+const DEFAULT_JEV_MODEL = "jev-latest";
+const DEFAULT_JEV_THRESHOLD = 0.8;
+const DEFAULT_JEV_MIN_INTERVAL_MS = 60_000;
+
+/**
+ * Parse this project's `key: value` secret format (not dotenv `KEY=value`).
+ * Errors name the line only; values are never echoed. Missing file → `{}`.
+ */
 export function parseEnvFile(path: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	if (!existsSync(path)) return out;
-	for (const line of readFileSync(path, "utf8").split("\n")) {
-		const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
-		if (m) out[m[1]] = m[2].trim();
+	if (!existsSync(path)) return {};
+	const env: Record<string, string> = {};
+	for (const [index, raw] of readFileSync(path, "utf8").split(/\r?\n/).entries()) {
+		const line = raw.trim();
+		if (!line || line.startsWith("#")) continue;
+		const colon = line.indexOf(":");
+		if (colon <= 0) throw new ConfigError([`Invalid .env syntax at line ${index + 1}; expected key: value`]);
+		const key = line.slice(0, colon).trim();
+		if (!ENV_NAME.test(key)) throw new ConfigError([`Invalid .env key at line ${index + 1}`]);
+		env[key] = line.slice(colon + 1).trim();
 	}
-	return out;
+	return env;
 }
 
-/**
- * Normalize a group peer id: accepts bare positive ("4402809405"), negative ("-4402809405")
- * and full telegram form ("-1004402809405"); all normalize to the bare positive peer id used
- * internally. The "-100" prefix is only stripped when the remaining digits are long enough to
- * be a real peer id (>= 9 digits), so a genuine chat id starting with "100" is not corrupted.
- * Returns NaN when the value is not a positive integer.
- */
-export function normalizePeerId(raw: string | number): number {
-	const t = String(raw).trim();
-	let s = t.startsWith("-") ? t.slice(1) : t;
-	if (s.startsWith("100") && s.length > 11) s = s.slice(3);
-	const n = Number(s);
-	return Number.isInteger(n) && n > 0 ? n : NaN;
+/** `.env` values overridden by `process.env`. */
+export function loadEnv(rootDir: string): Record<string, string> {
+	const env = parseEnvFile(join(rootDir, ".env"));
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	return env;
 }
 
-export interface RawBotConfig {
-	id?: unknown;
-	name?: unknown;
-	token_env?: unknown;
-	persona_path?: unknown;
-	routing_p?: unknown;
-	sampling_cooldown_ms?: unknown;
-	provider?: unknown;
-	model?: unknown;
-	reasoning_effort?: unknown;
-	compaction_threshold?: unknown;
-	compaction_keep_recent?: unknown;
-	compaction_model?: unknown;
-	cache_retention?: unknown;
-	context_image_budget_bytes?: unknown;
-	provider_timeout_ms?: unknown;
-	provider_retries?: unknown;
-	max_suffix_tokens?: unknown;
-	max_message_tokens?: unknown;
-	tools?: unknown;
-	sticker_sets?: unknown;
-}
-
-export interface RawConfig {
-	group_peer_id?: unknown;
-	router_secret_env?: unknown;
-	db_path?: unknown;
-	tinyfish_key_env?: unknown;
-	auxiliary_visual_model?: unknown;
-	provider?: unknown;
-	model?: unknown;
-	reasoning_effort?: unknown;
-	context_window?: unknown;
-	compaction_threshold?: unknown;
-	compaction_keep_recent?: unknown;
-	compaction_model?: unknown;
-	cache_retention?: unknown;
-	context_image_budget_bytes?: unknown;
-	provider_timeout_ms?: unknown;
-	provider_retries?: unknown;
-	max_suffix_tokens?: unknown;
-	max_message_tokens?: unknown;
-	sampling_cooldown_ms?: unknown;
-	vision?: unknown;
-	media?: unknown;
-	telemetry_retention_days?: unknown;
-	raw_update_retention_days?: unknown;
-	message_event_retention_days?: unknown;
-	telegram_admins?: unknown;
-	bots?: unknown;
-}
-
-/** Telegram supergroup chat id (`-100<peer>`), the only form ingestion accepts and sends target. */
-export function groupChatIdFor(groupPeerId: number): number {
-	return Number(`-100${groupPeerId}`);
-}
-
-/**
- * One range table for every numeric knob that exists at both the deployment level and the
- * per-bot level, so a per-bot override can never bypass the deployment bounds.
- */
-const NUMERIC_RANGES = {
-	compaction_threshold: [1, Number.MAX_SAFE_INTEGER],
-	compaction_keep_recent: [1, Number.MAX_SAFE_INTEGER],
-	max_suffix_tokens: [512, Number.MAX_SAFE_INTEGER],
-	max_message_tokens: [128, Number.MAX_SAFE_INTEGER],
-	sampling_cooldown_ms: [0, Number.MAX_SAFE_INTEGER],
-	provider_timeout_ms: [1_000, 3_600_000],
-	provider_retries: [0, 5],
-	context_image_budget_bytes: [100_000, 100_000_000],
-	context_window: [MIN_COMPACTION_RESERVE * 2, 10_000_000],
-	telemetry_retention_days: [1, 3650],
-	raw_update_retention_days: [1, 3650],
-	message_event_retention_days: [1, 3650],
-} as const satisfies Record<string, readonly [number, number]>;
-type NumericKey = keyof typeof NUMERIC_RANGES;
-const BOT_NUMERIC_KEYS = [
-	"compaction_threshold",
-	"compaction_keep_recent",
-	"max_suffix_tokens",
-	"max_message_tokens",
-	"sampling_cooldown_ms",
-	"provider_timeout_ms",
-	"provider_retries",
-	"context_image_budget_bytes",
-] as const satisfies readonly NumericKey[];
-
-function checkNumericRange(errors: string[], key: NumericKey, value: unknown, at?: string): void {
-	if (value === undefined) return;
-	const [min, max] = NUMERIC_RANGES[key];
-	if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
-		errors.push(
-			`[config] ${at ? `${at}.` : ""}${key}: expected a number in [${min}, ${max}], got ${JSON.stringify(value)}`,
-		);
+export function loadConfig(rootDir = process.cwd()): AppConfig {
+	const configPath = join(rootDir, CONFIG_FILE);
+	if (!existsSync(configPath)) {
+		const legacy = existsSync(join(rootDir, "discord.config.json"))
+			? "; run `bun scripts/migrate-config.ts` to convert discord.config.json"
+			: "; copy jingmei.config.example.json";
+		throw new ConfigError([`Missing ${configPath}${legacy}`]);
 	}
-}
-
-const TYPESCRIPT_CONFIG = "telegram.config.ts";
-const configJiti = createJiti(import.meta.url, { interopDefault: false, moduleCache: false });
-
-export function defaultConfigPath(rootDir: string): string {
-	return join(rootDir, TYPESCRIPT_CONFIG);
-}
-
-function loadConfigSource(path: string): unknown {
+	let input: unknown;
 	try {
-		const loaded = configJiti(path) as unknown;
-		return loaded && typeof loaded === "object" && "default" in loaded
-			? (loaded as { default: unknown }).default
-			: loaded;
+		input = JSON.parse(readFileSync(configPath, "utf8"));
 	} catch (error) {
-		throw new ConfigError([
-			`[config] ${path}: unable to load trusted TypeScript: ${error instanceof Error ? error.message : String(error)}`,
-		]);
+		throw new ConfigError([`${CONFIG_FILE} is not valid JSON: ${(error as Error).message}`]);
 	}
+	return validateConfig(input, rootDir, loadEnv(rootDir));
 }
 
-/** Load + validate the trusted TypeScript config. */
-export function loadBotConfig(rootDir: string, env: Record<string, string>, configPath?: string): RawConfig {
+type Json = Record<string, unknown>;
+
+function isObject(value: unknown): value is Json {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function resolvePath(rootDir: string, path: string): string {
+	if (isAbsolute(path)) return resolve(path);
+	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+	return resolve(rootDir, path);
+}
+
+function parseSpace(value: unknown): { platform: Platform; rawId: string } | null {
+	if (typeof value !== "string") return null;
+	const colon = value.indexOf(":");
+	if (colon <= 0) return null;
+	const platform = value.slice(0, colon);
+	if (platform !== "discord" && platform !== "telegram") return null;
+	return { platform, rawId: value.slice(colon + 1) };
+}
+
+/** Validate parsed JSON against resolved env. Collects every problem, then throws one ConfigError. */
+export function validateConfig(input: unknown, rootDir: string, env: Readonly<Record<string, string>>): AppConfig {
 	const errors: string[] = [];
-	const path = configPath ?? defaultConfigPath(rootDir);
-	if (!existsSync(path)) {
-		throw new ConfigError([
-			`[config] missing configuration: ${path}`,
-			`[config] copy telegram.config.example.ts to ${TYPESCRIPT_CONFIG}, or run /tg config`,
-		]);
-	}
-	const source = loadConfigSource(path);
-	if (source == null || typeof source !== "object" || Array.isArray(source)) {
-		throw new ConfigError([`[config] ${path}: default export must be a configuration object`]);
-	}
-	const raw = source as RawConfig;
-	// bot-level validation needs the env for token_env presence
-	if (!Array.isArray(raw.bots) || raw.bots.length === 0) {
-		errors.push(`[config] bots: must be a non-empty array`);
-	}
-	const botList = (Array.isArray(raw.bots) ? raw.bots : []) as RawBotConfig[];
-	for (const key of ["provider", "model"] as const) {
-		const value = raw[key];
-		if (value !== undefined && (typeof value !== "string" || value.trim() === "")) {
-			errors.push(`[config] ${key}: expected a non-empty string, got ${JSON.stringify(value)}`);
+	if (!isObject(input)) throw new ConfigError([`${CONFIG_FILE} must be a JSON object`]);
+	if ("guilds" in input)
+		errors.push("top-level guilds is the old discord.config.json shape; run `bun scripts/migrate-config.ts`");
+
+	const secret = (field: string, envName: unknown): string | undefined => {
+		if (typeof envName !== "string" || !ENV_NAME.test(envName)) {
+			errors.push(`${field} must name an environment variable`);
+			return undefined;
 		}
-	}
-	if (
-		raw.compaction_model !== undefined &&
-		(typeof raw.compaction_model !== "string" || !canonicalPiModelReference(raw.compaction_model))
-	) {
-		errors.push(
-			`[config] compaction_model: expected provider/model:effort, got ${JSON.stringify(raw.compaction_model)}`,
-		);
-	}
-	if (
-		raw.auxiliary_visual_model !== undefined &&
-		(typeof raw.auxiliary_visual_model !== "string" || !canonicalPiModelReference(raw.auxiliary_visual_model))
-	) {
-		errors.push(
-			`[config] auxiliary_visual_model: expected provider/model:effort, got ${JSON.stringify(raw.auxiliary_visual_model)}`,
-		);
-	}
-	if (raw.cache_retention !== undefined && !["none", "short", "long"].includes(String(raw.cache_retention))) {
-		errors.push(`[config] cache_retention: expected none, short, or long, got ${JSON.stringify(raw.cache_retention)}`);
-	}
-	if (raw.reasoning_effort !== undefined && !isPiThinkingLevel(raw.reasoning_effort)) {
-		errors.push(`[config] reasoning_effort: expected a Pi thinking level, got ${JSON.stringify(raw.reasoning_effort)}`);
-	}
-	const seen = new Map<string, number>();
-	for (let i = 0; i < botList.length; i++) {
-		const b = botList[i] ?? {};
-		const at = `bots[${i}]`;
-		if (b == null || typeof b !== "object") {
-			errors.push(`[config] ${at}: must be an object`);
-			continue;
+		const value = env[envName];
+		if (!value) {
+			errors.push(`Missing environment variable ${envName} (${field})`);
+			return undefined;
 		}
-		const id = b.id;
-		// REQ-CONF-0001: ids are unique strings; the charset excludes special characters. Note:
-		// uppercase is allowed so the historical "A"/"B" ids keep working (migration is
-		// id-agnostic; example config uses A/B).
-		if (typeof id !== "string" || !/^[A-Za-z0-9_-]+$/.test(id)) {
-			errors.push(`[config] ${at}.id: expected [A-Za-z0-9_-]+ string, got ${JSON.stringify(id)}`);
+		return value;
+	};
+
+	const dataDir = nonEmptyString(input.dataDir) ? resolvePath(rootDir, input.dataDir) : resolve(rootDir, "data");
+	if (input.dataDir !== undefined && !nonEmptyString(input.dataDir)) errors.push("dataDir must be a nonempty string");
+	const routingSecret = secret("routingSecretEnv", input.routingSecretEnv ?? DEFAULT_ROUTING_SECRET_ENV) ?? "";
+
+	let visionModel: AppConfig["visionModel"];
+	if (input.visionModel !== undefined) {
+		const ref = typeof input.visionModel === "string" ? input.visionModel.trim() : "";
+		const slash = ref.indexOf("/");
+		const provider = ref.slice(0, slash).trim();
+		const model = ref.slice(slash + 1).trim();
+		if (slash <= 0 || !provider || !model) errors.push('visionModel must be a "provider/model" string');
+		else visionModel = { provider, model };
+	}
+
+	// Platform sections and the configured space set.
+	const spaces = new Set<SpaceId>();
+	let discord: AppConfig["discord"];
+	if (input.discord !== undefined) {
+		if (!isObject(input.discord) || !Array.isArray(input.discord.guilds) || input.discord.guilds.length === 0) {
+			errors.push("discord.guilds must contain at least one guild");
 		} else {
-			if (seen.has(id)) {
-				errors.push(`[config] ${at}.id: duplicate bot id "${id}" (also bots[${seen.get(id)}])`);
+			const guilds: Array<{ guildId: string; channelIds: string[] }> = [];
+			for (const [index, entry] of input.discord.guilds.entries()) {
+				const field = `discord.guilds[${index}]`;
+				if (!isObject(entry)) {
+					errors.push(`${field} must be an object`);
+					continue;
+				}
+				const guildId = entry.guildId;
+				if (typeof guildId !== "string" || !DISCORD_ID.test(guildId)) {
+					errors.push(`${field}.guildId must be a 17-20 digit Discord id string`);
+					continue;
+				}
+				if (spaces.has(`discord:${guildId}`)) errors.push(`Duplicate Discord guild id: ${guildId}`);
+				spaces.add(`discord:${guildId}`);
+				const channelIds = entry.channelIds;
+				if (
+					!Array.isArray(channelIds) ||
+					channelIds.length === 0 ||
+					channelIds.some((id) => typeof id !== "string" || !DISCORD_ID.test(id))
+				) {
+					errors.push(`${field}.channelIds must be a nonempty array of 17-20 digit Discord id strings`);
+					continue;
+				}
+				guilds.push({ guildId, channelIds: [...new Set(channelIds as string[])] });
 			}
-			seen.set(id, Number(i));
+			discord = { guilds };
 		}
-		const tokenEnv = b.token_env;
-		if (typeof tokenEnv !== "string" || !tokenEnv) {
-			errors.push(`[config] ${at}.token_env: required (env key name holding the bot token)`);
-		} else if (!env[tokenEnv]) {
-			errors.push(`[config] ${at}.token_env: env key "${tokenEnv}" not found in .env`);
-		}
-		const personaPath = b.persona_path;
-		if (typeof personaPath !== "string" || !personaPath) {
-			errors.push(`[config] ${at}.persona_path: required`);
+	}
+	let telegram: AppConfig["telegram"];
+	if (input.telegram !== undefined) {
+		const chatIds = isObject(input.telegram) ? input.telegram.chatIds : undefined;
+		if (!Array.isArray(chatIds) || chatIds.length === 0) {
+			errors.push("telegram.chatIds must contain at least one chat id");
 		} else {
-			const resolved = resolvePath(rootDir, personaPath);
-			if (!existsSync(resolved) || !statSync(resolved).isFile()) {
-				errors.push(`[config] ${at}.persona_path: file not readable: ${resolved}`);
+			const valid: string[] = [];
+			for (const [index, id] of chatIds.entries()) {
+				if (typeof id !== "string" || !TELEGRAM_CHAT_ID.test(id)) {
+					errors.push(`telegram.chatIds[${index}] must be a Telegram chat id string like "-1001234567890"`);
+					continue;
+				}
+				if (spaces.has(`telegram:${id}`)) errors.push(`Duplicate Telegram chat id: ${id}`);
+				else valid.push(id);
+				spaces.add(`telegram:${id}`);
 			}
+			telegram = { chatIds: valid };
 		}
-		const p = b.routing_p;
-		if (p !== undefined && (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1)) {
-			errors.push(`[config] ${at}.routing_p: expected number in [0, 1], got ${JSON.stringify(p)}`);
-		}
-		for (const key of BOT_NUMERIC_KEYS) checkNumericRange(errors, key, b[key], at);
-		for (const key of ["provider", "model"] as const) {
-			const value = b[key];
-			if (value !== undefined && (typeof value !== "string" || value.trim() === "")) {
-				errors.push(`[config] ${at}.${key}: expected a non-empty string, got ${JSON.stringify(value)}`);
+	}
+	const sectionPresent: Record<Platform, boolean> = {
+		discord: input.discord !== undefined,
+		telegram: input.telegram !== undefined,
+	};
+
+	// Personas.
+	const personas: ConfiguredPersona[] = [];
+	if (!Array.isArray(input.personas) || input.personas.length === 0) {
+		errors.push("personas must contain at least one persona");
+	} else {
+		const seenIds = new Set<string>();
+		for (const [index, entry] of input.personas.entries()) {
+			const field = `personas[${index}]`;
+			if (!isObject(entry)) {
+				errors.push(`${field} must be an object`);
+				continue;
 			}
+			const before = errors.length;
+			if ("token_env" in entry || "guildIds" in entry || "adminUserIds" in entry)
+				errors.push(
+					`${field} uses old discord.config.json fields (token_env/guildIds/adminUserIds); run \`bun scripts/migrate-config.ts\``,
+				);
+			const id = entry.id;
+			if (typeof id !== "string" || !PERSONA_ID.test(id)) errors.push(`${field}.id must match [a-z0-9_-]+`);
+			else if (seenIds.has(id)) errors.push(`Duplicate persona id: ${id}`);
+			else seenIds.add(id);
+			for (const key of ["name", "personaPath", "provider", "model"] as const)
+				if (!nonEmptyString(entry[key])) errors.push(`${field}.${key} is required`);
+			let personaPath = "";
+			if (nonEmptyString(entry.personaPath)) {
+				personaPath = resolvePath(rootDir, entry.personaPath);
+				try {
+					accessSync(personaPath, constants.R_OK);
+				} catch {
+					errors.push(`${field}.personaPath is not readable: ${personaPath}`);
+				}
+			}
+			const reasoningEffort = entry.reasoningEffort ?? "off";
+			if (!THINKING_LEVELS.includes(reasoningEffort as ThinkingLevel))
+				errors.push(`${field}.reasoningEffort must be one of ${THINKING_LEVELS.join(", ")}`);
+			const routingP = entry.routingP;
+			if (typeof routingP !== "number" || !Number.isFinite(routingP) || routingP < 0 || routingP > 1)
+				errors.push(`${field}.routingP must be a number between 0 and 1`);
+			for (const key of ["sendReactionImages", "voiceEnabled"] as const)
+				if (entry[key] !== undefined && typeof entry[key] !== "boolean")
+					errors.push(`${field}.${key} must be a boolean`);
+			let aliases: string[] = [];
+			if (entry.aliases !== undefined) {
+				if (
+					!Array.isArray(entry.aliases) ||
+					entry.aliases.some((alias) => !nonEmptyString(alias) || alias.trim().length > 64)
+				)
+					errors.push(`${field}.aliases must be nonempty strings up to 64 characters`);
+				else aliases = [...new Set((entry.aliases as string[]).map((alias) => alias.trim()))];
+			}
+			const tokens: Partial<Record<Platform, string>> = {};
+			const adminUserIds: string[] = [];
+			for (const platform of PLATFORMS) {
+				const account = entry[platform];
+				if (account === undefined) continue;
+				const accountField = `${field}.${platform}`;
+				if (!isObject(account)) {
+					errors.push(`${accountField} must be an object`);
+					continue;
+				}
+				if (!sectionPresent[platform])
+					errors.push(`${accountField} is set but the top-level ${platform} section is missing`);
+				const token = secret(`${accountField}.tokenEnv`, account.tokenEnv);
+				if (token) tokens[platform] = token;
+				if (account.adminUserIds !== undefined) {
+					const pattern = platform === "discord" ? DISCORD_ID : TELEGRAM_USER_ID;
+					if (
+						!Array.isArray(account.adminUserIds) ||
+						account.adminUserIds.some((userId) => typeof userId !== "string" || !pattern.test(userId))
+					)
+						errors.push(
+							`${accountField}.adminUserIds must be ${platform === "discord" ? "17-20 digit Discord" : "numeric Telegram"} user id strings`,
+						);
+					else for (const userId of account.adminUserIds as string[]) adminUserIds.push(`${platform}:${userId}`);
+				}
+			}
+			const platforms = PLATFORMS.filter((platform) => entry[platform] !== undefined);
+			if (platforms.length === 0) errors.push(`${field} must have a discord or telegram account`);
+			let personaSpaces: SpaceId[] | undefined;
+			if (entry.spaces !== undefined) {
+				if (!Array.isArray(entry.spaces) || entry.spaces.length === 0) {
+					errors.push(`${field}.spaces must be a nonempty array when set`);
+				} else {
+					personaSpaces = [];
+					for (const space of entry.spaces) {
+						const parsed = parseSpace(space);
+						if (!parsed || !spaces.has(space as SpaceId)) {
+							errors.push(`${field}.spaces entry ${JSON.stringify(space)} is not a configured space`);
+							continue;
+						}
+						if (!platforms.includes(parsed.platform))
+							errors.push(`${field}.spaces entry ${space} needs a ${parsed.platform} account on this persona`);
+						personaSpaces.push(space as SpaceId);
+					}
+					personaSpaces = [...new Set(personaSpaces)];
+				}
+			}
+			if (errors.length !== before) continue;
+			personas.push({
+				id: id as string,
+				name: (entry.name as string).trim(),
+				personaPath,
+				provider: (entry.provider as string).trim(),
+				model: (entry.model as string).trim(),
+				reasoningEffort: reasoningEffort as ThinkingLevel,
+				routingP: routingP as number,
+				aliases,
+				...(personaSpaces ? { spaces: personaSpaces } : {}),
+				adminUserIds: [...new Set(adminUserIds)],
+				sendReactionImages: entry.sendReactionImages !== false,
+				voiceEnabled: entry.voiceEnabled !== false,
+				tokens,
+			});
 		}
-		if (b.reasoning_effort !== undefined && !isPiThinkingLevel(b.reasoning_effort)) {
-			errors.push(
-				`[config] ${at}.reasoning_effort: expected a Pi thinking level, got ${JSON.stringify(b.reasoning_effort)}`,
-			);
-		}
+	}
+	for (const platform of PLATFORMS)
 		if (
-			b.compaction_model !== undefined &&
-			(typeof b.compaction_model !== "string" || !canonicalPiModelReference(b.compaction_model))
-		) {
-			errors.push(
-				`[config] ${at}.compaction_model: expected provider/model:effort, got ${JSON.stringify(b.compaction_model)}`,
-			);
+			sectionPresent[platform] &&
+			Array.isArray(input.personas) &&
+			!input.personas.some((entry) => isObject(entry) && entry[platform] !== undefined)
+		)
+			errors.push(`${platform} section is configured but no persona has a ${platform} account`);
+
+	// Cumulative routing probability per space, counting personas that can speak there.
+	for (const space of spaces) {
+		const platform = parseSpace(space)?.platform as Platform;
+		const total = personas
+			.filter((persona) => persona.tokens[platform] && (!persona.spaces || persona.spaces.includes(space)))
+			.reduce((sum, persona) => sum + persona.routingP, 0);
+		if (total > 1 + 1e-9) errors.push(`routingP of personas in ${space} sums to ${total}; must not exceed 1`);
+	}
+
+	// Celebrations.
+	const celebrations: CelebrationTarget[] = [];
+	if (input.celebrations !== undefined) {
+		if (!Array.isArray(input.celebrations)) errors.push("celebrations must be an array");
+		else {
+			const seenTargets = new Set<string>();
+			for (const [index, entry] of input.celebrations.entries()) {
+				const field = `celebrations[${index}]`;
+				if (!isObject(entry)) {
+					errors.push(`${field} must be an object`);
+					continue;
+				}
+				const before = errors.length;
+				const space = parseSpace(entry.space);
+				let channelId = typeof entry.channelId === "string" ? entry.channelId : "";
+				if (!space || !spaces.has(entry.space as SpaceId)) {
+					errors.push(`${field}.space must be a configured "discord:<guild>" or "telegram:<chat>" space`);
+				} else if (space.platform === "discord") {
+					const guild = discord?.guilds.find((candidate) => candidate.guildId === space.rawId);
+					if (!guild?.channelIds.includes(channelId))
+						errors.push(`${field}.channelId must be an allowed channel of ${entry.space}`);
+				} else {
+					if (entry.channelId === undefined) channelId = space.rawId;
+					else if (channelId !== space.rawId) errors.push(`${field}.channelId must equal the Telegram chat id`);
+				}
+				const persona = personas.find((candidate) => candidate.id === entry.personaId);
+				if (!persona) errors.push(`${field}.personaId must name a configured persona`);
+				else if (
+					space &&
+					(!persona.tokens[space.platform] || (persona.spaces && !persona.spaces.includes(entry.space as SpaceId)))
+				)
+					errors.push(`${field}.personaId ${persona.id} cannot speak in ${entry.space}`);
+				let timeZoneValid = typeof entry.timeZone === "string";
+				if (timeZoneValid) {
+					try {
+						new Intl.DateTimeFormat("en", { timeZone: entry.timeZone as string });
+					} catch {
+						timeZoneValid = false;
+					}
+				}
+				if (!timeZoneValid) errors.push(`${field}.timeZone must be an IANA time zone`);
+				if (entry.calendar !== "china" && entry.calendar !== "australia" && entry.calendar !== "both")
+					errors.push(`${field}.calendar must be china, australia, or both`);
+				if (errors.length !== before) continue;
+				const key = `${entry.space}:${channelId}`;
+				if (seenTargets.has(key)) {
+					errors.push(`Duplicate celebration target: ${key}`);
+					continue;
+				}
+				seenTargets.add(key);
+				celebrations.push({
+					spaceId: entry.space as SpaceId,
+					channelId,
+					personaId: entry.personaId as string,
+					timeZone: entry.timeZone as string,
+					calendar: entry.calendar as CelebrationTarget["calendar"],
+				});
+			}
 		}
-		if (b.cache_retention !== undefined && !["none", "short", "long"].includes(String(b.cache_retention))) {
-			errors.push(
-				`[config] ${at}.cache_retention: expected none, short, or long, got ${JSON.stringify(b.cache_retention)}`,
-			);
+	}
+
+	// Voice.
+	let voice: AppConfig["voice"];
+	if (input.voice !== undefined) {
+		if (!isObject(input.voice)) errors.push("voice must be an object");
+		else {
+			const apiKey = secret("voice.apiKeyEnv", input.voice.apiKeyEnv);
+			const referenceId = input.voice.referenceId;
+			if (typeof referenceId !== "string" || !FISH_REFERENCE_ID.test(referenceId))
+				errors.push("voice.referenceId must be a 32-character Fish Audio voice id");
+			const model = input.voice.model ?? "s2.1-pro-free";
+			if (model !== "s2.1-pro-free" && model !== "s2.1-pro")
+				errors.push("voice.model must be s2.1-pro-free or s2.1-pro");
+			if (apiKey && typeof referenceId === "string")
+				voice = { apiKey, referenceId, model: model as "s2.1-pro-free" | "s2.1-pro" };
 		}
-		if (b.tools !== undefined) {
-			const t = b.tools;
-			if (t == null || typeof t !== "object") {
-				errors.push(`[config] ${at}.tools: expected object {send?, search?, run_js?}`);
-			} else {
-				for (const key of ["send", "search", "run_js"] as const) {
-					const v = (t as Record<string, unknown>)[key];
-					if (v !== undefined && typeof v !== "boolean") {
-						errors.push(`[config] ${at}.tools.${key}: expected boolean, got ${JSON.stringify(v)}`);
+	}
+
+	// Jev decision model.
+	let jev: JevSettings | undefined;
+	if (input.jev !== undefined) {
+		if (!isObject(input.jev)) errors.push("jev must be an object");
+		else {
+			const value = input.jev;
+			const apiKey = secret("jev.apiKeyEnv", value.apiKeyEnv);
+			const model = value.model ?? DEFAULT_JEV_MODEL;
+			if (!nonEmptyString(model)) errors.push("jev.model must be a nonempty string");
+			for (const key of ["quickReactions", "memoryScoring"] as const)
+				if (value[key] !== undefined && typeof value[key] !== "boolean") errors.push(`jev.${key} must be a boolean`);
+			const threshold = value.threshold ?? DEFAULT_JEV_THRESHOLD;
+			if (typeof threshold !== "number" || !(threshold > 0 && threshold <= 1))
+				errors.push("jev.threshold must be in (0, 1]");
+			const minIntervalMs = value.minIntervalMs ?? DEFAULT_JEV_MIN_INTERVAL_MS;
+			if (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)
+				errors.push("jev.minIntervalMs must be a number >= 0");
+			let emojis: JevSettings["emojis"];
+			if (value.emojis !== undefined) {
+				if (!isObject(value.emojis)) errors.push("jev.emojis must be an object keyed by platform");
+				else {
+					emojis = {};
+					for (const [platform, table] of Object.entries(value.emojis)) {
+						if (platform !== "discord" && platform !== "telegram") {
+							errors.push(`jev.emojis.${platform} is not a platform`);
+							continue;
+						}
+						if (
+							!isObject(table) ||
+							Object.keys(table).length === 0 ||
+							Object.entries(table).some(([emoji, meaning]) => !emoji.trim() || !nonEmptyString(meaning))
+						) {
+							errors.push(`jev.emojis.${platform} must be a nonempty emoji → meaning table`);
+							continue;
+						}
+						if ("none" in table) errors.push(`jev.emojis.${platform} must not use the reserved key "none"`);
+						emojis[platform] = { ...(table as Record<string, string>) };
 					}
 				}
 			}
-		}
-		if (b.sticker_sets !== undefined) {
-			if (!Array.isArray(b.sticker_sets) || b.sticker_sets.some((s) => typeof s !== "string" || !s)) {
-				errors.push(
-					`[config] ${at}.sticker_sets: expected array of Telegram sticker set names, got ${JSON.stringify(b.sticker_sets)}`,
-				);
-			}
-		}
-	}
-	// sum of routing probabilities must be <= 1
-	let sum = 0;
-	for (const b of botList) {
-		const p = b?.routing_p;
-		if (typeof p === "number" && Number.isFinite(p)) sum += p;
-	}
-	if (sum > 1) {
-		errors.push(`[config] bots routing_p: probabilities must sum to <= 1, got ${sum.toFixed(3)}`);
-	}
-	for (const key of Object.keys(NUMERIC_RANGES) as NumericKey[]) checkNumericRange(errors, key, raw[key]);
-	if (raw.media !== undefined) {
-		if (raw.media == null || typeof raw.media !== "object" || Array.isArray(raw.media)) {
-			errors.push(`[config] media: expected object`);
-		} else {
-			const media = raw.media as Record<string, unknown>;
-			if (media.mode !== undefined && media.mode !== "vision" && media.mode !== "context") {
-				errors.push(`[config] media.mode: expected "vision" or "context", got ${JSON.stringify(media.mode)}`);
-			}
-			const limits: Record<string, [number, number]> = {
-				max_images_per_turn: [0, 16],
-				download_concurrency: [1, 16],
-			};
-			for (const [key, [min, max]] of Object.entries(limits)) {
-				const value = media[key];
-				if (
-					value !== undefined &&
-					(!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max)
-				) {
-					errors.push(`[config] media.${key}: expected integer in [${min}, ${max}], got ${JSON.stringify(value)}`);
-				}
-			}
+			if (apiKey)
+				jev = {
+					apiKey,
+					model: String(model).trim(),
+					quickReactions: value.quickReactions !== false,
+					memoryScoring: value.memoryScoring !== false,
+					threshold: threshold as number,
+					minIntervalMs: minIntervalMs as number,
+					...(emojis ? { emojis } : {}),
+				};
 		}
 	}
-	if (raw.vision !== undefined) {
-		if (raw.vision == null || typeof raw.vision !== "object" || Array.isArray(raw.vision)) {
-			errors.push(`[config] vision: expected object`);
-		} else {
-			const vision = raw.vision as Record<string, unknown>;
-			if (vision.enabled !== undefined && typeof vision.enabled !== "boolean") {
-				errors.push(`[config] vision.enabled: expected boolean, got ${JSON.stringify(vision.enabled)}`);
-			}
-			for (const key of ["foreground_media_limit", "concurrency"] as const) {
-				const value = vision[key];
-				const min = key === "concurrency" ? 1 : 0;
-				if (
-					value !== undefined &&
-					(!Number.isSafeInteger(value) || (value as number) < min || (value as number) > 16)
-				) {
-					errors.push(`[config] vision.${key}: expected integer in [${min}, 16], got ${JSON.stringify(value)}`);
-				}
-			}
-		}
-	}
-	if (
-		raw.context_window !== undefined &&
-		(!Number.isSafeInteger(raw.context_window) ||
-			(raw.context_window as number) < MIN_COMPACTION_RESERVE * 2 ||
-			(raw.context_window as number) > 10_000_000)
-	) {
-		errors.push(
-			`[config] context_window: expected integer in [${MIN_COMPACTION_RESERVE * 2}, 10000000], got ${JSON.stringify(raw.context_window)}`,
-		);
-	}
-	if (
-		raw.sampling_cooldown_ms !== undefined &&
-		(typeof raw.sampling_cooldown_ms !== "number" ||
-			!Number.isFinite(raw.sampling_cooldown_ms) ||
-			raw.sampling_cooldown_ms < 0)
-	) {
-		errors.push(
-			`[config] sampling_cooldown_ms: expected finite number >= 0, got ${JSON.stringify(raw.sampling_cooldown_ms)}`,
-		);
-	}
-	for (const key of ["provider_timeout_ms", "provider_retries", "context_image_budget_bytes"] as const) {
-		const v = raw[key];
-		if (v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v < 0)) {
-			errors.push(`[config] ${key}: expected finite number >= 0, got ${JSON.stringify(v)}`);
-		}
-	}
-	if (raw.telegram_admins !== undefined) {
-		if (!Array.isArray(raw.telegram_admins)) {
-			errors.push(`[config] telegram_admins: expected an array of positive user ids or @usernames`);
-		} else {
-			const seenAdmins = new Set<TelegramAdmin>();
-			for (let index = 0; index < raw.telegram_admins.length; index++) {
-				const admin = normalizeTelegramAdmin(raw.telegram_admins[index]);
-				if (admin == null) {
-					errors.push(`[config] telegram_admins[${index}]: expected a positive integer user id or @username`);
-					continue;
-				}
-				if (seenAdmins.has(admin)) errors.push(`[config] telegram_admins[${index}]: duplicate identity ${admin}`);
-				seenAdmins.add(admin);
-			}
-		}
-	}
-	if (raw.group_peer_id !== undefined) {
-		const n = normalizePeerId(String(raw.group_peer_id));
-		if (!Number.isFinite(n)) {
-			errors.push(
-				`[config] group_peer_id: expected a bare positive peer id (e.g. 4402809405, or -1004402809405), got ${JSON.stringify(raw.group_peer_id)}`,
-			);
-		}
-	}
+
 	if (errors.length > 0) throw new ConfigError(errors);
-	return raw;
-}
-
-/** Resolve a persona path: absolute / ~ / relative to project root. */
-export function resolvePath(rootDir: string, p: string): string {
-	if (isAbsolute(p)) return resolve(p);
-	if (p.startsWith("~/")) return join(homedir(), p.slice(2));
-	return resolve(rootDir, p);
-}
-
-export interface LoadConfigOptions {
-	/** Explicit trusted local .ts source, primarily for validating an editor draft. */
-	configPath?: string;
-	/** In-memory values used by onboarding validation; values override file/process env. */
-	env?: Record<string, string>;
-	/** Deterministic injection for tests/embedders; production reads merged Pi settings. */
-	piModelDefaults?: PiModelDefaults;
-}
-
-export interface DebugDeploymentIdentity {
-	dataDir: string;
-	dbPath: string;
-	groupPeerId: number;
-	groupChatId: number;
-	visionEnabled: boolean;
-	auxiliaryVisualModel: string;
-	contextWindow: number;
-	media: MediaConfig;
-	botIds: string[];
-	bots: Array<{
-		id: string;
-		name: string;
-		personaPath: string;
-		provider: string | null;
-		model: string | null;
-		reasoningEffort: string | null;
-		compactionModel: string;
-		cacheRetention: string;
-		tools: BotToolsConfig;
-		stickerSets: string[];
-	}>;
-}
-
-/**
- * Config-file-only bot fields shared by the production loader and the offline debug identity.
- * Never consults Pi defaults or secrets: provider/model/reasoning stay null when the file omits them.
- */
-function botOverrides(rootDir: string, raw: RawConfig, bot: RawBotConfig) {
-	const id = typeof bot.id === "string" ? bot.id.trim() : "";
-	const tools = (bot.tools ?? {}) as Record<string, unknown>;
-	const retention = (value: unknown): "none" | "short" | "long" | null =>
-		value === "none" || value === "short" || value === "long" ? value : null;
+	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	return {
-		id,
-		name: typeof bot.name === "string" && bot.name ? bot.name : id,
-		personaPath: typeof bot.persona_path === "string" ? resolvePath(rootDir, bot.persona_path) : "",
-		provider:
-			typeof bot.provider === "string" ? bot.provider.trim() : typeof raw.provider === "string" ? raw.provider : null,
-		model: typeof bot.model === "string" ? bot.model.trim() : typeof raw.model === "string" ? raw.model : null,
-		reasoningEffort: isPiThinkingLevel(bot.reasoning_effort)
-			? bot.reasoning_effort
-			: isPiThinkingLevel(raw.reasoning_effort)
-				? raw.reasoning_effort
-				: null,
-		compactionModel:
-			typeof bot.compaction_model === "string"
-				? canonicalPiModelReference(bot.compaction_model)!
-				: typeof raw.compaction_model === "string"
-					? canonicalPiModelReference(raw.compaction_model)!
-					: DEFAULT_COMPACTION_MODEL,
-		cacheRetention: retention(bot.cache_retention) ?? retention(raw.cache_retention) ?? "short",
-		tools: {
-			send: tools.send !== false,
-			search: tools.search === true,
-			runJs: tools.run_js === true,
-		},
-		stickerSets: Array.isArray(bot.sticker_sets)
-			? bot.sticker_sets.filter((s): s is string => typeof s === "string")
-			: [],
-	};
-}
-
-/** Read only non-secret deployment identity for offline diagnostics; never resolves Pi auth/model defaults or token env values. */
-export function loadDebugDeploymentIdentity(rootDir: string): DebugDeploymentIdentity {
-	const env: Record<string, string> = { ...parseEnvFile(join(rootDir, ".env")) };
-	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
-	const raw = loadBotConfig(rootDir, env);
-	const groupPeerId = normalizePeerId(String(raw.group_peer_id ?? ""));
-	const rawBots = Array.isArray(raw.bots) ? (raw.bots as RawBotConfig[]) : [];
-	const bots = rawBots.map((bot) => botOverrides(rootDir, raw, bot));
-	const botIds = bots.map((bot) => bot.id);
-	if (!Number.isFinite(groupPeerId) || botIds.length === 0 || botIds.some((id) => !/^[A-Za-z0-9_-]+$/.test(id))) {
-		throw new ConfigError(["[debug] deployment identity is invalid"]);
-	}
-	const dataDir = join(rootDir, "data");
-	const rawMedia = raw.media as
-		| { mode?: unknown; max_images_per_turn?: unknown; download_concurrency?: unknown }
-		| undefined;
-	const rawVision = raw.vision as { enabled?: unknown } | undefined;
-	return {
+		rootDir,
 		dataDir,
-		dbPath: typeof raw.db_path === "string" ? resolvePath(rootDir, raw.db_path) : join(dataDir, "agent.db"),
-		groupPeerId,
-		groupChatId: groupChatIdFor(groupPeerId),
-		visionEnabled: rawVision?.enabled === true,
-		auxiliaryVisualModel:
-			typeof raw.auxiliary_visual_model === "string"
-				? canonicalPiModelReference(raw.auxiliary_visual_model)!
-				: DEFAULT_AUXILIARY_VISUAL_MODEL,
-		contextWindow: typeof raw.context_window === "number" ? raw.context_window : DEFAULT_CONTEXT_WINDOW,
-		media: {
-			mode: rawMedia?.mode === "context" ? "context" : "vision",
-			maxImagesPerTurn:
-				typeof rawMedia?.max_images_per_turn === "number" ? rawMedia.max_images_per_turn : DEFAULT_MAX_IMAGES_PER_TURN,
-			downloadConcurrency:
-				typeof rawMedia?.download_concurrency === "number"
-					? rawMedia.download_concurrency
-					: DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY,
-		},
-		botIds: [...new Set(botIds)],
-		bots,
+		routingSecret,
+		...(discord ? { discord } : {}),
+		...(telegram ? { telegram } : {}),
+		...(voice ? { voice } : {}),
+		...(webSearchApiKey ? { webSearchApiKey } : {}),
+		...(visionModel ? { visionModel } : {}),
+		...(jev ? { jev } : {}),
+		celebrations,
+		personas,
 	};
 }
 
-export function loadConfig(rootDir: string, options: LoadConfigOptions = {}): AppConfig {
-	const env: Record<string, string> = { ...parseEnvFile(join(rootDir, ".env")) };
-	for (const [k, v] of Object.entries(process.env)) {
-		if (v !== undefined) env[k] = v;
-	}
-	Object.assign(env, options.env);
-	const raw = loadBotConfig(rootDir, env, options.configPath);
-	const rawBots = raw.bots as RawBotConfig[];
-	const needsPiDefaults = rawBots.some(
-		(bot) =>
-			(bot.provider === undefined && raw.provider === undefined) ||
-			(bot.model === undefined && raw.model === undefined && bot.provider === undefined),
-	);
-	const piDefaults =
-		options.piModelDefaults ??
-		(needsPiDefaults
-			? loadPiModelDefaults(rootDir)
-			: { provider: undefined, model: undefined, thinkingLevel: "medium" as const });
-	const errors: string[] = [];
-
-	// loadBotConfig already validated every NUMERIC_RANGES key; absent keys take defaults.
-	const num = (key: NumericKey, fallback: number): number => {
-		const v = raw[key];
-		return typeof v === "number" ? v : fallback;
-	};
-	const needEnv = (key: string, label: string): string => {
-		const v = env[key];
-		if (v === undefined || v === "") {
-			errors.push(`[config] ${label}: env key "${key}" is empty or missing in .env`);
-			return "";
-		}
-		return v;
-	};
-
-	const dataDir = join(rootDir, "data");
-	const groupPeerId = normalizePeerId(String(raw.group_peer_id ?? ""));
-	if (!Number.isFinite(groupPeerId))
-		errors.push(`[config] group_peer_id: required (bare positive peer id, see .env.example)`);
-	const tinyfishKeyEnv = typeof raw.tinyfish_key_env === "string" ? raw.tinyfish_key_env : "tiny_fish_api_key";
-	const routerSecretEnv = typeof raw.router_secret_env === "string" ? raw.router_secret_env : "router_secret";
-	const explicitDefaultProvider = typeof raw.provider === "string" ? raw.provider.trim() : undefined;
-	const defaultProvider = explicitDefaultProvider ?? piDefaults.provider;
-	const defaultModel =
-		typeof raw.model === "string"
-			? raw.model.trim()
-			: explicitDefaultProvider && explicitDefaultProvider !== piDefaults.provider
-				? undefined
-				: piDefaults.model;
-	const defaultEffort = isPiThinkingLevel(raw.reasoning_effort) ? raw.reasoning_effort : "off";
-	const defaultThreshold = num("compaction_threshold", 32_768);
-	const defaultKeepRecent = num("compaction_keep_recent", 1);
-	const defaultMaxSuffixTokens = num("max_suffix_tokens", 12_000);
-	const defaultMaxMessageTokens = num("max_message_tokens", 4_096);
-	const defaultSamplingCooldown = num("sampling_cooldown_ms", 2000);
-	const defaultProviderTimeoutMs = num("provider_timeout_ms", 300_000);
-	const defaultProviderRetries = num("provider_retries", 2);
-	const defaultContextImageBudgetBytes = num("context_image_budget_bytes", 10_000_000);
-	const botList = rawBots;
-	const telegramAdmins = Array.isArray(raw.telegram_admins)
-		? raw.telegram_admins.map((value) => normalizeTelegramAdmin(value)!)
-		: [];
-	if (needsPiDefaults && !defaultProvider && !defaultModel) {
-		errors.push(
-			"[config] Pi default provider/model is missing; run Pi /login and select both with /model, or set them explicitly in telegram.config.ts",
-		);
-	}
-
-	const contextWindow = num("context_window", DEFAULT_CONTEXT_WINDOW);
-	const maxCompactionThreshold = contextWindow - MIN_COMPACTION_RESERVE;
-
-	const bots: BotConfig[] = botList.map((b) => {
-		const tokenEnv = b.token_env as string;
-		const overrides = botOverrides(rootDir, raw, b);
-		const explicitProvider = typeof b.provider === "string" ? b.provider.trim() : undefined;
-		const provider = explicitProvider ?? defaultProvider ?? "";
-		const model =
-			typeof b.model === "string"
-				? b.model.trim()
-				: explicitProvider && explicitProvider !== defaultProvider
-					? ""
-					: (defaultModel ?? "");
-		if (!provider) {
-			errors.push(`[config] bot "${String(b.id)}" has no provider; select one in config or Pi /model`);
-		}
-		if (!model) {
-			errors.push(
-				`[config] bot "${String(b.id)}" selects provider "${provider}" without a model; select both in config or Pi /model`,
-			);
-		}
-		const effectiveThreshold = typeof b.compaction_threshold === "number" ? b.compaction_threshold : defaultThreshold;
-		if (effectiveThreshold > maxCompactionThreshold) {
-			errors.push(
-				`[config] bot "${String(b.id)}" compaction_threshold ${effectiveThreshold}: effective trigger is capped at ${maxCompactionThreshold} (context_window ${contextWindow} minus ${MIN_COMPACTION_RESERVE} reserve); use a value <= ${maxCompactionThreshold}`,
-			);
-		}
-		return {
-			...overrides,
-			token: env[tokenEnv] ?? "",
-			routingP: typeof b.routing_p === "number" ? b.routing_p : 0,
-			samplingCooldownMs: typeof b.sampling_cooldown_ms === "number" ? b.sampling_cooldown_ms : defaultSamplingCooldown,
-			provider,
-			model,
-			reasoningEffort: overrides.reasoningEffort ?? defaultEffort,
-			compactionThreshold: effectiveThreshold,
-			compactionKeepRecent: typeof b.compaction_keep_recent === "number" ? b.compaction_keep_recent : defaultKeepRecent,
-			providerTimeoutMs: typeof b.provider_timeout_ms === "number" ? b.provider_timeout_ms : defaultProviderTimeoutMs,
-			providerRetries: typeof b.provider_retries === "number" ? b.provider_retries : defaultProviderRetries,
-			contextImageBudgetBytes:
-				typeof b.context_image_budget_bytes === "number"
-					? b.context_image_budget_bytes
-					: defaultContextImageBudgetBytes,
-			maxSuffixTokens: typeof b.max_suffix_tokens === "number" ? b.max_suffix_tokens : defaultMaxSuffixTokens,
-			maxMessageTokens: typeof b.max_message_tokens === "number" ? b.max_message_tokens : defaultMaxMessageTokens,
+/** Create only a non-secret Pi model catalog. Credentials stay in the process environment. */
+export function ensureDeepSeekModelsFile(agentDir: string): string {
+	const modelsPath = join(agentDir, "models.json");
+	if (!existsSync(modelsPath)) {
+		mkdirSync(dirname(modelsPath), { recursive: true });
+		const catalog = {
+			providers: {
+				deepseek: {
+					baseUrl: "https://api.deepseek.com",
+					api: "openai-completions",
+					apiKey: "$DEEPSEEK_API_KEY",
+					models: [
+						{
+							id: "deepseek-flash",
+							name: "DeepSeek V4.1 Flash",
+							reasoning: true,
+							input: ["text", "image"],
+							contextWindow: 65_536,
+							maxTokens: 8_192,
+							// USD per million tokens; documented as an estimate because provider pricing can change.
+							cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0.3 },
+						},
+					],
+				},
+			},
 		};
-	});
-	const tinyfishApiKey = bots.some((bot) => bot.tools.search)
-		? needEnv(tinyfishKeyEnv, `tinyfish_key_env "${tinyfishKeyEnv}"`)
-		: (env[tinyfishKeyEnv] ?? "");
-
-	const mediaRaw = raw.media && typeof raw.media === "object" ? (raw.media as Record<string, unknown>) : {};
-	// loadBotConfig already rejected out-of-range values; absent keys take defaults.
-	const mediaNumber = (key: string, fallback: number): number => {
-		const value = mediaRaw[key];
-		return typeof value === "number" ? value : fallback;
-	};
-	const visionRaw = raw.vision && typeof raw.vision === "object" ? (raw.vision as Record<string, unknown>) : {};
-	const visionNumber = (key: string, fallback: number): number => {
-		const value = visionRaw[key];
-		return typeof value === "number" ? value : fallback;
-	};
-	const retention: RetentionConfig = {
-		telemetryDays: num("telemetry_retention_days", 90),
-		rawUpdateDays: num("raw_update_retention_days", 30),
-		messageEventDays: num("message_event_retention_days", 365),
-	};
-	if (errors.length > 0) throw new ConfigError(errors);
-
-	return {
-		dataDir,
-		dbPath: typeof raw.db_path === "string" ? resolvePath(rootDir, raw.db_path) : join(dataDir, "agent.db"),
-		groupPeerId,
-		groupChatId: groupChatIdFor(groupPeerId),
-		bots,
-		tinyfishApiKey,
-		auxiliaryVisualModel:
-			typeof raw.auxiliary_visual_model === "string"
-				? canonicalPiModelReference(raw.auxiliary_visual_model)!
-				: DEFAULT_AUXILIARY_VISUAL_MODEL,
-		vision: {
-			enabled: visionRaw.enabled === true,
-			foregroundMediaLimit: visionNumber("foreground_media_limit", 2),
-			concurrency: visionNumber("concurrency", 2),
-		},
-		contextWindow,
-		media: {
-			mode: mediaRaw.mode === "context" ? "context" : "vision",
-			maxImagesPerTurn: mediaNumber("max_images_per_turn", DEFAULT_MAX_IMAGES_PER_TURN),
-			downloadConcurrency: mediaNumber("download_concurrency", DEFAULT_MEDIA_DOWNLOAD_CONCURRENCY),
-		},
-		retention,
-		routerSecret: env[routerSecretEnv] || null,
-		telegramAdmins,
-	};
+		writeFileSync(modelsPath, `${JSON.stringify(catalog, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+	}
+	return modelsPath;
 }

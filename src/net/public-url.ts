@@ -51,17 +51,13 @@ function parseIpv6(hostname: string): number[] | undefined {
 	return words;
 }
 
+/**
+ * Only globally routable unicast (2000::/3) outside the documentation prefix is public. This also
+ * rejects loopback, unspecified, IPv4-mapped/NAT64 forms, discard-only 100::/64, ULA,
+ * link-local and multicast.
+ */
 function isBlockedIpv6(words: number[]): boolean {
-	const allZero = words.every((word) => word === 0);
-	const loopback = words.slice(0, 7).every((word) => word === 0) && words[7] === 1;
-	if (allZero || loopback) return true;
-	if ((words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xffc0) === 0xfec0) return true;
-	if ((words[0] & 0xff00) === 0xff00) return true;
-	if (words[0] === 0x2001 && words[1] === 0x0db8) return true;
-
-	const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
-	if (mapped) return isBlockedIpv4([words[6]! >> 8, words[6]! & 0xff, words[7]! >> 8, words[7]! & 0xff]);
-	return false;
+	return (words[0]! & 0xe000) !== 0x2000 || (words[0] === 0x2001 && words[1] === 0x0db8);
 }
 
 /** Parse one literal public HTTP(S) URL without DNS resolution or network access. */
@@ -83,7 +79,8 @@ export function parsePublicHttpUrl(input: string, maxChars = 2_048): PublicHttpU
 		hostname === "localhost" ||
 		hostname.endsWith(".localhost") ||
 		hostname === "local" ||
-		hostname.endsWith(".local")
+		hostname.endsWith(".local") ||
+		hostname.endsWith(".internal")
 	)
 		return null;
 	const ipv4 = parseIpv4(hostname);

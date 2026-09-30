@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { DiscordTransport, isSnowflake, isValidReactionEmoji, splitDiscordMessage } from "../src/discord/transport.ts";
+import {
+	DiscordPlatformTransport,
+	DiscordTransport,
+	isSnowflake,
+	isValidReactionEmoji,
+	splitDiscordMessage,
+} from "../src/platforms/discord/transport.ts";
 
 describe("Discord transport primitives", () => {
 	test("keeps Discord Snowflakes as strings", () => {
@@ -15,23 +21,6 @@ describe("Discord transport primitives", () => {
 		expect(parts.every((part) => part.length <= 12)).toBe(true);
 		expect(parts.join("")).toBe(text);
 		expect(splitDiscordMessage("x".repeat(2001))).toEqual(["x".repeat(2000), "x"]);
-	});
-
-	test("resolves the bot's current Discord identity", async () => {
-		let requestedUrl = "";
-		let authHeader = "";
-		const transport = new DiscordTransport({
-			token: "test-only",
-			applicationId: "123456789012345678",
-			fetch: (async (input: string | URL | Request, init?: RequestInit) => {
-				requestedUrl = String(input);
-				authHeader = new Headers(init?.headers).get("Authorization") ?? "";
-				return Response.json({ id: "123456789012345678", username: "persona" });
-			}) as unknown as typeof fetch,
-		});
-		expect(await transport.getCurrentUser()).toEqual({ id: "123456789012345678", username: "persona" });
-		expect(requestedUrl).toBe("https://discord.com/api/v10/users/@me");
-		expect(authHeader).toBe("Bot test-only");
 	});
 
 	test("chunks sends with mention parsing disabled and guards the channel", async () => {
@@ -116,6 +105,43 @@ describe("Discord transport primitives", () => {
 		await expect(transport.sendMessage("223456789012345678", "ok", { replyTo: "bad-id" })).rejects.toThrow("Snowflake");
 	});
 
+	test("platform transport routes by persona and never allows mentions", async () => {
+		const bodies: unknown[] = [];
+		const client = new DiscordTransport({
+			token: "test-only",
+			applicationId: "123456789012345678",
+			fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({ id: "323456789012345678" });
+			}) as unknown as typeof fetch,
+		});
+		const transport = new DiscordPlatformTransport(new Map([["a", client]]));
+		expect(
+			await transport.sendMessage({
+				personaId: "a",
+				channelId: "223456789012345678",
+				content: "<@423456789012345678> hi",
+			}),
+		).toEqual({ id: "323456789012345678" });
+		expect(bodies[0]).toMatchObject({ allowed_mentions: { parse: [], replied_user: false } });
+		expect((bodies[0] as { allowed_mentions: { users?: unknown } }).allowed_mentions.users).toBeUndefined();
+		const friend = { userId: "423456789012345678", username: "friend" };
+		await transport.sendMessage({
+			personaId: "a",
+			channelId: "223456789012345678",
+			content: `生日快乐 ${transport.formatMention(friend)}`,
+			mention: [friend],
+		});
+		expect(bodies[1]).toMatchObject({
+			content: "生日快乐 <@423456789012345678>",
+			allowed_mentions: { parse: [], users: ["423456789012345678"], replied_user: false },
+		});
+		await expect(
+			transport.sendMessage({ personaId: "b", channelId: "223456789012345678", content: "x" }),
+		).rejects.toThrow("persona");
+		expect(Object.keys(transport.quickReactions).every((emoji) => transport.isValidReaction(emoji))).toBe(true);
+	});
+
 	test("identifies, heartbeats, and resumes the Gateway session", async () => {
 		class FakeSocket {
 			readyState: number = WebSocket.OPEN;
@@ -164,7 +190,6 @@ describe("Discord transport primitives", () => {
 				user: { id: "123456789012345678", username: "persona" },
 			},
 		});
-		expect(transport.botIdentity).toEqual({ id: "123456789012345678", username: "persona" });
 		await new Promise((resolve) => setTimeout(resolve, 1050));
 		expect(sockets[0]?.sent.some((message) => message.op === 1)).toBe(true);
 		sockets[0]?.message({ op: 11, d: null });

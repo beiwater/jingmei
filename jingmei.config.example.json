@@ -1,0 +1,59 @@
+{
+	"dataDir": "data",
+	"routingSecretEnv": "ROUTING_SECRET",
+	"//visionModel": "Optional, e.g. \"visionModel\": \"openrouter/google/gemini-2.5-flash\" (provider/model; first slash splits, the model may contain more slashes). Used only to describe images for personas whose main model cannot see images. Without it, Pi itself replaces images with an \"image omitted\" note for text-only models.",
+	"discord": {
+		"guilds": [
+			{
+				"guildId": "000000000000000000",
+				"channelIds": ["000000000000000001"]
+			}
+		]
+	},
+	"telegram": {
+		"chatIds": ["-1001234567890"]
+	},
+	"voice": {
+		"apiKeyEnv": "FISH_AUDIO_API_KEY",
+		"referenceId": "00000000000000000000000000000000",
+		"model": "s2.1-pro-free"
+	},
+	"jev": {
+		"apiKeyEnv": "TYPESAFE_API_KEY",
+		"model": "jev-latest",
+		"quickReactions": true,
+		"memoryScoring": true,
+		"threshold": 0.8,
+		"minIntervalMs": 60000
+	},
+	"celebrations": [
+		{
+			"space": "discord:000000000000000000",
+			"channelId": "000000000000000001",
+			"personaId": "luna",
+			"timeZone": "Australia/Sydney",
+			"calendar": "both"
+		}
+	],
+	"personas": [
+		{
+			"id": "luna",
+			"name": "Luna",
+			"personaPath": "personas/luna.md",
+			"provider": "deepseek",
+			"model": "deepseek-flash",
+			"routingP": 0.65,
+			"aliases": [],
+			"sendReactionImages": true,
+			"voiceEnabled": true,
+			"discord": {
+				"tokenEnv": "DISCORD_LUNA_TOKEN",
+				"adminUserIds": []
+			},
+			"telegram": {
+				"tokenEnv": "TELEGRAM_LUNA_TOKEN",
+				"adminUserIds": []
+			}
+		}
+	]
+}

@@ -3,13 +3,12 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-telegram-agent",
+      "name": "jingmei",
       "dependencies": {
         "@earendil-works/pi-agent-core": "0.84.1",
         "@earendil-works/pi-ai": "0.84.1",
         "@earendil-works/pi-coding-agent": "0.84.1",
         "@earendil-works/pi-tui": "0.84.1",
-        "jiti": "2.7.0",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.5.7",

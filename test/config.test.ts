@@ -1,0 +1,334 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { migrateDiscordConfig } from "../scripts/migrate-config.ts";
+import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
+
+const GUILD = "1552560014353506386";
+const CHANNEL = "1552560015276113962";
+const CHAT = "-1001234567890";
+const env = {
+	ROUTING_SECRET: "routing-fixture",
+	DISCORD_LUNA_TOKEN: "discord-fixture",
+	TELEGRAM_LUNA_TOKEN: "telegram-fixture",
+	TYPESAFE_API_KEY: "jev-fixture",
+};
+
+let root: string;
+beforeEach(() => {
+	root = mkdtempSync(join(tmpdir(), "jingmei-config-"));
+	mkdirSync(join(root, "personas"));
+	writeFileSync(join(root, "personas/luna.md"), "Luna");
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function luna(extra: Record<string, unknown> = {}) {
+	return {
+		id: "luna",
+		name: "Luna",
+		personaPath: "personas/luna.md",
+		provider: "deepseek",
+		model: "deepseek-flash",
+		routingP: 0.6,
+		discord: { tokenEnv: "DISCORD_LUNA_TOKEN" },
+		telegram: { tokenEnv: "TELEGRAM_LUNA_TOKEN" },
+		...extra,
+	};
+}
+
+function base(extra: Record<string, unknown> = {}) {
+	return {
+		discord: { guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }] },
+		telegram: { chatIds: [CHAT] },
+		personas: [luna()],
+		...extra,
+	};
+}
+
+function errorsOf(run: () => unknown): readonly string[] {
+	try {
+		run();
+	} catch (error) {
+		if (error instanceof ConfigError) return error.errors;
+		throw error;
+	}
+	throw new Error("expected ConfigError");
+}
+
+describe("config", () => {
+	test("applies defaults and resolves secrets", () => {
+		const config = validateConfig(base({ jev: { apiKeyEnv: "TYPESAFE_API_KEY" } }), root, env);
+		expect(config.dataDir).toBe(join(root, "data"));
+		expect(config.routingSecret).toBe("routing-fixture");
+		expect(config.celebrations).toEqual([]);
+		expect(config.webSearchApiKey).toBeUndefined();
+		expect(config.jev).toEqual({
+			apiKey: "jev-fixture",
+			model: "jev-latest",
+			quickReactions: true,
+			memoryScoring: true,
+			threshold: 0.8,
+			minIntervalMs: 60_000,
+		});
+		expect(config.personas[0]).toMatchObject({
+			personaPath: join(root, "personas/luna.md"),
+			reasoningEffort: "off",
+			sendReactionImages: true,
+			voiceEnabled: true,
+			aliases: [],
+			adminUserIds: [],
+			tokens: { discord: "discord-fixture", telegram: "telegram-fixture" },
+		});
+		expect(config.personas[0]?.spaces).toBeUndefined();
+	});
+
+	test("accepts max reasoning and rejects unknown levels", () => {
+		expect(
+			validateConfig(base({ personas: [luna({ reasoningEffort: "max" })] }), root, env).personas[0]?.reasoningEffort,
+		).toBe("max");
+		expect(errorsOf(() => validateConfig(base({ personas: [luna({ reasoningEffort: "huge" })] }), root, env))).toEqual([
+			expect.stringContaining("reasoningEffort"),
+		]);
+	});
+
+	test("splits visionModel at the first slash", () => {
+		expect(validateConfig(base({ visionModel: "openrouter/google/gemini" }), root, env).visionModel).toEqual({
+			provider: "openrouter",
+			model: "google/gemini",
+		});
+		for (const bad of ["gemini", "/gemini", "openrouter/", 3])
+			expect(errorsOf(() => validateConfig(base({ visionModel: bad }), root, env))).toEqual([
+				expect.stringContaining("visionModel"),
+			]);
+	});
+
+	test("normalizes admin ids per platform", () => {
+		const config = validateConfig(
+			base({
+				personas: [
+					luna({
+						discord: { tokenEnv: "DISCORD_LUNA_TOKEN", adminUserIds: [CHANNEL, CHANNEL] },
+						telegram: { tokenEnv: "TELEGRAM_LUNA_TOKEN", adminUserIds: ["12345"] },
+					}),
+				],
+			}),
+			root,
+			env,
+		);
+		expect(config.personas[0]?.adminUserIds).toEqual([`discord:${CHANNEL}`, "telegram:12345"]);
+		expect(
+			errorsOf(() =>
+				validateConfig(
+					base({ personas: [luna({ discord: { tokenEnv: "DISCORD_LUNA_TOKEN", adminUserIds: ["12"] } })] }),
+					root,
+					env,
+				),
+			),
+		).toEqual([expect.stringContaining("adminUserIds")]);
+	});
+
+	test("collects every error without echoing secret values", () => {
+		const errors = errorsOf(() =>
+			validateConfig(
+				{
+					discord: { guilds: [{ guildId: "123", channelIds: [CHANNEL] }] },
+					telegram: { chatIds: ["chat"] },
+					jev: { apiKeyEnv: "MISSING_JEV", threshold: 0, emojis: { discord: {} } },
+					personas: [
+						luna({ id: "Luna", routingP: 2, personaPath: "personas/missing.md" }),
+						luna({ discord: undefined, telegram: { tokenEnv: "TELEGRAM_MISSING" } }),
+					],
+				},
+				root,
+				{ ...env, ROUTING_SECRET: "" },
+			),
+		);
+		for (const fragment of [
+			"Missing environment variable ROUTING_SECRET",
+			"guildId",
+			"telegram.chatIds[0]",
+			"MISSING_JEV",
+			"jev.threshold",
+			"jev.emojis.discord",
+			"personas[0].id",
+			"personas[0].personaPath is not readable",
+			"personas[0].routingP",
+			"TELEGRAM_MISSING",
+		])
+			expect(errors.some((error) => error.includes(fragment))).toBe(true);
+		expect(errors.join("\n")).not.toContain("fixture");
+	});
+
+	test("validates spaces, per-space routing and celebrations", () => {
+		const ok = validateConfig(
+			base({
+				personas: [
+					luna({ spaces: [`discord:${GUILD}`] }),
+					luna({
+						id: "sol",
+						name: "Sol",
+						routingP: 0.5,
+						telegram: { tokenEnv: "TELEGRAM_LUNA_TOKEN" },
+						discord: undefined,
+					}),
+				],
+				celebrations: [
+					{ space: `telegram:${CHAT}`, personaId: "sol", timeZone: "Asia/Shanghai", calendar: "china" },
+					{ space: `discord:${GUILD}`, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" },
+				],
+			}),
+			root,
+			env,
+		);
+		expect(ok.personas[0]?.spaces).toEqual([`discord:${GUILD}`]);
+		expect(ok.celebrations.map((target) => [target.spaceId, target.channelId])).toEqual([
+			[`telegram:${CHAT}`, CHAT],
+			[`discord:${GUILD}`, CHANNEL],
+		]);
+
+		const errors = errorsOf(() =>
+			validateConfig(
+				base({
+					personas: [
+						luna(),
+						luna({ id: "sol", name: "Sol", routingP: 0.5 }),
+						luna({
+							id: "sky",
+							routingP: 0,
+							telegram: undefined,
+							spaces: [`telegram:${CHAT}`, "discord:1111111111111111111", "slack:x"],
+						}),
+					],
+					celebrations: [
+						{
+							space: `discord:${GUILD}`,
+							channelId: "1111111111111111111",
+							personaId: "luna",
+							timeZone: "UTC",
+							calendar: "both",
+						},
+						{ space: `telegram:${CHAT}`, personaId: "ghost", timeZone: "Nowhere/City", calendar: "moon" },
+					],
+				}),
+				root,
+				env,
+			),
+		);
+		for (const fragment of [
+			`needs a telegram account`,
+			`"discord:1111111111111111111" is not a configured space`,
+			`"slack:x" is not a configured space`,
+			`routingP of personas in discord:${GUILD}`,
+			"celebrations[0].channelId",
+			"celebrations[1].personaId",
+			"celebrations[1].timeZone",
+			"celebrations[1].calendar",
+		])
+			expect(errors.some((error) => error.includes(fragment))).toBe(true);
+	});
+
+	test("requires platform sections for used accounts and accounts for configured sections", () => {
+		const errors = errorsOf(() =>
+			validateConfig({ telegram: { chatIds: [CHAT] }, personas: [luna({ telegram: undefined })] }, root, env),
+		);
+		expect(errors).toEqual([
+			expect.stringContaining("top-level discord section is missing"),
+			expect.stringContaining("no persona has a telegram account"),
+		]);
+		expect(
+			errorsOf(() =>
+				validateConfig({ ...base(), personas: [luna({ discord: undefined, telegram: undefined })] }, root, env),
+			),
+		).toContainEqual(expect.stringContaining("must have a discord or telegram account"));
+	});
+
+	test("loadConfig reads jingmei.config.json with process.env overriding .env", () => {
+		writeFileSync(join(root, "jingmei.config.json"), JSON.stringify(base()));
+		writeFileSync(
+			join(root, ".env"),
+			"# secrets\nROUTING_SECRET: from-file\nDISCORD_LUNA_TOKEN: d\nTELEGRAM_LUNA_TOKEN: t\n",
+		);
+		const previous = process.env.ROUTING_SECRET;
+		process.env.ROUTING_SECRET = "from-process";
+		try {
+			expect(loadConfig(root).routingSecret).toBe("from-process");
+		} finally {
+			if (previous === undefined) delete process.env.ROUTING_SECRET;
+			else process.env.ROUTING_SECRET = previous;
+		}
+	});
+
+	test("env parser reports line numbers without values", () => {
+		const path = join(root, ".env");
+		writeFileSync(path, "# c\n\nA_KEY: one: two\nBAD=secret-value\n");
+		expect(() => parseEnvFile(path)).toThrow(/line 4/);
+		try {
+			parseEnvFile(path);
+		} catch (error) {
+			expect(String(error)).not.toContain("secret-value");
+		}
+		writeFileSync(path, "1BAD: secret-value\n");
+		expect(() => parseEnvFile(path)).toThrow(/Invalid \.env key at line 1/);
+		writeFileSync(path, "A_KEY: one: two\n");
+		expect(parseEnvFile(path)).toEqual({ A_KEY: "one: two" });
+	});
+
+	test("migrates discord.config.json into a loadable jingmei config", () => {
+		const migrated = migrateDiscordConfig({
+			guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }],
+			dataDir: "data",
+			routingSecretEnv: "ROUTING_SECRET",
+			celebrations: [{ guildId: GUILD, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" }],
+			personas: [
+				{
+					id: "luna",
+					name: "Luna",
+					token_env: "DISCORD_LUNA_TOKEN",
+					personaPath: "personas/luna.md",
+					provider: "deepseek",
+					model: "deepseek-flash",
+					reasoningEffort: "high",
+					routingP: 0.65,
+					guildIds: [GUILD],
+					aliases: ["L"],
+					adminUserIds: [CHANNEL],
+				},
+			],
+		});
+		expect(migrated).toEqual({
+			dataDir: "data",
+			routingSecretEnv: "ROUTING_SECRET",
+			discord: { guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }] },
+			celebrations: [
+				{ space: `discord:${GUILD}`, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" },
+			],
+			personas: [
+				{
+					id: "luna",
+					name: "Luna",
+					personaPath: "personas/luna.md",
+					provider: "deepseek",
+					model: "deepseek-flash",
+					reasoningEffort: "high",
+					routingP: 0.65,
+					aliases: ["L"],
+					spaces: [`discord:${GUILD}`],
+					discord: { tokenEnv: "DISCORD_LUNA_TOKEN", adminUserIds: [CHANNEL] },
+				},
+			],
+		});
+		const config = validateConfig(migrated, root, env);
+		expect(config.personas[0]?.adminUserIds).toEqual([`discord:${CHANNEL}`]);
+		expect(config.celebrations[0]?.spaceId).toBe(`discord:${GUILD}`);
+	});
+
+	test("creates the DeepSeek model catalog once without secrets", () => {
+		const path = ensureDeepSeekModelsFile(join(root, "agent"));
+		const text = readFileSync(path, "utf8");
+		expect(text).toContain("$DEEPSEEK_API_KEY");
+		writeFileSync(path, "{}");
+		expect(ensureDeepSeekModelsFile(join(root, "agent"))).toBe(path);
+		expect(readFileSync(path, "utf8")).toBe("{}");
+	});
+});

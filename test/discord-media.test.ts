@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import {
-	asDiscordOutboundAttachment,
-	downloadDiscordImage,
-	prepareDiscordImageForPi,
-	type DiscordImageMime,
-} from "../src/discord/media.ts";
+import { IMAGE_LIMITS, prepareImage } from "../src/media/image.ts";
+import { downloadDiscordImage, downloadDiscordVideo } from "../src/platforms/discord/media.ts";
 
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const base = {
@@ -18,23 +14,7 @@ describe("Discord image attachments", () => {
 		const result = await downloadDiscordImage(base, {
 			fetchImpl: async () => new Response(png, { headers: { "content-length": String(png.length) } }),
 		});
-		expect(result).toEqual({ ok: true, bytes: png, mimeType: "image/png", filename: "photo.png" });
-		if (!result.ok) throw new Error("expected image download");
-		const prepared = await prepareDiscordImageForPi(result, {
-			resize: async () => ({
-				data: Buffer.from(png).toString("base64"),
-				mimeType: "image/png",
-				originalWidth: 1,
-				originalHeight: 1,
-				width: 1,
-				height: 1,
-				wasResized: false,
-			}),
-		});
-		expect(prepared).toEqual({
-			ok: true,
-			image: { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
-		});
+		expect(result).toEqual({ ok: true, bytes: png, mimeType: "image/png" });
 	});
 
 	test("prepares a real small PNG into Pi image content", async () => {
@@ -44,12 +24,12 @@ describe("Discord image attachments", () => {
 				"base64",
 			),
 		);
-		const prepared = await prepareDiscordImageForPi({ bytes: realPng, mimeType: "image/png" });
+		const prepared = await prepareImage(realPng, "image/png");
 		expect(prepared.ok).toBe(true);
 		if (!prepared.ok) return;
 		expect(prepared.image.mimeType).toBe("image/png");
-		const imageBytes = Buffer.from(prepared.image.data, "base64");
-		expect(imageBytes.byteLength).toBeLessThanOrEqual(200_000);
+		const imageBytes = Buffer.from(prepared.image.base64, "base64");
+		expect(imageBytes.byteLength).toBeLessThanOrEqual(IMAGE_LIMITS.maxBytes);
 		expect(Array.from(imageBytes.subarray(0, 8))).toEqual(Array.from(realPng.subarray(0, 8)));
 	});
 
@@ -85,12 +65,31 @@ describe("Discord image attachments", () => {
 		expect(result).toEqual({ ok: false, reason: "invalid_image" });
 	});
 
-	test("adapts downloaded images to the transport attachment contract", async () => {
-		const mimeType: DiscordImageMime = "image/png";
-		expect(asDiscordOutboundAttachment({ bytes: png, mimeType, filename: "cat.png" })).toEqual({
-			name: "cat.png",
-			data: png,
-			contentType: "image/png",
+	test("rejects an oversize original when resizing fails", async () => {
+		const prepared = await prepareImage(new Uint8Array(IMAGE_LIMITS.maxBytes + 1), "image/png", {
+			resize: async () => {
+				throw new Error("resize failed");
+			},
 		});
+		expect(prepared.ok).toBe(false);
+	});
+
+	test("applies CDN and size protections to video downloads", async () => {
+		const fetchNever = async () => {
+			throw new Error("fetch must not run");
+		};
+		const video = { url: "https://cdn.discordapp.com/attachments/1/2/clip.mp4", contentType: "video/mp4" };
+		expect(
+			await downloadDiscordVideo({ ...video, url: "https://example.org/clip.mp4" }, { fetchImpl: fetchNever }),
+		).toMatchObject({ ok: false, reason: "download_failed" });
+		expect(await downloadDiscordVideo({ ...video, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toMatchObject(
+			{
+				ok: false,
+				reason: "oversize",
+			},
+		);
+		expect(
+			await downloadDiscordVideo(video, { maxBytes: 10, fetchImpl: async () => new Response(new Uint8Array(11)) }),
+		).toMatchObject({ ok: false, reason: "oversize" });
 	});
 });

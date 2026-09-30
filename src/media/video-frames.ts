@@ -66,15 +66,6 @@ export function inspectVideoTranscoder(runner: VideoCommandRunner = defaultRunne
 	return { ffmpeg: runner.which("ffmpeg") != null, ffprobe: runner.which("ffprobe") != null };
 }
 
-/** Human-facing operator warning; absence never blocks chat or daemon readiness. */
-export function videoTranscoderAdvisory(required: boolean, availability: VideoTranscoderAvailability): string | null {
-	if (!required || (availability.ffmpeg && availability.ffprobe)) return null;
-	const missing = [!availability.ffmpeg ? "ffmpeg" : null, !availability.ffprobe ? "ffprobe" : null].filter(
-		(value): value is string => value != null,
-	);
-	return `warning: video frame sampling is disabled because ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} unavailable; install the FFmpeg package and restart (it is used only to sample video frames for the model context; chat, images, and sticker sending continue normally)`;
-}
-
 /** Fixed representative positions keep extraction deterministic and explainable. */
 export function sampleVideoFrameFractions(requested = VIDEO_FRAME_MAX): number[] {
 	const count = Math.min(VIDEO_FRAME_MAX, Math.max(0, Math.floor(requested)));
@@ -121,7 +112,7 @@ export async function extractVideoFrames(
 	const ffprobe = runner.which("ffprobe");
 	if (!ffmpeg || !ffprobe) return { ok: false, outcome: "video_transcoder_unavailable" };
 
-	const directory = mkdtempSync(join(tmpdir(), "pi-tg-video-")); // mkdtemp already creates 0700
+	const directory = mkdtempSync(join(tmpdir(), "jingmei-video-")); // mkdtemp already creates 0700
 	try {
 		let sourcePath = input.sourcePath;
 		if (!sourcePath) {
