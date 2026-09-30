@@ -464,18 +464,7 @@ export class DiscordConversationCore {
 						.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
 						.trim()
 						.slice(0, 400);
-					const audio = await synthesizeFishAudioTts(this.voice.apiKey, speech, this.voice.referenceId, {
-						model: this.voice.model,
-					});
-					const sent = await this.transport.sendMessage({
-						personaId: persona.id,
-						channelId: message.channelId,
-						content: `🎙️ ${speech}`,
-						replyToMessageId: message.messageId,
-						allowedMentions: [],
-						attachments: [{ name: "voice-reply.mp3", data: audio, contentType: "audio/mpeg" }],
-					});
-					responseMessageId = sent.id;
+					responseMessageId = await this.sendVoiceReply(persona.id, message.channelId, message.messageId, speech);
 					continue;
 				} catch {
 					// Fish Audio errors do not block a text response to the user.
@@ -893,6 +882,26 @@ export class DiscordConversationCore {
 		};
 	}
 
+	private async sendVoiceReply(
+		personaId: string,
+		channelId: string,
+		replyToMessageId: string,
+		text: string,
+	): Promise<string> {
+		const voice = this.voice;
+		if (!voice) throw new Error("voice_not_configured");
+		const audio = await synthesizeFishAudioTts(voice.apiKey, text, voice.referenceId, { model: voice.model });
+		const sent = await this.transport.sendMessage({
+			personaId,
+			channelId,
+			content: `🎙️ ${text.trim()}`,
+			replyToMessageId,
+			allowedMentions: [],
+			attachments: [{ name: "voice-reply.mp3", data: audio, contentType: "audio/mpeg" }],
+		});
+		return sent.id;
+	}
+
 	private createVoiceTool(persona: DiscordPersona, guildId: string, channelId: string) {
 		return {
 			name: "speak",
@@ -920,22 +929,12 @@ export class DiscordConversationCore {
 					return fail("reply_already_sent");
 				turn.voiceSendStarted = true;
 				try {
-					const audio = await synthesizeFishAudioTts(this.voice.apiKey, params.text, this.voice.referenceId, {
-						model: this.voice.model,
-					});
-					const sent = await this.transport.sendMessage({
-						personaId: persona.id,
-						channelId,
-						content: `🎙️ ${params.text.trim()}`,
-						replyToMessageId: turn.replyToMessageId,
-						allowedMentions: [],
-						attachments: [{ name: "voice-reply.mp3", data: audio, contentType: "audio/mpeg" }],
-					});
+					const messageId = await this.sendVoiceReply(persona.id, channelId, turn.replyToMessageId, params.text);
 					turn.voiceSent = true;
-					turn.voiceMessageId = sent.id;
+					turn.voiceMessageId = messageId;
 					return {
 						content: [{ type: "text" as const, text: "Voice reply sent." }],
-						details: { messageId: sent.id },
+						details: { messageId },
 						terminate: true as const,
 					};
 				} catch (error) {
