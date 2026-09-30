@@ -2,6 +2,8 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
+import { JEV_ENDPOINT } from "./decision/jev.ts";
 import type { Persona, Platform, SpaceId } from "./core/types.ts";
 
 export const CONFIG_FILE = "jingmei.config.json";
@@ -20,7 +22,8 @@ export interface CelebrationTarget {
 }
 
 export interface JevSettings {
-	apiKey: string;
+	endpoint: string;
+	apiKey?: string;
 	model: string;
 	quickReactions: boolean;
 	memoryScoring: boolean;
@@ -43,6 +46,9 @@ export interface AppConfig {
 	/** Optional image describer for personas whose main model is text-only. */
 	visionModel?: { provider: string; model: string };
 	jev?: JevSettings;
+	/** In-process Jev wrapper over an OpenAI-compatible LLM with logprobs. */
+	localJev?: { baseUrl: string; model: string; apiKey?: string };
+	events?: { summaryModel: { provider: string; model: string }; embeddingModel: string };
 	celebrations: CelebrationTarget[];
 	personas: ConfiguredPersona[];
 }
@@ -160,15 +166,27 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 	if (input.dataDir !== undefined && !nonEmptyString(input.dataDir)) errors.push("dataDir must be a nonempty string");
 	const routingSecret = secret("routingSecretEnv", input.routingSecretEnv ?? DEFAULT_ROUTING_SECRET_ENV) ?? "";
 
-	let visionModel: AppConfig["visionModel"];
-	if (input.visionModel !== undefined) {
-		const ref = typeof input.visionModel === "string" ? input.visionModel.trim() : "";
+	const modelSelection = (field: string, value: unknown): { provider: string; model: string } | undefined => {
+		const ref = typeof value === "string" ? value.trim() : "";
 		const slash = ref.indexOf("/");
 		const provider = ref.slice(0, slash).trim();
 		const model = ref.slice(slash + 1).trim();
-		if (slash <= 0 || !provider || !model) errors.push('visionModel must be a "provider/model" string');
-		else visionModel = { provider, model };
-	}
+		if (slash <= 0 || !provider || !model) errors.push(`${field} must be a "provider/model" string`);
+		else return { provider, model };
+	};
+	const httpUrl = (field: string, value: unknown): string | undefined => {
+		if (typeof value === "string") {
+			try {
+				const url = new URL(value);
+				if (url.protocol === "http:" || url.protocol === "https:") return value;
+			} catch {
+				// Report only the field name; a malformed URL may contain credentials.
+			}
+		}
+		errors.push(`${field} must be an http(s) URL`);
+		return undefined;
+	};
+	const visionModel = input.visionModel === undefined ? undefined : modelSelection("visionModel", input.visionModel);
 
 	// Platform sections and the configured space set.
 	const spaces = new Set<SpaceId>();
@@ -439,13 +457,30 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		}
 	}
 
+	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
+	let localJev: AppConfig["localJev"];
+	if (input.localJev !== undefined) {
+		if (!isObject(input.localJev)) errors.push("localJev must be an object");
+		else {
+			const baseUrl = httpUrl("localJev.baseUrl", input.localJev.baseUrl);
+			const model = input.localJev.model;
+			if (!nonEmptyString(model)) errors.push("localJev.model must be a nonempty string");
+			const apiKey =
+				input.localJev.apiKeyEnv === undefined ? undefined : secret("localJev.apiKeyEnv", input.localJev.apiKeyEnv);
+			if (baseUrl && nonEmptyString(model)) localJev = { baseUrl, model: model.trim(), ...(apiKey ? { apiKey } : {}) };
+		}
+	} else if (webSearchApiKey) {
+		localJev = { baseUrl: "https://api.deepseek.com", model: "deepseek-flash", apiKey: webSearchApiKey };
+	}
+
 	// Jev decision model.
 	let jev: JevSettings | undefined;
 	if (input.jev !== undefined) {
 		if (!isObject(input.jev)) errors.push("jev must be an object");
 		else {
 			const value = input.jev;
-			const apiKey = secret("jev.apiKeyEnv", value.apiKeyEnv);
+			const apiKey = value.apiKeyEnv === undefined ? undefined : secret("jev.apiKeyEnv", value.apiKeyEnv);
+			const endpoint = httpUrl("jev.endpoint", value.endpoint === undefined ? JEV_ENDPOINT : value.endpoint);
 			const model = value.model ?? DEFAULT_JEV_MODEL;
 			if (!nonEmptyString(model)) errors.push("jev.model must be a nonempty string");
 			for (const key of ["quickReactions", "memoryScoring"] as const)
@@ -479,9 +514,10 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 					}
 				}
 			}
-			if (apiKey)
+			if (apiKey || localJev)
 				jev = {
-					apiKey,
+					endpoint: endpoint ?? JEV_ENDPOINT,
+					...(apiKey ? { apiKey } : {}),
 					model: String(model).trim(),
 					quickReactions: value.quickReactions !== false,
 					memoryScoring: value.memoryScoring !== false,
@@ -491,9 +527,21 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				};
 		}
 	}
+	let events: AppConfig["events"];
+	if (input.events !== undefined) {
+		if (!isObject(input.events)) errors.push("events must be an object");
+		else {
+			const summaryModel = modelSelection("events.summaryModel", input.events.summaryModel);
+			const embeddingModel =
+				input.events.embeddingModel === undefined ? DEFAULT_EMBEDDING_MODEL : input.events.embeddingModel;
+			if (typeof embeddingModel !== "string" || !isSupportedEmbeddingModel(embeddingModel))
+				errors.push("events.embeddingModel must be a supported fastembed model");
+			if (summaryModel && typeof embeddingModel === "string") events = { summaryModel, embeddingModel };
+		}
+		if (!jev?.apiKey && !localJev) errors.push("events requires a Jev API key or a localJev LLM");
+	}
 
 	if (errors.length > 0) throw new ConfigError(errors);
-	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	return {
 		rootDir,
 		dataDir,
@@ -504,6 +552,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(webSearchApiKey ? { webSearchApiKey } : {}),
 		...(visionModel ? { visionModel } : {}),
 		...(jev ? { jev } : {}),
+		...(localJev ? { localJev } : {}),
+		...(events ? { events } : {}),
 		celebrations,
 		personas,
 	};

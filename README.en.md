@@ -9,7 +9,8 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. It runs on
 ## What it does
 
 - **Chimes in by probability, always answers when addressed**: a message that @-mentions a character, replies to it, or contains its name or an alias always gets an answer from that character; other messages are sampled deterministically by `routingP` to decide whether anyone answers and who. Bot messages never trigger a character.
-- **Jev quick reactions** (optional): TypeSafe's Jev decision model puts an emoji on messages. Addressed messages always get one; ordinary messages only when they are strongly emotional or genuinely funny, rate-limited per channel. It does not use the main model and never delays the real reply. See [Jev](#jev).
+- **Jev quick reactions** (optional): a Jev decision API (or an in-process LLM wrapper) puts an emoji on messages. Addressed messages get the selected emoji unless the decision is `none`; ordinary messages only when strongly emotional or genuinely funny, rate-limited per channel. It does not use the main model and never delays the real reply. See [Jev](#jev).
+- **Concurrent topics** (optional): `events` assigns channel messages to topics. `§E` IDs, titles, descriptions and leading participants tell the character which event it is answering, keeping simultaneous discussions separate and recalling older topics when they resume.
 - **Images and video frames**: up to 4 images per message, scaled to fit 1024×1024 and 200 KB, reach the model; videos are sampled into 1–3 frames with ffmpeg. When the main model has no image input, Pi replaces each image with an omission note; alternatively set `visionModel` to describe images in a sentence or two first. Voice, files and stickers become text placeholders such as `[语音]`, `[文件]`, `[贴纸 😀]`.
 - **Voice** (optional): with Fish Audio, characters can send MP3s with a transcript in Chinese, Japanese or English. When a member explicitly asks for a voice reply, the final answer is also turned into audio.
 - **Web search**: with `DEEPSEEK_API_KEY` set, DeepSeek server-side web search is enabled. Messages that explicitly say “查一下” / “搜索” / “look up” are searched first and answered with source links; the model can also search on its own when a question depends on external facts.
@@ -23,6 +24,8 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. It runs on
 
 You need [Bun](https://bun.sh/) 1.3 or newer, at least one Discord or Telegram bot, and credentials for a model provider. Video frames additionally need `ffmpeg` (including `ffprobe`) on the host; without it everything else works and videos become a `[视频]` placeholder.
 
+With `events` enabled, macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. The first startup downloads the default Chinese embedding model (about 96 MB) into `data/models` (under your custom `dataDir` if set), requiring network access; later starts reuse that cache.
+
 ```bash
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
@@ -33,7 +36,7 @@ cp personas/template.en.md personas/luna.md
 ```
 
 1. Edit `personas/luna.md`: the character's identity, voice and boundaries.
-2. Edit `jingmei.config.json`: fill in server/channel or group IDs. If you use only one platform, delete the other platform's section and the matching account in each persona; delete `voice`, `jev` or `celebrations` if you don't want them. Fields are listed in [Configuration reference](#configuration-reference).
+2. Edit `jingmei.config.json`: fill in server/channel or group IDs. If you use only one platform, delete the other platform's section and the matching account in each persona; delete `voice`, `jev`, `events` or `celebrations` if you don't want them. Fields are listed in [Configuration reference](#configuration-reference).
 3. Edit `.env`: bot tokens, `ROUTING_SECRET` (any long random string) and API keys. The format is `key: value`, not `KEY=value`.
 4. Provide model credentials, either way:
    - The example persona uses DeepSeek `deepseek-flash`; just set `DEEPSEEK_API_KEY` in `.env`. On startup a catalog entry for this model (without the key) is written to `data/pi-agent/models.json`.
@@ -61,6 +64,8 @@ There are exactly two sources: `jingmei.config.json` for settings and `.env` for
 | `telegram.chatIds` | Allowed group IDs, e.g. `"-1001234567890"` |
 | `voice` | Optional Fish Audio: `apiKeyEnv`, `referenceId` (32-hex voice ID), `model` (`s2.1-pro-free` default, or `s2.1-pro`) |
 | `jev` | Optional, see [Jev](#jev) |
+| `localJev` | Optional in-process LLM→Jev wrapper: required `baseUrl` (http(s)) and `model`, optional `apiKeyEnv` (omit for unauthenticated local services). Requires an OpenAI-compatible endpoint with logprobs. If the section is absent and `DEEPSEEK_API_KEY` resolves, defaults to DeepSeek / `deepseek-flash` |
+| `events` | Optional; presence enables topics. Required `summaryModel`: `"provider/model"` (first slash splits; model and authentication checked at startup). `embeddingModel` defaults to `fast-bge-small-zh-v1.5` (512 dimensions), and must be supported by fastembed. Requires a remote Jev or local LLM decision client |
 | `celebrations[]` | Optional greeting targets, see below |
 | `personas[]` | Characters, at least one |
 
@@ -136,7 +141,7 @@ Telegram replies convert Markdown into message entities and are split above 4096
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei uses it for two small jobs.
+[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across reactions, memory ranking, and optional event assignment and participation scoring.
 
 **Quick reactions** (`quickReactions`). Every human message with text gets one Jev request asking three things at once: pick an emoji from the table (or `none`), is the message strongly emotional, is it funny.
 
@@ -146,12 +151,19 @@ Telegram replies convert Markdown into message entities and are split above 4096
 
 **Memory ranking** (`memoryScoring`). When a character recalls member profiles, the candidate facts and relationships (per member: the 20 newest facts and 16 strongest relationships) are scored against the current message in a single Jev request, keeping the 5 most relevant facts and 4 relationships per member. If Jev is unavailable it falls back to recency and interaction count.
 
-**Cost**. Jev bills input tokens only; output is free (`jev-1.13` was $0.042 per million tokens at the time of writing — see the [official pricing](https://docs.typesafe.ai/models)). A reaction request carries just the message, up to 5 recent chat lines (each cut to 200 characters) and three questions — typically a few hundred tokens — and times out after 3 seconds. It uses none of the main model's tokens.
+**Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` defaults to `https://api.deepseek.com` / `deepseek-flash`. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
+
+The wrapper has a 30-second default timeout and disables DeepSeek thinking (`thinking.type=disabled`). Its LLM must return logprobs; missing logprobs become an `invalid_response` call failure. When the model abstains, the wrapper takes the highest-probability option (argmax).
+
+Quick reactions and memory ranking still require an explicit `jev` section; `events` alone or a DeepSeek key alone does not enable them. You may omit `jev.apiKeyEnv` to use only the wrapper. With neither a remote key nor a resolved local LLM, these features remain disabled. An explicitly named `apiKeyEnv` missing from `.env` / the process environment is still a configuration error, not a silent fallback. Wrapper calls are billed by the chosen LLM provider.
+
+**Cost**. Remote Jev bills input tokens only; output is free (`jev-1.13` was $0.042 per million tokens at the time of writing — see the [official pricing](https://docs.typesafe.ai/models)). A reaction request carries just the message, up to 5 recent chat lines (each cut to 200 characters) and three questions — typically a few hundred tokens — and the remote request times out after 3 seconds. It uses none of the main model's tokens; the local wrapper consumes tokens from its configured LLM.
 
 **Configuration**. Put `TYPESAFE_API_KEY: …` in `.env` and add to `jingmei.config.json`:
 
 ```json
 "jev": {
+	"endpoint": "https://api.typesafe.ai/v1/systemone",
 	"apiKeyEnv": "TYPESAFE_API_KEY",
 	"model": "jev-latest",
 	"quickReactions": true,
@@ -163,6 +175,8 @@ Telegram replies convert Markdown into message entities and are split above 4096
 
 | Field | Default | Meaning |
 |---|---|---|
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | Remote Jev http(s) URL |
+| `apiKeyEnv` | none | Env var for the remote key; omit to use only the local wrapper |
 | `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0` |
 | `quickReactions` | `true` | Quick reactions |
 | `memoryScoring` | `true` | Memory ranking |
@@ -181,6 +195,17 @@ Default tables (emoji → meaning given to Jev, in Chinese in the code):
 | Puzzled, unsure | 🤔 | 🤔 |
 
 Emojis in a custom Telegram table that the Bot API does not allow are dropped with a warning.
+
+### Topic configuration
+
+```json
+"events": {
+	"summaryModel": "deepseek/deepseek-flash",
+	"embeddingModel": "fast-bge-small-zh-v1.5"
+}
+```
+
+Human messages go through the decision client whenever topic candidates exist. Bot messages never call it; they inherit the replied-to message's event, or have no event. Topics with a message in the last 2 hours are active. Candidates are up to 5 recent active topics, 2 older topics recalled by vector similarity within the same space/channel, and “new”. At 3, 6, 12, 24… messages, a background single-flight refresh generates the title/description, scores participation and updates the embedding without blocking channel processing. Summaries use the independent `summaryModel`; dynamic event details are appended only to the triggering input, never the system prompt.
 
 ## Migrating from the old version
 
@@ -210,7 +235,7 @@ The unit assumes the code lives in `~/apps/pi-extension-discord` and Bun at `~/.
 ## Development
 
 ```bash
-bun test          # unit tests, no network
+bun test          # network allowed, Discord / Telegram forbidden
 bun run check     # tsc --noEmit
 bun run lint      # Biome
 ```

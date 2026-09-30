@@ -9,7 +9,8 @@
 ## 能做什么
 
 - **按概率接话，被点名必回**：@ 提及、回复角色的消息、或在消息里叫出角色的名字/别名时，对应角色一定回应；其他消息按 `routingP` 做确定性抽样决定由谁接话、是否接话。bot 发的消息不会触发任何角色。
-- **Jev 秒回表情**（可选）：用 TypeSafe 的 Jev 决策模型给消息点一个表情。点名的消息总会得到表情，普通消息只有情绪强烈或确实好笑时才会，并且每个频道限频。不占用主模型，也不拖慢正式回复。详见 [Jev](#jev)。
+- **Jev 秒回表情**（可选）：用 Jev 决策接口（或进程内 LLM 包装器）给消息点一个表情。点名的消息只要选中表情就会点，普通消息只有情绪强烈或确实好笑时才会，并且每个频道限频。不占用主模型，也不拖慢正式回复。详见 [Jev](#jev)。
+- **并行话题**（可选）：`events` 把同一频道的消息归入不同话题，用 `§E` 编号、标题、描述和主要参与者告诉角色当前在回应哪个事件，避免把同时发生的讨论混在一起；还能召回之前暂时结束的话题。
 - **看图与视频抽帧**：每条消息最多 4 张图片，缩放到 1024×1024、200 KB 以内交给模型；视频用 ffmpeg 抽 1–3 帧。主模型不支持图片输入时，Pi 会把图片替换成一条省略说明；也可以配置 `visionModel`，先把图片描述成一两句文字。语音、文件、贴纸以 `[语音]`、`[文件]`、`[贴纸 😀]` 这样的文字占位。
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
@@ -23,6 +24,8 @@
 
 需要 [Bun](https://bun.sh/) 1.3 以上、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
 
+开启 `events` 时，macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。
+
 ```bash
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
@@ -33,7 +36,7 @@ cp personas/template.zh.md personas/luna.md
 ```
 
 1. 编辑 `personas/luna.md`，写下角色的身份、说话方式和边界。
-2. 编辑 `jingmei.config.json`：填入服务器/频道或群 ID，只用一个平台就删掉另一个平台的段落和角色里对应的账号；不用语音、Jev 或节日祝福就删掉 `voice`、`jev`、`celebrations`。字段见[配置参考](#配置参考)。
+2. 编辑 `jingmei.config.json`：填入服务器/频道或群 ID，只用一个平台就删掉另一个平台的段落和角色里对应的账号；不用语音、Jev、话题或节日祝福就删掉 `voice`、`jev`、`events`、`celebrations`。字段见[配置参考](#配置参考)。
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
@@ -61,6 +64,8 @@ cp personas/template.zh.md personas/luna.md
 | `telegram.chatIds` | 允许的群 ID，如 `"-1001234567890"` |
 | `voice` | 可选，Fish Audio：`apiKeyEnv`、`referenceId`（32 位十六进制音色 ID）、`model`（`s2.1-pro-free` 默认，或 `s2.1-pro`） |
 | `jev` | 可选，见 [Jev](#jev) |
+| `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
+| `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
 | `celebrations[]` | 可选，节日与生日祝福目标，见下 |
 | `personas[]` | 角色列表，至少一个 |
 
@@ -136,7 +141,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。精魅用它做两件小事。
+[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。精魅用同一个决策客户端做表情、记忆排序，以及可选的话题归属与参与度判断。
 
 **秒回表情**（`quickReactions`）。每条有文字的人类消息发一次 Jev 请求，同时问三件事：从表情表里选一个（或 `none`）、这条消息情绪是否强烈、是否好笑。
 
@@ -146,12 +151,19 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 **记忆排序**（`memoryScoring`）。角色回想成员档案时，把候选事实和关系（每人最近 20 条事实、最强 16 条关系）一次性交给 Jev 与当前消息比对相关度，每人保留最相关的 5 条事实和 4 条关系。Jev 不可用时退回按时间和互动次数排序。
 
-**成本**。Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；请求超时 3 秒。它不消耗主模型的 token。
+**本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev` 且有 `DEEPSEEK_API_KEY` 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
+
+包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
+
+秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器；没有远程 key 且没有可用本地 LLM 时这两项关闭。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
+
+**成本**。远程 Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；远程请求超时 3 秒。它不消耗主模型的 token；本地包装器则消耗其配置的 LLM token。
 
 **配置**。在 `.env` 写 `TYPESAFE_API_KEY: …`，在 `jingmei.config.json` 加：
 
 ```json
 "jev": {
+	"endpoint": "https://api.typesafe.ai/v1/systemone",
 	"apiKeyEnv": "TYPESAFE_API_KEY",
 	"model": "jev-latest",
 	"quickReactions": true,
@@ -163,6 +175,8 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | 远程 Jev 的 http(s) URL |
+| `apiKeyEnv` | 无 | 远程 key 的环境变量名；省略则仅使用本地包装器 |
 | `model` | `jev-latest` | 也可固定版本，如 `jev-1.13.0` |
 | `quickReactions` | `true` | 秒回表情 |
 | `memoryScoring` | `true` | 记忆排序 |
@@ -181,6 +195,17 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 疑问、不确定 | 🤔 | 🤔 |
 
 Telegram 自定义表情表中不在 Bot API 允许集合里的表情会被丢弃并记一条警告。
+
+### 话题配置
+
+```json
+"events": {
+	"summaryModel": "deepseek/deepseek-flash",
+	"embeddingModel": "fast-bge-small-zh-v1.5"
+}
+```
+
+人类消息在有候选话题时由决策客户端选择归属；bot 消息不调用决策模型，只继承被回复消息的话题（否则无话题）。最近 2 小时有消息的话题视为活跃，每次最多提供 5 个活跃话题、2 个同频道向量召回的旧话题，以及“新话题”选项。累计消息数达到 3、6、12、24……时，后台生成/刷新标题描述、参与度与向量；同一事件只同时刷新一次，不阻塞频道处理。摘要使用独立的 `summaryModel`，动态话题内容只追加到触发回复的消息，不写入 system prompt。
 
 ## 从旧版迁移
 
@@ -210,7 +235,7 @@ journalctl --user -u pi-discord-agent -f
 ## 开发
 
 ```bash
-bun test          # 单元测试，零外网
+bun test          # 测试可联网，但禁止访问 Discord / Telegram
 bun run check     # tsc --noEmit
 bun run lint      # Biome
 ```

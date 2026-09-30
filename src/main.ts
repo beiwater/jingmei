@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig } from "./config.ts";
 import { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
-import { openDatabase } from "./core/db.ts";
+import { loadVectorExtension, openDatabase, useExtensibleSqlite } from "./core/db.ts";
+import { createFastEmbedder } from "./core/embedding.ts";
+import { createPiEventSummarizer, EventTracker } from "./core/events.ts";
 import { MemberMemory } from "./core/memory.ts";
 import {
 	assertBotModelConfigured,
@@ -14,7 +16,8 @@ import {
 } from "./core/model-runtime.ts";
 import { SoulStore } from "./core/soul.ts";
 import type { Persona, Platform, PlatformTransport } from "./core/types.ts";
-import { createJevClient } from "./decision/jev.ts";
+import { createJevClient, withFallback } from "./decision/jev.ts";
+import { createLocalJevClient } from "./decision/local-jev.ts";
 import { inspectVideoTranscoder } from "./media/video-frames.ts";
 import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
@@ -28,7 +31,9 @@ async function main(): Promise<void> {
 	// Pi resolves the key reference in the project-local models.json at request time.
 	if (config.webSearchApiKey) process.env.DEEPSEEK_API_KEY = config.webSearchApiKey;
 	const personas: Persona[] = config.personas.map(({ tokens: _tokens, ...persona }) => ({ ...persona, accounts: {} }));
+	if (config.events) useExtensibleSqlite();
 	const db = openDatabase(config.dataDir);
+	if (config.events) loadVectorExtension(db);
 	const memberMemory = new MemberMemory(db);
 	let core: Conversation | undefined;
 	const deps = {
@@ -58,8 +63,29 @@ async function main(): Promise<void> {
 		);
 	if (config.visionModel)
 		assertBotModelConfigured({ ...config.visionModel, requireImageInput: true, purpose: "vision" }, modelRuntime);
+	if (config.events) assertBotModelConfigured({ ...config.events.summaryModel, purpose: "events" }, modelRuntime);
 
 	const jev = config.jev;
+	const remoteDecision = jev?.apiKey
+		? createJevClient({ endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
+		: undefined;
+	const localDecision = config.localJev ? createLocalJevClient(config.localJev) : undefined;
+	const decision =
+		remoteDecision && localDecision ? withFallback(remoteDecision, localDecision) : (remoteDecision ?? localDecision);
+	let events: EventTracker | undefined;
+	if (config.events) {
+		if (!decision) throw new Error("events requires a decision client");
+		const embedder = await createFastEmbedder({
+			model: config.events.embeddingModel,
+			cacheDir: join(config.dataDir, "models"),
+		});
+		events = new EventTracker({
+			db,
+			decision,
+			embedder,
+			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
+		});
+	}
 	core = new Conversation({
 		db,
 		dataDir: config.dataDir,
@@ -69,13 +95,14 @@ async function main(): Promise<void> {
 		modelRuntime,
 		memberMemory,
 		soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }),
+		...(events ? { events } : {}),
 		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
 		...(config.visionModel ? { visionModel: config.visionModel } : {}),
-		...(jev
+		...(jev && decision
 			? {
 					jev: {
-						client: createJevClient({ apiKey: jev.apiKey, model: jev.model }),
+						client: decision,
 						quickReactions: jev.quickReactions,
 						memoryScoring: jev.memoryScoring,
 						threshold: jev.threshold,
@@ -101,6 +128,7 @@ async function main(): Promise<void> {
 		await scheduler.stop();
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
 		await core?.close();
+		await events?.idle();
 		db.close();
 	};
 	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
@@ -119,6 +147,8 @@ async function main(): Promise<void> {
 		vision_enabled: !!config.visionModel,
 		jev_quick_reactions: !!jev?.quickReactions,
 		jev_memory_scoring: !!jev?.memoryScoring,
+		events_enabled: !!events,
+		events_local_fallback: !!events && !!remoteDecision && !!localDecision,
 		celebration_targets: config.celebrations.length,
 	});
 }

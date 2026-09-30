@@ -14,6 +14,9 @@ flowchart LR
   TA -- InboundMessage --> C
   C --> S[Pi AgentSession<br/>角色 × 空间 × 频道]
   C --> J[src/decision/jev.ts]
+  C --> EV[src/core/events.ts<br/>话题归属与后台摘要]
+  EV --> J
+  EV --> DB
   C --> DB[(data/jingmei.db)]
   S -- 回复 / 工具 --> PT[PlatformTransport]
   PT --> DA
@@ -38,10 +41,11 @@ flowchart LR
 | `src/core/prompt.ts` | system prompt |
 | `src/core/tools.ts` | 模型工具 |
 | `src/core/quick-reactions.ts` | Jev 秒回表情 |
+| `src/core/events.ts` / `embedding.ts` | 话题归属、摘要与参与度刷新；fastembed 中文向量 |
 | `src/core/memory.ts` / `soul.ts` / `celebrations.ts` | 成员记忆、私人 soul、节日生日祝福 |
-| `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移 |
+| `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移、messages 幂等迁移与 sqlite-vec 加载 |
 | `src/core/model-runtime.ts` | 共享 Pi `ModelRuntime` 与启动期模型校验 |
-| `src/decision/jev.ts` | TypeSafe Jev 客户端 |
+| `src/decision/jev.ts` / `local-jev.ts` | Jev wire 客户端、远程失败回退、进程内 notjev LLM 包装器 |
 | `src/platforms/discord/` | Gateway/REST 客户端、消息归一化、附件下载、斜杠命令 |
 | `src/platforms/telegram/` | Bot API 客户端、长轮询、归一化、Markdown→entities、文字命令 |
 | `src/media/image.ts` / `video-frames.ts` | 图片转码缩放；ffmpeg 视频抽帧 |
@@ -53,10 +57,10 @@ flowchart LR
 
 1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
 2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。
-3. `openDatabase()`：没有 `jingmei.db` 而有 `discord-agent.db` 时连同 `-wal`/`-shm` 改名，再迁移 `discord_*` 表。
+3. 开启 `events` 时先 `useExtensibleSqlite()`（macOS 使用 Homebrew SQLite），再 `openDatabase()` 并加载 sqlite-vec。没有 `jingmei.db` 而有 `discord-agent.db` 时连同 `-wal`/`-shm` 改名，再迁移 `discord_*` 表。
 4. 按配置创建 Discord/Telegram 平台：每个 token 先验证身份（Discord `/users/@me`，Telegram `getMe`），填入 `persona.accounts`。
 5. `createInstalledPiModelRuntime()`：整个进程一个 Pi `ModelRuntime`，agent 目录是 `data/pi-agent`（`models.json`、`auth.json` 都在这里）。provider 扩展只从 agent 目录加载，项目 `.pi/` 扩展不被信任、不加载。每个角色的模型、reasoning 档位和认证逐一 `assertBotModelConfigured`；`visionModel` 另需支持图片输入。
-6. 创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。
+6. 开启话题时校验 `summaryModel`，在 `${dataDir}/models` 准备 fastembed 模型缓存（默认首次下载约 96 MB），创建共享决策客户端与 `EventTracker`。创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。关闭时先等待核心 lane，再等待 `events.idle()` 后关数据库。
 
 ## 一条消息的路径
 
@@ -64,13 +68,20 @@ flowchart LR
 
 1. 按 `(space, channel)` 串行（lane）。同一空间同一频道的消息严格按顺序处理；不同频道并发。
 2. `INSERT OR IGNORE` 到 `messages`。已存在则直接返回——多个角色的连接收到同一条消息、重启后重放，都在这里去重。
-3. 人类消息交给 `MemberMemory.observe()` 更新档案。
+3. 人类消息交给 `MemberMemory.observe()` 更新档案；开启话题时再 `await events.assign(message)` 写入 `messages.event_id`，然后路由。
 4. `routeMessage()` 选出接话角色（或无人）。
 5. 配了 Jev 秒回表情时，不等待地发起 `QuickReactions.react()`。
 6. 图片写入 `data/media/`（文件名由 HMAC 派生，0600）；需要时调用 `visionModel` 生成描述。会话里只保存文件引用。
 7. 被路由的角色若消息明确要求查资料，先做一次 DeepSeek 搜索，结果作为不可信参考附在该角色的输入后。
 8. **每个在作用域内的角色都把这条消息追加进自己的会话**（`sendCustomMessage`，类型 `discord_context_v1`）；只有被路由的角色 `triggerTurn: true` 生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
 9. 回复：工具已经发过图片/语音/表情就结束；否则发送最终文字（明确要求语音且配置了语音时改发 MP3），回复原消息。
+
+### 话题（`src/core/events.ts`）
+
+- 事件按 `(space, channel)` 隔离，与角色无关。人类消息在有候选事件时始终调用决策客户端 `chooseEvent`；bot 不调用，继承被回复消息的 `event_id`，没有回复或被回复消息无事件则为空。归属失败只记错误类别并返回空，不阻止正式回复。
+- 活跃 = 最后一条消息距当前不超过 2 小时，查询时计算，无定时清理器。候选最多 5 个最近活跃事件、2 个同频道向量召回的已关闭事件和 `new`；向量召回使用 L2 距离，最大 `EVENT_RECALL_MAX_DISTANCE = 1.0`。
+- 消息数达到 3 时首次摘要，之后在 6、12、24……刷新。每个事件后台 single-flight：独立 Pi `summaryModel` 生成标题与描述，fastembed 把标题+描述嵌入 sqlite-vec，再由决策客户端 `scoreParticipation` 排序参与者；向量先写入，参与度打分失败不影响旧话题召回。后台刷新不在频道 lane 上，停机等待 `idle()`。
+- `formatInboundMessage` 在消息编号/回复标记后加 `§E<id>`，所有观察会话都看到归属；仅触发回复的输入追加 `[当前事件 §E<id>「标题」：描述。主要参与者：A、B、C。只回应这个事件，不要混入其他事件的内容。]`，未命名时为「尚无标题」，缺失描述/参与者时省略相应部分。system prompt 只有稳定的 §E 协议行，动态事件信息不进入缓存前缀。
 
 ### 路由（`src/core/router.ts`）
 
@@ -117,6 +128,10 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 
 ## Jev
 
+共享决策客户端：配置 `jev.apiKeyEnv` 时创建远程客户端（`jev.endpoint` 默认 TypeSafe）；存在 `localJev` 时创建进程内 `notjev` 包装器，调用支持 logprobs 的 OpenAI-compatible LLM。两者都有则 `withFallback`：任何远程方法错误记 `decision/jev_fallback`（方法、错误类别），再在本地重试一次。仅有其一就直接使用。`localJev` 未配置且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash`，显式配置完全覆盖默认，允许无鉴权本地服务。显式命名但缺失的 key 仍在配置期报错。秒回表情与记忆排序必须有显式 `jev` 段落；事件可单独使用包装器，没有任何决策来源却启用 `events` 是配置错误。
+
+本地包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`），要求 LLM 返回 logprobs；缺失 logprobs 记为 `invalid_response` 调用失败，模型弃答时取概率最大选项（argmax）。它不另起 HTTP 服务，通过 `notjev` 将 OpenAI-compatible LLM 输出转换为 System One wire 答案。
+
 ```mermaid
 flowchart TD
   M[人类消息且有文字] --> A{被点名?}
@@ -154,7 +169,10 @@ flowchart TD
 
 | 表 | 主键 / 用途 |
 |---|---|
-| `messages` | `(space_id, channel_id, message_id)`；所有见过的消息，去重与近期上下文 |
+| `messages` | `(space_id, channel_id, message_id)`；所有见过的消息，去重与近期上下文；可空 `event_id`，索引 `(space_id, channel_id, event_id)`，由 `ensureMessagesTable` 幂等新增 |
+| `events` | `id` 自增主键；`space_id`、`channel_id`、可空 `title` / `description`、`last_message_at`、`message_count` |
+| `event_participants` | `(event_id, user_id)`；成员 `name` 与参与概率 `score` |
+| `event_vectors` | sqlite-vec `vec0`，`rowid = event_id`，`embedding float[dimensions]`（默认 512）；旧话题向量召回 |
 | `sessions` | `(persona_id, space_id, channel_id)` → Pi 会话文件 |
 | `memory_profiles` | 成员档案 |
 | `memory_facts` | 成员事实 |

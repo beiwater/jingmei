@@ -19,12 +19,17 @@
 		"model": "s2.1-pro-free"
 	},
 	"jev": {
+		"endpoint": "https://api.typesafe.ai/v1/systemone",
 		"apiKeyEnv": "TYPESAFE_API_KEY",
 		"model": "jev-latest",
 		"quickReactions": true,
 		"memoryScoring": true,
 		"threshold": 0.8,
 		"minIntervalMs": 60000
+	},
+	"events": {
+		"summaryModel": "deepseek/deepseek-flash",
+		"embeddingModel": "fast-bge-small-zh-v1.5"
 	},
 	"celebrations": [
 		{

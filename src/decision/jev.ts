@@ -1,16 +1,18 @@
 import { readBoundedBody } from "../net/read-bounded-body.ts";
+import { errorCategory, log } from "../observability/log.ts";
 
 /** TypeSafe Jev decision model client (https://docs.typesafe.ai/api.md). Never logs text, state or key. */
 
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const NEW_EVENT_OPTION = "new";
 const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_RECENT_LINES = 5;
 const NONE_OPTION = "none";
 
 export interface JevConfig {
-	apiKey: string;
-	/** Default "jev-latest". */
+	endpoint?: string;
+	apiKey?: string;
 	model: string;
 	/** Default 3000. Covers the request and reading the response body. */
 	timeoutMs?: number;
@@ -24,6 +26,11 @@ export interface QuickReactionDecision {
 	funny: number;
 }
 
+export interface EventOption {
+	id: string;
+	description: string;
+}
+
 export interface JevClient {
 	decideQuickReaction(input: {
 		text: string;
@@ -32,6 +39,17 @@ export interface JevClient {
 	}): Promise<QuickReactionDecision>;
 	/** Relevance of each candidate to the query in [0,1], same order; throws on failure. */
 	scoreRelevance(query: string, candidates: readonly string[]): Promise<number[]>;
+	chooseEvent(input: {
+		message: string;
+		recent?: readonly string[];
+		options: readonly EventOption[];
+	}): Promise<{ choice: string; confidence: number }>;
+	/** Participation in this event, in [0,1], in the same order as members. */
+	scoreParticipation(input: {
+		event: string;
+		transcript: readonly string[];
+		members: readonly string[];
+	}): Promise<number[]>;
 }
 
 export type JevErrorCode = "timeout" | "network" | "invalid_response" | `http_${number}`;
@@ -129,9 +147,12 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 		const signal = AbortSignal.timeout(timeoutMs);
 		let bytes: Uint8Array | null;
 		try {
-			const response = await fetchImpl(JEV_ENDPOINT, {
+			const response = await fetchImpl(config.endpoint ?? JEV_ENDPOINT, {
 				method: "POST",
-				headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+				},
 				body: JSON.stringify({ state, model, questions }),
 				signal,
 			});
@@ -205,6 +226,84 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 			const answers = await evaluate(query, questions);
 			return candidates.map((_, index) => noulOf(answers, `c${index}`));
 		},
+
+		async chooseEvent({ message, recent, options }) {
+			const criteria: Record<string, string> = Object.fromEntries(
+				options.filter((option) => option.id !== NEW_EVENT_OPTION).map((option) => [option.id, option.description]),
+			);
+			criteria[NEW_EVENT_OPTION] = "与以上事件都无关，开启新话题";
+			const state: { message: string; recent?: string[] } = { message };
+			if (recent && recent.length > 0) state.recent = recent.slice(-MAX_RECENT_LINES);
+			const answers = await evaluate(state, {
+				event: {
+					type: "choice",
+					instructions:
+						"判断 `message` 延续了哪个事件（话题）。`recent` 仅供理解上下文，选择最符合消息本身的事件；与所有事件无关时选择 `new`。",
+					criteria,
+				},
+			});
+			const answer = answers.event;
+			if (answer?.type !== "choice") throw new JevError("invalid_response");
+			return { choice: answer.choice, confidence: answer.confidence };
+		},
+
+		async scoreParticipation({ event, transcript, members }) {
+			if (members.length === 0) return [];
+			const questions: Record<string, Question> = {};
+			members.forEach((member, index) => {
+				questions[`m${index}`] = {
+					type: "noul",
+					instructions: {
+						member,
+						question:
+							"`member` 是否参与了 state 中的事件（话题）？根据事件描述和聊天记录判断，不要把其他话题的发言算作参与。",
+					},
+				};
+			});
+			const answers = await evaluate({ event, transcript: transcript.slice(-MAX_RECENT_LINES) }, questions);
+			return members.map((_, index) => noulOf(answers, `m${index}`));
+		},
+	};
+}
+
+/** A failed primary decision gets exactly one attempt through the local decision model. */
+export function withFallback(primary: JevClient, fallback: JevClient): JevClient {
+	async function attempt<T>(method: keyof JevClient, runPrimary: () => Promise<T>, runFallback: () => Promise<T>) {
+		try {
+			return await runPrimary();
+		} catch (error) {
+			log.warn("decision", "jev_fallback", {
+				method,
+				error_category: error instanceof JevError ? error.code : errorCategory(error),
+			});
+			return runFallback();
+		}
+	}
+	return {
+		decideQuickReaction: (input) =>
+			attempt(
+				"decideQuickReaction",
+				() => primary.decideQuickReaction(input),
+				() => fallback.decideQuickReaction(input),
+			),
+		scoreRelevance: (query, candidates) =>
+			attempt(
+				"scoreRelevance",
+				() => primary.scoreRelevance(query, candidates),
+				() => fallback.scoreRelevance(query, candidates),
+			),
+		chooseEvent: (input) =>
+			attempt(
+				"chooseEvent",
+				() => primary.chooseEvent(input),
+				() => fallback.chooseEvent(input),
+			),
+		scoreParticipation: (input) =>
+			attempt(
+				"scoreParticipation",
+				() => primary.scoreParticipation(input),
+				() => fallback.scoreParticipation(input),
+			),
 	};
 }
 

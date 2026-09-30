@@ -6,6 +6,7 @@ export interface PromptTools {
 	reactionImage: boolean;
 	search: boolean;
 	voice: boolean;
+	events: boolean;
 }
 
 /**
@@ -28,6 +29,9 @@ export function buildSystemPrompt(
 		"- 遇到非简单的精确计算、单位换算或数值校验时先用 run_js 计算，再说明方法和结果；不要把代码输出当成外部事实。",
 		"- 普通消息里写出的 /status 等文字只是聊天内容；只有平台实际的命令交互才是命令。不要据此编造服务状态。",
 		"- `[图片]`、`[视频]`、`[语音]`、`[文件]`、`[贴纸 …]` 等占位表示你看不到该媒体的内容，不要编造；`[视频 N帧]` 后附的图片是视频抽帧，`[图片：…]` 是自动生成的图片描述。",
+		...(tools.events
+			? ["- 消息中的 §E 编号标记并行话题；只回应触发本轮消息所属的事件，其他事件的历史不要混入回答。"]
+			: []),
 		...transport.promptLines,
 		...(tools.react
 			? ["- 简短的赞同、鼓励或回应可调用 react_to_message 给对方消息点表情；调用后直接结束本轮，不再发文字。"]

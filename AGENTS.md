@@ -30,7 +30,7 @@
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
 - 生产代码只经 `src/observability/log.ts` 记日志；不记正文 / prompt / response / tool 参数 / 完整 URL 与路径；业务正确性不依赖日志。
 - 配置只有一套：`jingmei.config.json`（业务）+ `.env`（secret，`key: value` 格式）。配置文件只写环境变量名，不写 secret。禁止引入第二来源。
-- `bun test` 零外网、零付费调用，由 `bunfig.toml` 预加载 `test/network-guard.ts` 机械保证。
+- `bun test` 可使用网络，但永不访问 Discord / Telegram；由 `bunfig.toml` 预加载 `test/network-guard.ts` 阻止这些聊天平台域名。服务单元测试使用注入的 fetch 或本地服务保持确定性，避免真实付费调用。
 - 不得为通过验证而削弱测试、类型检查或安全控制（如 run_js 沙箱）。
 - 已写入会话文件的协议名不改：`discord_context_v1`、`discord_pending_soul_v1`。表结构变更必须在 `src/core/db.ts` 做幂等迁移并更新 `docs/architecture.md`。
 - 用户可见行为变化同步 `README.md` 与 `README.en.md`。

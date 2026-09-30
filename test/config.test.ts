@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migrateDiscordConfig } from "../scripts/migrate-config.ts";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
+import { JEV_ENDPOINT } from "../src/decision/jev.ts";
 
 const GUILD = "1552560014353506386";
 const CHANNEL = "1552560015276113962";
@@ -64,6 +66,7 @@ describe("config", () => {
 		expect(config.celebrations).toEqual([]);
 		expect(config.webSearchApiKey).toBeUndefined();
 		expect(config.jev).toEqual({
+			endpoint: JEV_ENDPOINT,
 			apiKey: "jev-fixture",
 			model: "jev-latest",
 			quickReactions: true,
@@ -101,6 +104,112 @@ describe("config", () => {
 			expect(errorsOf(() => validateConfig(base({ visionModel: bad }), root, env))).toEqual([
 				expect.stringContaining("visionModel"),
 			]);
+	});
+
+	test("uses local decisions without implicitly enabling quick reactions or memory scoring", () => {
+		const resolved = { ...env, DEEPSEEK_API_KEY: "deepseek-fixture" };
+		const config = validateConfig(base({ events: { summaryModel: "openrouter/google/gemini" } }), root, resolved);
+		expect(config.localJev).toEqual({
+			baseUrl: "https://api.deepseek.com",
+			model: "deepseek-flash",
+			apiKey: "deepseek-fixture",
+		});
+		expect(config.jev).toBeUndefined();
+		expect(config.events).toEqual({
+			summaryModel: { provider: "openrouter", model: "google/gemini" },
+			embeddingModel: DEFAULT_EMBEDDING_MODEL,
+		});
+		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.apiKey).toBeUndefined();
+		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.quickReactions).toBe(true);
+		expect(validateConfig(base({ jev: {} }), root, env).jev).toBeUndefined();
+	});
+
+	test("explicit local endpoints override DeepSeek and can run without credentials", () => {
+		const config = validateConfig(
+			base({
+				jev: { endpoint: "http://localhost:8080/v1/systemone", apiKeyEnv: "TYPESAFE_API_KEY" },
+				localJev: { baseUrl: "http://localhost:8000/v1", model: "local-model" },
+				events: { summaryModel: "deepseek/deepseek-flash", embeddingModel: "fast-all-MiniLM-L6-v2" },
+			}),
+			root,
+			{ ...env, DEEPSEEK_API_KEY: "unused-default" },
+		);
+		expect(config.localJev).toEqual({ baseUrl: "http://localhost:8000/v1", model: "local-model" });
+		expect(config.jev?.endpoint).toBe("http://localhost:8080/v1/systemone");
+		expect(config.jev?.apiKey).toBe("jev-fixture");
+		expect(config.events?.embeddingModel).toBe("fast-all-MiniLM-L6-v2");
+		const custom = validateConfig(
+			base({ localJev: { baseUrl: "https://llm.example/v1", model: "custom", apiKeyEnv: "CUSTOM_LLM_KEY" } }),
+			root,
+			{ ...env, CUSTOM_LLM_KEY: "custom-fixture", DEEPSEEK_API_KEY: "unused-default" },
+		);
+		expect(custom.localJev?.apiKey).toBe("custom-fixture");
+	});
+
+	test("requires a decision client for events but accepts remote-only operation", () => {
+		expect(errorsOf(() => validateConfig(base({ events: { summaryModel: "deepseek/flash" } }), root, env))).toEqual([
+			expect.stringContaining("events requires"),
+		]);
+		const config = validateConfig(
+			base({ jev: { apiKeyEnv: "TYPESAFE_API_KEY" }, events: { summaryModel: "deepseek/flash" } }),
+			root,
+			env,
+		);
+		expect(config.events?.summaryModel).toEqual({ provider: "deepseek", model: "flash" });
+		expect(config.localJev).toBeUndefined();
+	});
+
+	test("collects event and endpoint validation failures without leaking credentials", () => {
+		const errors = errorsOf(() =>
+			validateConfig(
+				base({
+					jev: { endpoint: "ftp://secret-value@example.test", apiKeyEnv: "MISSING_REMOTE" },
+					localJev: { baseUrl: "bad-secret-value", model: "", apiKeyEnv: "MISSING_LOCAL" },
+					events: { summaryModel: "flash", embeddingModel: "not-an-embedding-model" },
+				}),
+				root,
+				env,
+			),
+		);
+		for (const field of [
+			"jev.endpoint",
+			"MISSING_REMOTE",
+			"localJev.baseUrl",
+			"localJev.model",
+			"MISSING_LOCAL",
+			"events.summaryModel",
+			"events.embeddingModel",
+			"events requires",
+		])
+			expect(errors).toContainEqual(expect.stringContaining(field));
+		expect(errors.join("\n")).not.toContain("secret-value");
+		for (const value of [null, [], 42])
+			expect(errorsOf(() => validateConfig(base({ events: value, localJev: value }), root, env))).toContainEqual(
+				"events must be an object",
+			);
+		for (const summaryModel of [undefined, "/flash", "deepseek/", 42])
+			expect(
+				errorsOf(() =>
+					validateConfig(
+						base({ events: { summaryModel }, localJev: { baseUrl: "http://localhost", model: "m" } }),
+						root,
+						env,
+					),
+				),
+			).toContainEqual(expect.stringContaining("events.summaryModel"));
+		for (const endpoint of [null, "", "ftp://example.test", 42])
+			expect(errorsOf(() => validateConfig(base({ jev: { endpoint } }), root, env))).toContainEqual(
+				expect.stringContaining("jev.endpoint"),
+			);
+		for (const embeddingModel of [null, "", "CUSTOM", 42])
+			expect(
+				errorsOf(() =>
+					validateConfig(base({ events: { summaryModel: "deepseek/flash", embeddingModel } }), root, {
+						...env,
+						DEEPSEEK_API_KEY: "fixture",
+					}),
+				),
+			).toContainEqual(expect.stringContaining("events.embeddingModel"));
 	});
 
 	test("normalizes admin ids per platform", () => {

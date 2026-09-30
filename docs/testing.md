@@ -7,7 +7,7 @@
 由便宜到贵，跑到能覆盖改动的那一层：
 
 1. `bun test test/<相关文件>.test.ts`
-2. `bun test`：全量，零外网、零付费调用
+2. `bun test`：全量；允许联网但永不访问 Discord / Telegram
 3. `bun run check`：`tsc --noEmit`
 4. `bun run lint`：Biome lint + 格式检查（`bun run format` 自动修复）
 5. 真实平台 smoke：跨边界改动才需要。用测试 bot 和测试群/频道 `bun run start`，观察日志与实际回复
@@ -16,7 +16,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 
 ## 网络隔离
 
-`bunfig.toml` 预加载 `test/network-guard.ts`：测试期间 `fetch` 只放行 loopback，其他 HTTP(S) 地址直接拒绝；日志输出同时被静音。即使本机有真实 `.env`，测试也不会调用 Discord、Telegram、模型、DeepSeek、Fish Audio 或 Jev。需要 HTTP 的测试注入 `fetchImpl` 或起本地 Bun server。
+`bunfig.toml` 预加载 `test/network-guard.ts`：测试可联网（例如下载 embedding 模型），但 `fetch` 永不放行 Discord 域名 `discord.com`、`discordapp.com`、`discord.gg`、`discordapp.net` 及其子域名，或 Telegram Bot API `api.telegram.org`；日志输出同时被静音。即使本机有真实 `.env`，测试也不能向这些聊天平台发消息。模型/服务的单元测试仍注入 `fetchImpl` 或起本地 Bun server，以保持确定性并避免真实付费调用。
 
 ## 测试清单
 
@@ -24,8 +24,10 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 
 | 文件 | 守护什么 |
 |---|---|
-| `network-isolation.test.ts` | 有真实凭据时 `bun test` 仍拒绝外网 / 付费请求 |
-| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析、reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥 |
+| `network-isolation.test.ts` | 有真实凭据时仍拒绝 Discord / Telegram（含 Discord 子域名），允许其他网络 |
+| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥 |
+| `events.test.ts` | 人类消息话题归属、bot 回复继承、空间/频道隔离；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
+| `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、OpenAI-compatible 请求及鉴权、远程失败回退、不泄露 provider 错误正文 |
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
 | `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级 |

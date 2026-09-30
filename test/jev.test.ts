@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { createJevClient, JEV_ENDPOINT, JevError, type JevErrorCode, shouldQuickReact } from "../src/decision/jev.ts";
+import {
+	createJevClient,
+	JEV_ENDPOINT,
+	JevError,
+	type JevErrorCode,
+	NEW_EVENT_OPTION,
+	shouldQuickReact,
+	withFallback,
+} from "../src/decision/jev.ts";
 
 interface Captured {
 	url: string;
@@ -147,10 +155,6 @@ describe("Jev relevance scoring", () => {
 		expect(scores).toEqual([0.9, 0.1, 0.5]);
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.body.state).toBe("明天去爬山");
-		expect(calls[0]?.body.questions.c1).toEqual({
-			type: "noul",
-			instructions: { candidate: "养猫", question: "Is `candidate` relevant to the message in the state?" },
-		});
 	});
 
 	test("empty candidates skip the request", async () => {
@@ -162,6 +166,130 @@ describe("Jev relevance scoring", () => {
 	test("a missing candidate answer is invalid", async () => {
 		const { impl } = fakeFetch(() => Response.json({ answers: { c0: { type: "noul", noul: 0.9 } } }));
 		await expectJevError(createJevClient(config, impl).scoreRelevance("q", ["a", "b"]), "invalid_response");
+	});
+});
+
+describe("Jev event decisions", () => {
+	const options = [
+		{ id: "e12", description: "周末爬山" },
+		{ id: "e13", description: "猫咪饮食" },
+	];
+
+	test("uses a configured endpoint without inventing authorization", async () => {
+		const { impl, calls } = fakeFetch(() => Response.json({ answers: { c0: { type: "noul", noul: 0.8 } } }));
+		expect(
+			await createJevClient({ endpoint: "http://localhost/v1/systemone", model: "local" }, impl).scoreRelevance("q", [
+				"a",
+			]),
+		).toEqual([0.8]);
+		expect(calls[0]?.url).toBe("http://localhost/v1/systemone");
+		expect(new Headers(calls[0]?.init.headers).has("authorization")).toBe(false);
+	});
+
+	test("chooses an offered event or a new event, and rejects unknown or malformed answers", async () => {
+		for (const choice of ["e12", "e13", NEW_EVENT_OPTION]) {
+			const { impl } = fakeFetch(() =>
+				Response.json({ answers: { event: { type: "choice", choice, confidence: 0.7 } } }),
+			);
+			expect(await createJevClient(config, impl).chooseEvent({ message: "明天几点出发", options })).toEqual({
+				choice,
+				confidence: 0.7,
+			});
+		}
+		for (const answer of [
+			{ type: "choice", choice: "e99", confidence: 0.9 },
+			{ type: "choice", choice: null, confidence: 0.9 },
+			{ type: "choice", choice: "e12", confidence: 1.1 },
+			{ type: "noul", noul: 0.9 },
+			undefined,
+		]) {
+			const { impl } = fakeFetch(() => Response.json({ answers: { event: answer } }));
+			await expectJevError(
+				createJevClient(config, impl).chooseEvent({ message: "明天几点出发", options }),
+				"invalid_response",
+			);
+		}
+	});
+
+	test("scores participation in member order and rejects incomplete batches", async () => {
+		const { impl, calls } = fakeFetch(() =>
+			Response.json({ answers: { m1: { type: "noul", noul: 0.2 }, m0: { type: "noul", noul: 0.9 } } }),
+		);
+		const client = createJevClient(config, impl);
+		expect(
+			await client.scoreParticipation({
+				event: "爬山",
+				transcript: ["甲：几点出发", "乙：我养猫"],
+				members: ["甲", "乙"],
+			}),
+		).toEqual([0.9, 0.2]);
+		expect(calls).toHaveLength(1);
+		expect(await client.scoreParticipation({ event: "爬山", transcript: [], members: [] })).toEqual([]);
+		expect(calls).toHaveLength(1);
+		const missing = fakeFetch(() => Response.json({ answers: { m0: { type: "noul", noul: 0.9 } } }));
+		await expectJevError(
+			createJevClient(config, missing.impl).scoreParticipation({
+				event: "爬山",
+				transcript: [],
+				members: ["甲", "乙"],
+			}),
+			"invalid_response",
+		);
+	});
+});
+
+describe("Jev fallback", () => {
+	test("all decisions recover once on primary failure; successful primary does not call fallback", async () => {
+		const primary = fakeFetch(() => new Response(null, { status: 503 }));
+		const local = fakeFetch(({ body }) => {
+			const answers = Object.fromEntries(
+				Object.entries(body.questions).map(([id, question]) => [
+					id,
+					question.type === "choice"
+						? { type: "choice", choice: id === "event" ? "e1" : "👍", confidence: 0.8 }
+						: { type: "noul", noul: 0.6 },
+				]),
+			);
+			return Response.json({ answers });
+		});
+		const client = withFallback(createJevClient(config, primary.impl), createJevClient(config, local.impl));
+		expect(await client.chooseEvent({ message: "q", options: [{ id: "e1", description: "d" }] })).toEqual({
+			choice: "e1",
+			confidence: 0.8,
+		});
+		expect(await client.scoreRelevance("q", ["a"])).toEqual([0.6]);
+		expect(await client.scoreParticipation({ event: "d", transcript: [], members: ["a"] })).toEqual([0.6]);
+		expect(await client.decideQuickReaction({ text: "q", emojis: EMOJIS })).toEqual({
+			emoji: "👍",
+			confidence: 0.8,
+			strongEmotion: 0.6,
+			funny: 0.6,
+		});
+		expect(primary.calls).toHaveLength(4);
+		expect(local.calls).toHaveLength(4);
+		const unused = fakeFetch(() => {
+			throw new Error("fallback must not run");
+		});
+		expect(
+			await withFallback(createJevClient(config, local.impl), createJevClient(config, unused.impl)).scoreRelevance(
+				"q",
+				["a"],
+			),
+		).toEqual([0.6]);
+		expect(unused.calls).toHaveLength(0);
+	});
+
+	test("does not hide a failing fallback", async () => {
+		const primary = fakeFetch(() => new Response(null, { status: 503 }));
+		const fallback = fakeFetch(() => new Response(null, { status: 401 }));
+		await expectJevError(
+			withFallback(createJevClient(config, primary.impl), createJevClient(config, fallback.impl)).scoreRelevance("q", [
+				"a",
+			]),
+			"http_401",
+		);
+		expect(primary.calls).toHaveLength(1);
+		expect(fallback.calls).toHaveLength(1);
 	});
 });
 

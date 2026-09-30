@@ -30,6 +30,10 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 			return { ...decision, confidence: 0.9 };
 		},
 		scoreRelevance: async () => [],
+		chooseEvent: async () => {
+			throw new Error("unused");
+		},
+		scoreParticipation: async () => [],
 	};
 	const transport = {
 		platform: "telegram",
