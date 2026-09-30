@@ -388,7 +388,7 @@ async function main(): Promise<void> {
 	chmodSync(dbPath, 0o600);
 	memberMemory = new DiscordMemberMemory(db);
 	const soulStore = new DiscordSoulStore({
-		dataDir: config.dataDir,
+		db,
 		personaIds: personas.map((persona) => persona.id),
 	});
 	core = new DiscordConversationCore({

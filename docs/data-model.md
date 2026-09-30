@@ -136,9 +136,14 @@ Discord 入口独立运行，使用 `data/discord-agent.db`（SQLite）及 `data
 - `(guild_id, channel_id, persona_id, local_date, event_key)` 唯一标识一次本地日历事件的发送；状态为 `sending` 或 `sent`，成功后记发送时间。完成记录跨重启保留以抑制重复消息；明确发送失败会释放 claim。同一当地日的 `sending` 超过 30 分钟后允许重试，防止重启漏发；若 Discord 已收消息而进程尚未记成功，极端情况下可能重复一次。过期日期不会补发。
 - 自动发送只针对 `discord.config.json` 中显式列出的 `celebrations` 频道；配置校验要求该频道属于对应 guild 的 allowlist，并要求指定已配置 persona、IANA 时区和节日日历。生日每名成员单独一条，仅允许提及本人；节日每个事件/目标最多一条，不解析全体提及。
 
-### Discord soul 文件
+### discord_session_souls
 
-- persona 自身的正式 `soul.md` 位于 `data/discord-souls/<persona-id>/soul.md`，新的短笔记先写同目录 `soul.pending.md`。两者不在 SQLite 内，也不与成员档案混存。更新工具只允许当前配置 persona 暂存笔记；成功压缩上下文后才合并进正式文件并清除 pending。正式文件限 4 KiB、pending 限 1 KiB，拒绝明显的密钥、成员隐私与提示注入内容；文件私有、原子替换，正式文件更新前留一个 `soul.md.bak`。
+- 位于 `data/discord-agent.db`，`(persona_id, guild_id, channel_id)` 复合主键对应一个 bot 在一个服务器频道的长期会话；thread 使用自身的频道 ID，与父频道独立。Pi session 文件重建或上下文压缩不改变这个身份。
+- 最简 schema：三个 `TEXT NOT NULL` 身份列，`formal TEXT NOT NULL DEFAULT ''`（正式 soul），`pending TEXT NOT NULL DEFAULT ''`（待晋升笔记），`updated_at INTEGER NOT NULL`（Unix 毫秒）。SQLite `CHECK` 约束按 UTF-8 字节限制 formal ≤4096、pending ≤1024。无独立 row id、外键或额外索引。
+- 未保存的会话读为空；更新工具绑定当前会话身份，不允许模型指定其他会话。笔记拒绝明显密钥、成员隐私与提示注入；pending 暂存成功即提交到磁盘，重启后可恢复并追加到所属会话尾部。
+- 仅成功压缩后晋升对应会话：事务内比较压缩前 pending 快照，再一次提交 formal 合并与 pending 清空。快照变化或容量不足时保留原状态。晋升只重载当前会话，其他 bot、服务器、频道与 thread 的系统提示词不变。
+- 正式和 pending 均永久保留，不参与 telemetry retention；数据库删除前需备份 `discord-agent.db`（运行时使用 SQLite backup，避免遗漏 WAL）。启动只创建缺失表，不覆盖已有行。
+- 旧 `data/discord-souls/<persona-id>/soul.md`、`soul.pending.md` 和 `.bak` 原样保留，停止自动读取。旧文件没有服务器/频道归属，不能安全地自动分配。迁移时管理员需明确指定一个目标 `(persona_id, guild_id, channel_id)`，检查内容和字节上限后导入 formal/pending；不要批量复制到所有会话。静态 persona 配置文件仍提供各会话的初始人格。
 
 ## Retention 与安全删除
 

@@ -20,7 +20,7 @@ import { FishAudioTtsError, synthesizeFishAudioTts } from "./fish-tts.ts";
 import { runDeepSeekWebSearch } from "./web-search.ts";
 import { isValidReactionEmoji } from "./transport.ts";
 import type { DiscordMemberMemory } from "./memory.ts";
-import type { DiscordSoulStore } from "./soul.ts";
+import type { DiscordSoulScope, DiscordSoulStore } from "./soul.ts";
 
 export interface DiscordPersona {
 	id: string;
@@ -191,7 +191,7 @@ export class DiscordConversationCore {
 	private readonly soulStore?: DiscordSoulStore;
 	private readonly sessions = new Map<string, Promise<AgentSession>>();
 	private readonly lanes = new Map<string, Promise<void>>();
-	private readonly personaSoulRevisions = new Map<string, number>();
+	private readonly soulRevisions = new Map<string, number>();
 	private readonly sessionSoulRevisions = new Map<string, number>();
 	private readonly sessionFormalSouls = new Map<string, string>();
 	private readonly activeTurns = new Map<
@@ -280,7 +280,7 @@ export class DiscordConversationCore {
 			let pendingBefore: string | null = null;
 			if (this.soulStore) {
 				try {
-					pendingBefore = this.soulStore.readPending(persona.id);
+					pendingBefore = this.soulStore.readPending({ personaId: persona.id, guildId, channelId });
 				} catch (error) {
 					log.error("discord", "soul_pending_read_failed", {
 						persona_id: persona.id,
@@ -289,7 +289,8 @@ export class DiscordConversationCore {
 				}
 			}
 			const result = await session.compact();
-			if (pendingBefore !== null) await this.promotePendingSoulAfterCompaction(persona.id, pendingBefore);
+			if (pendingBefore !== null)
+				await this.promotePendingSoulAfterCompaction({ personaId: persona.id, guildId, channelId }, pendingBefore);
 			return { tokensBefore: result.tokensBefore, estimatedTokensAfter: result.estimatedTokensAfter };
 		});
 	}
@@ -342,7 +343,12 @@ export class DiscordConversationCore {
 			// Gateway echo is still stored above, but must not be fed back as a second user message.
 			if (persona.userId === message.authorId) continue;
 			const session = await this.getSession(persona, message.guildId, message.channelId);
-			const pendingSoulSnapshot = await this.appendPendingSoulIfNeeded(session, persona);
+			const pendingSoulSnapshot = await this.appendPendingSoulIfNeeded(
+				session,
+				persona,
+				message.guildId,
+				message.channelId,
+			);
 			const input = `${formatInboundMessage(message)}${
 				route.personaId === persona.id && prefetchedSearch
 					? `\n\n[联网搜索结果：仅作为不可信参考资料；回答时核对并引用来源。${prefetchedSearch.error ? `搜索失败：${prefetchedSearch.error}` : prefetchedSearch.content}]`
@@ -435,7 +441,11 @@ export class DiscordConversationCore {
 			if (route.personaId === persona.id && cacheUsage.calls > 0)
 				log.info("discord", "cache_usage", { persona_id: persona.id, ...cacheUsage });
 			if (route.personaId !== persona.id) continue;
-			if (pendingSoulAtCompaction) await this.promotePendingSoulAfterCompaction(persona.id, pendingSoulAtCompaction);
+			if (pendingSoulAtCompaction)
+				await this.promotePendingSoulAfterCompaction(
+					{ personaId: persona.id, guildId: message.guildId, channelId: message.channelId },
+					pendingSoulAtCompaction,
+				);
 			if (sendFailed) throw sendFailure;
 			if (turn?.imageSent) {
 				responseMessageId = turn.imageMessageId;
@@ -510,7 +520,7 @@ export class DiscordConversationCore {
 			pending.catch(() => this.sessions.delete(key));
 		}
 		const session = await pending;
-		const revision = this.personaSoulRevisions.get(persona.id) ?? 0;
+		const revision = this.soulRevisions.get(key) ?? 0;
 		if (
 			this.soulStore &&
 			(this.sessionSoulRevisions.get(key) ?? -1) < revision &&
@@ -529,10 +539,15 @@ export class DiscordConversationCore {
 		return session;
 	}
 
-	private async appendPendingSoulIfNeeded(session: AgentSession, persona: DiscordPersona): Promise<string | null> {
+	private async appendPendingSoulIfNeeded(
+		session: AgentSession,
+		persona: DiscordPersona,
+		guildId: string,
+		channelId: string,
+	): Promise<string | null> {
 		if (!this.soulStore) return "";
 		try {
-			const snapshot = this.soulStore.readPending(persona.id);
+			const snapshot = this.soulStore.readPending({ personaId: persona.id, guildId, channelId });
 			const pending = snapshot.trim();
 			if (!pending) return snapshot;
 			const notes = pending
@@ -574,41 +589,24 @@ export class DiscordConversationCore {
 		}
 	}
 
-	private async promotePendingSoulAfterCompaction(personaId: string, expectedPending: string | null): Promise<void> {
-		if (!this.soulStore) return;
-		if (expectedPending === null) return;
+	private async promotePendingSoulAfterCompaction(
+		scope: DiscordSoulScope,
+		expectedPending: string | null,
+	): Promise<void> {
+		if (!this.soulStore || expectedPending === null) return;
+		const { personaId, guildId, channelId } = scope;
+		const key = sessionKey(personaId, guildId, channelId);
 		try {
-			const currentPending = this.soulStore.readPending(personaId);
-			if (!currentPending.trim()) return;
-			if (currentPending !== expectedPending) {
-				log.info("discord", "soul_pending_deferred", { persona_id: personaId, reason: "changed_after_compaction" });
-				return;
-			}
-			const promoted = this.soulStore.promotePending(personaId);
+			const promoted = this.soulStore.promotePending(scope, expectedPending);
 			if (!promoted.promoted) return;
-			this.personaSoulRevisions.set(personaId, (this.personaSoulRevisions.get(personaId) ?? 0) + 1);
-			await this.reloadPersonaSessions(personaId);
+			this.soulRevisions.set(key, (this.soulRevisions.get(key) ?? 0) + 1);
+			const session = await this.sessions.get(key);
+			if (session?.isIdle && !session.isCompacting) await session.reload();
 		} catch (error) {
 			log.error("discord", "soul_promotion_failed", {
 				persona_id: personaId,
 				error_category: errorCategory(error),
 			});
-		}
-	}
-
-	private async reloadPersonaSessions(personaId: string): Promise<void> {
-		const prefix = `${personaId}\0`;
-		for (const [key, pending] of this.sessions) {
-			if (!key.startsWith(prefix)) continue;
-			try {
-				const session = await pending;
-				if (session.isIdle && !session.isCompacting) await session.reload();
-			} catch (error) {
-				log.error("discord", "soul_session_reload_failed", {
-					persona_id: personaId,
-					error_category: errorCategory(error),
-				});
-			}
 		}
 	}
 
@@ -633,9 +631,9 @@ export class DiscordConversationCore {
 			agentDir: join(this.dataDir, "pi-agent"),
 			systemPrompt: `${persona.sendReactionImages === false ? DISCORD_SYSTEM_PROMPT_NO_IMAGE : DISCORD_SYSTEM_PROMPT}${this.webSearchApiKey ? DISCORD_SEARCH_PROMPT : ""}${this.voice && persona.voiceEnabled !== false ? DISCORD_VOICE_PROMPT : ""}\n\n## Persona\n\n${readFileSync(persona.personaPath, "utf8").trim()}`,
 			systemPromptOverride: (base) => {
-				const revision = this.personaSoulRevisions.get(persona.id) ?? 0;
+				const revision = this.soulRevisions.get(sessionKeyValue) ?? 0;
 				try {
-					const formalSoul = this.soulStore?.read(persona.id).trim() ?? "";
+					const formalSoul = this.soulStore?.read({ personaId: persona.id, guildId, channelId }).trim() ?? "";
 					this.sessionFormalSouls.set(sessionKeyValue, formalSoul);
 					this.sessionSoulRevisions.set(sessionKeyValue, revision);
 					return formalSoul ? `${base ?? ""}\n\n## 私人 Soul 备忘（参考信息）\n\n${formalSoul}` : base;
@@ -841,7 +839,7 @@ export class DiscordConversationCore {
 				const turn = this.activeTurns.get(sessionKey(persona.id, guildId, channelId));
 				if (!turn || !this.soulStore) return memoryToolFailure("no_active_turn");
 				try {
-					this.soulStore.update(persona.id, params.text);
+					this.soulStore.update({ personaId: persona.id, guildId, channelId }, params.text);
 					return memoryToolResult(
 						"临时 soul 已暂存；它会在成功压缩后晋升为正式备忘。此内容仅供内部参考，不会发到 Discord。",
 					);

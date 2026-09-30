@@ -1,19 +1,4 @@
-import {
-	chmodSync,
-	closeSync,
-	existsSync,
-	fsyncSync,
-	lstatSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import type { Database } from "bun:sqlite";
 
 const MAX_SOUL_BYTES = 4 * 1024;
 const MAX_PENDING_BYTES = 1024;
@@ -34,46 +19,6 @@ const SECRET_OR_INJECTION_PATTERNS = [
 	/(?:泄露|输出|打印).{0,8}(?:系统提示词|密钥|密码)/,
 ];
 
-function assertSafeDirectory(path: string): void {
-	if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
-	const stat = lstatSync(path);
-	if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Soul storage path must be a real directory");
-	chmodSync(path, 0o700);
-}
-
-function assertSafeFile(path: string): void {
-	try {
-		const stat = lstatSync(path);
-		if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Soul file must be a regular file");
-		chmodSync(path, 0o600);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw error;
-	}
-}
-
-function atomicWrite(path: string, contents: string): void {
-	const tempPath = join(dirname(path), `.soul-${process.pid}-${randomUUID()}.tmp`);
-	let fd: number | undefined;
-	try {
-		fd = openSync(tempPath, "wx", 0o600);
-		writeFileSync(fd, contents, { encoding: "utf8" });
-		fsyncSync(fd);
-		closeSync(fd);
-		fd = undefined;
-		renameSync(tempPath, path);
-		chmodSync(path, 0o600);
-	} catch (error) {
-		if (fd !== undefined) closeSync(fd);
-		try {
-			unlinkSync(tempPath);
-		} catch {
-			// Nothing to clean up if creation did not get far enough.
-		}
-		throw error;
-	}
-}
-
 function validateNote(text: string, maxBytes: number): string {
 	if (typeof text !== "string" || !text.trim()) throw new Error("Soul text must not be empty");
 	const note = text.trim();
@@ -84,14 +29,6 @@ function validateNote(text: string, maxBytes: number): string {
 	return note;
 }
 
-function readBoundedFile(path: string, maxBytes: number, label: string): string {
-	assertSafeFile(path);
-	if (!existsSync(path)) return "";
-	const value = readFileSync(path, "utf8");
-	if (Buffer.byteLength(value, "utf8") > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
-	return value;
-}
-
 function notesFromPending(pending: string): string[] {
 	return pending
 		.split(PENDING_SEPARATOR)
@@ -99,93 +36,109 @@ function notesFromPending(pending: string): string[] {
 		.filter(Boolean);
 }
 
-/** Private, per-persona store for stable character style and self-reflection notes. */
+export interface DiscordSoulScope {
+	personaId: string;
+	guildId: string;
+	channelId: string;
+}
+
+const SCHEMA = `
+	CREATE TABLE IF NOT EXISTS discord_session_souls (
+		persona_id TEXT NOT NULL,
+		guild_id TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		formal TEXT NOT NULL DEFAULT '' CHECK (length(CAST(formal AS BLOB)) <= 4096),
+		pending TEXT NOT NULL DEFAULT '' CHECK (length(CAST(pending AS BLOB)) <= 1024),
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (persona_id, guild_id, channel_id)
+	);
+`;
+
+/** Durable character notes owned by one bot in one Discord conversation. */
 export class DiscordSoulStore {
-	private readonly root: string;
+	private readonly db: Database;
 	private readonly personas: Set<string>;
 
-	constructor(options: { dataDir: string; personaIds: readonly string[] }) {
-		if (!options.dataDir) throw new Error("dataDir is required");
+	constructor(options: { db: Database; personaIds: readonly string[] }) {
 		for (const id of options.personaIds) {
 			if (!ID_PATTERN.test(id)) throw new Error(`Invalid persona id: ${id}`);
 		}
 		this.personas = new Set(options.personaIds);
-		this.root = join(resolve(options.dataDir), "discord-souls");
+		this.db = options.db;
+		this.db.exec(SCHEMA);
 	}
 
-	read(personaId: string): string {
-		const path = this.pathFor(personaId);
-		this.ensureDirectory(personaId);
-		return readBoundedFile(path, MAX_SOUL_BYTES, "Soul file");
+	read(scope: DiscordSoulScope): string {
+		return this.state(scope).formal;
 	}
 
-	update(personaId: string, text: string): { saved: true } {
-		this.pathFor(personaId);
+	readPending(scope: DiscordSoulScope): string {
+		return this.state(scope).pending;
+	}
+
+	update(scope: DiscordSoulScope, text: string): { saved: true } {
 		const note = validateNote(text, MAX_PENDING_BYTES);
-		this.ensureDirectory(personaId);
-		const path = this.pendingPathFor(personaId);
-		const pending = readBoundedFile(path, MAX_PENDING_BYTES, "Pending soul");
-		const notes = notesFromPending(pending).map((note) => validateNote(note, MAX_PENDING_BYTES));
-		if (!notes.includes(note)) {
-			const next = [...notes, note].join(PENDING_SEPARATOR);
-			if (Buffer.byteLength(next, "utf8") > MAX_PENDING_BYTES)
-				throw new Error(`Pending soul exceeds ${MAX_PENDING_BYTES} bytes`);
-			atomicWrite(path, `${next}\n`);
-		}
+		this.db
+			.transaction(() => {
+				const { formal, pending } = this.state(scope);
+				const notes = notesFromPending(pending).map((value) => validateNote(value, MAX_PENDING_BYTES));
+				if (notes.includes(note)) return;
+				const next = `${[...notes, note].join(PENDING_SEPARATOR)}\n`;
+				if (Buffer.byteLength(next, "utf8") > MAX_PENDING_BYTES)
+					throw new Error(`Pending soul exceeds ${MAX_PENDING_BYTES} bytes`);
+				this.save(scope, formal, next);
+			})
+			.immediate();
 		return { saved: true };
 	}
 
-	readPending(personaId: string): string {
-		this.pathFor(personaId);
-		this.ensureDirectory(personaId);
-		return readBoundedFile(this.pendingPathFor(personaId), MAX_PENDING_BYTES, "Pending soul");
+	/** Commit formal content and pending cleanup together; failures retain the staged notes. */
+	promotePending(scope: DiscordSoulScope, expectedPending: string): { promoted: boolean } {
+		return this.db
+			.transaction(() => {
+				const { formal, pending } = this.state(scope);
+				if (!pending.trim() || pending !== expectedPending) return { promoted: false };
+				const notes = notesFromPending(pending).map((note) => validateNote(note, MAX_PENDING_BYTES));
+				const additions = notes.filter((note) => !formal.includes(note));
+				const next = additions.length
+					? `${formal.trimEnd()}${formal.trim() ? "\n\n" : ""}${additions.join("\n\n")}\n`
+					: formal;
+				if (Buffer.byteLength(next, "utf8") > MAX_SOUL_BYTES) throw new Error("Soul would exceed 4 KiB");
+				this.save(scope, next, "");
+				return { promoted: true };
+			})
+			.immediate();
 	}
 
-	/** Merge staged notes into the formal soul; safe to retry after a crash before pending cleanup. */
-	promotePending(personaId: string): { promoted: boolean } {
-		const soulPath = this.pathFor(personaId);
-		this.ensureDirectory(personaId);
-		const pendingPath = this.pendingPathFor(personaId);
-		const pending = readBoundedFile(pendingPath, MAX_PENDING_BYTES, "Pending soul");
-		if (!pending.trim()) return { promoted: false };
-
-		const previous = readBoundedFile(soulPath, MAX_SOUL_BYTES, "Soul file");
-		const notes = notesFromPending(pending).map((note) => validateNote(note, MAX_PENDING_BYTES));
-		const additions = notes.filter((note) => !previous.includes(note));
-		const next = additions.length
-			? `${previous.trimEnd()}${previous.trim() ? "\n\n" : ""}${additions.join("\n\n")}\n`
-			: previous;
-		if (Buffer.byteLength(next, "utf8") > MAX_SOUL_BYTES) throw new Error("Soul file would exceed 4 KiB");
-
-		if (next !== previous) {
-			if (previous) {
-				const backupPath = join(dirname(soulPath), "soul.md.bak");
-				assertSafeFile(backupPath);
-				atomicWrite(backupPath, previous);
+	private state(scope: DiscordSoulScope): { formal: string; pending: string } {
+		this.assertScope(scope);
+		return (
+			(this.db
+				.query(`
+			SELECT formal, pending FROM discord_session_souls
+			WHERE persona_id = ? AND guild_id = ? AND channel_id = ?
+		`)
+				.get(scope.personaId, scope.guildId, scope.channelId) as { formal: string; pending: string } | null) ?? {
+				formal: "",
+				pending: "",
 			}
-			atomicWrite(soulPath, next);
-		}
-		assertSafeFile(pendingPath);
-		unlinkSync(pendingPath);
-		return { promoted: true };
+		);
 	}
 
-	private pathFor(personaId: string): string {
-		if (!this.personas.has(personaId)) throw new Error("Persona is not configured for soul storage");
-		return join(this.root, personaId, "soul.md");
+	private save(scope: DiscordSoulScope, formal: string, pending: string): void {
+		this.db
+			.query(`
+			INSERT INTO discord_session_souls (persona_id, guild_id, channel_id, formal, pending, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(persona_id, guild_id, channel_id) DO UPDATE SET
+				formal = excluded.formal, pending = excluded.pending, updated_at = excluded.updated_at
+		`)
+			.run(scope.personaId, scope.guildId, scope.channelId, formal, pending, Date.now());
 	}
 
-	private pendingPathFor(personaId: string): string {
-		return join(this.root, personaId, "soul.pending.md");
-	}
-
-	private ensureDirectory(personaId: string): void {
-		if (!existsSync(this.root)) mkdirSync(this.root, { recursive: true, mode: 0o700 });
-		assertSafeDirectory(this.root);
-		assertSafeDirectory(join(this.root, personaId));
-		// realpath checks catch a symlink inserted in an ancestor between construction and use.
-		const actual = realpathSync(join(this.root, personaId));
-		if (actual !== join(realpathSync(this.root), personaId))
-			throw new Error("Soul path escaped its configured directory");
+	private assertScope(scope: DiscordSoulScope): void {
+		if (!this.personas.has(scope.personaId)) throw new Error("Persona is not configured for soul storage");
+		if (!/^\d{1,24}$/.test(scope.guildId) || !/^\d{1,24}$/.test(scope.channelId))
+			throw new Error("Soul scope requires valid guild and channel ids");
 	}
 }
