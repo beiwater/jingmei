@@ -20,7 +20,7 @@ import { FishAudioTtsError, synthesizeFishAudioTts } from "./fish-tts.ts";
 import { runDeepSeekWebSearch } from "./web-search.ts";
 import { isValidReactionEmoji } from "./transport.ts";
 import type { DiscordMemberMemory } from "./memory.ts";
-import type { DiscordSoulScope, DiscordSoulStore } from "./soul.ts";
+import { parsePendingSoul, type DiscordSoulScope, type DiscordSoulStore } from "./soul.ts";
 
 export interface DiscordPersona {
 	id: string;
@@ -125,7 +125,6 @@ interface ActiveTurn {
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
 const DISCORD_CONTEXT_TYPE = "discord_context_v1";
 const DISCORD_PENDING_SOUL_TYPE = "discord_pending_soul_v1";
-const PENDING_SOUL_SEPARATOR = "\n\n<!-- pending soul note -->\n\n";
 const REACTION_ASSETS = {
 	hello: { file: "hello.png", caption: "👋" },
 	laugh: { file: "laugh.png", caption: "😂" },
@@ -511,10 +510,7 @@ export class DiscordConversationCore {
 			const snapshot = this.soulStore.readPending({ personaId: persona.id, guildId, channelId });
 			const pending = snapshot.trim();
 			if (!pending) return snapshot;
-			const notes = pending
-				.split(PENDING_SOUL_SEPARATOR)
-				.map((note) => note.trim())
-				.filter(Boolean);
+			const notes = parsePendingSoul(pending);
 			for (const note of notes) {
 				const noteHash = createHash("sha256").update(note).digest("hex");
 				const alreadyInHistory = session.messages.some((message) => {

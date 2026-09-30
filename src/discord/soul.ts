@@ -29,7 +29,7 @@ function validateNote(text: string, maxBytes: number): string {
 	return note;
 }
 
-function notesFromPending(pending: string): string[] {
+export function parsePendingSoul(pending: string): string[] {
 	return pending
 		.split(PENDING_SEPARATOR)
 		.map((note) => note.trim())
@@ -81,7 +81,7 @@ export class DiscordSoulStore {
 		this.db
 			.transaction(() => {
 				const { formal, pending } = this.state(scope);
-				const notes = notesFromPending(pending).map((value) => validateNote(value, MAX_PENDING_BYTES));
+				const notes = parsePendingSoul(pending).map((value) => validateNote(value, MAX_PENDING_BYTES));
 				if (notes.includes(note)) return;
 				const next = `${[...notes, note].join(PENDING_SEPARATOR)}\n`;
 				if (Buffer.byteLength(next, "utf8") > MAX_PENDING_BYTES)
@@ -98,7 +98,7 @@ export class DiscordSoulStore {
 			.transaction(() => {
 				const { formal, pending } = this.state(scope);
 				if (!pending.trim() || pending !== expectedPending) return { promoted: false };
-				const notes = notesFromPending(pending).map((note) => validateNote(note, MAX_PENDING_BYTES));
+				const notes = parsePendingSoul(pending).map((note) => validateNote(note, MAX_PENDING_BYTES));
 				const additions = notes.filter((note) => !formal.includes(note));
 				const next = additions.length
 					? `${formal.trimEnd()}${formal.trim() ? "\n\n" : ""}${additions.join("\n\n")}\n`
