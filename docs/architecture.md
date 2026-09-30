@@ -1,174 +1,197 @@
 # 架构
 
-> 描述当前代码真正做了什么。架构变化时同步更新。
+> 描述当前代码真正做了什么。改动架构时同步更新本文。
 
-## Process model
+## 总览
 
+一个进程、一个对话核心、两个薄平台适配器。
+
+```mermaid
+flowchart LR
+  DG[Discord Gateway<br/>每个角色一个连接] --> DA[src/platforms/discord]
+  TG[Telegram getUpdates<br/>每个角色一个轮询] --> TA[src/platforms/telegram]
+  DA -- InboundMessage --> C[src/core/conversation.ts]
+  TA -- InboundMessage --> C
+  C --> S[Pi AgentSession<br/>角色 × 空间 × 频道]
+  C --> J[src/decision/jev.ts]
+  C --> DB[(data/jingmei.db)]
+  S -- 回复 / 工具 --> PT[PlatformTransport]
+  PT --> DA
+  PT --> TA
 ```
-                         Telegram
-                    /       |       \
-               Poller 1  Poller 2  Poller N
-                    \       |       /
-                     daemon（单进程、长驻）
-                     /      |       \
-            ingestion   AgentSession×N   SQLite
-             + router                       │
-                     \      |              /
-                      IPC（Unix socket JSONL）
-                                  │
-                    Pi interactive process（短生命周期）
-                    ├─ Telegram transcript custom entry
-                    └─ Telegram feed status widget
+
+- **空间（space）**：`SpaceId = "${platform}:${rawId}"`，Discord 服务器或 Telegram 群。记忆、soul、会话、消息都按空间隔离；只有适配器解析原始 ID。
+- **角色（persona）**：配置里的一个角色，在每个平台可以有一个 bot 账号（`persona.accounts[platform]`，启动时验证 token 后填入）。
+- **核心只认 `src/core/types.ts`**：`InboundMessage` 进，`PlatformTransport` 出。平台差异（格式、长度上限、表情集合、提示词里的平台说明）全部在适配器的 transport 里。
+
+## 目录
+
+| 路径 | 职责 |
+|---|---|
+| `src/main.ts` | 启动编排：配置 → DB → 平台 → 模型运行时 → 核心 → 祝福调度 → 开始接收；信号关闭 |
+| `src/discord/main.ts` | systemd 使用的入口，只有一行 `import "../main.ts"` |
+| `src/config.ts` | 读取并校验 `jingmei.config.json` + `.env`；生成 DeepSeek 模型目录 |
+| `src/core/types.ts` | 平台无关的类型契约 |
+| `src/core/conversation.ts` | 对话核心：存消息、路由、会话、图片落盘、搜索预取、发送 |
+| `src/core/router.ts` | 确定性路由与角色作用域 |
+| `src/core/context.ts` | provider 上下文投影（Pi `context` 事件） |
+| `src/core/prompt.ts` | system prompt |
+| `src/core/tools.ts` | 模型工具 |
+| `src/core/quick-reactions.ts` | Jev 秒回表情 |
+| `src/core/memory.ts` / `soul.ts` / `celebrations.ts` | 成员记忆、私人 soul、节日生日祝福 |
+| `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移 |
+| `src/core/model-runtime.ts` | 共享 Pi `ModelRuntime` 与启动期模型校验 |
+| `src/decision/jev.ts` | TypeSafe Jev 客户端 |
+| `src/platforms/discord/` | Gateway/REST 客户端、消息归一化、附件下载、斜杠命令 |
+| `src/platforms/telegram/` | Bot API 客户端、长轮询、归一化、Markdown→entities、文字命令 |
+| `src/media/image.ts` / `video-frames.ts` | 图片转码缩放；ffmpeg 视频抽帧 |
+| `src/tools/` | `run_js` 沙箱、DeepSeek 联网搜索、Fish Audio TTS |
+| `src/net/` | 公网 URL 过滤、有界读取响应体 |
+| `src/observability/log.ts` | 唯一的结构化日志出口 |
+
+## 启动
+
+1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
+2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。
+3. `openDatabase()`：没有 `jingmei.db` 而有 `discord-agent.db` 时连同 `-wal`/`-shm` 改名，再迁移 `discord_*` 表。
+4. 按配置创建 Discord/Telegram 平台：每个 token 先验证身份（Discord `/users/@me`，Telegram `getMe`），填入 `persona.accounts`。
+5. `createInstalledPiModelRuntime()`：整个进程一个 Pi `ModelRuntime`，agent 目录是 `data/pi-agent`（`models.json`、`auth.json` 都在这里）。provider 扩展只从 agent 目录加载，项目 `.pi/` 扩展不被信任、不加载。每个角色的模型、reasoning 档位和认证逐一 `assertBotModelConfigured`；`visionModel` 另需支持图片输入。
+6. 创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。
+
+## 一条消息的路径
+
+适配器把平台消息归一化为 `InboundMessage`：允许列表之外的空间/频道直接丢弃；提及解析为用户 ID；图片经 `prepareImage`，视频抽帧，其余媒体换成文字占位。随后 `Conversation.handleMessage()`：
+
+1. 按 `(space, channel)` 串行（lane）。同一空间同一频道的消息严格按顺序处理；不同频道并发。
+2. `INSERT OR IGNORE` 到 `messages`。已存在则直接返回——多个角色的连接收到同一条消息、重启后重放，都在这里去重。
+3. 人类消息交给 `MemberMemory.observe()` 更新档案。
+4. `routeMessage()` 选出接话角色（或无人）。
+5. 配了 Jev 秒回表情时，不等待地发起 `QuickReactions.react()`。
+6. 图片写入 `data/media/`（文件名由 HMAC 派生，0600）；需要时调用 `visionModel` 生成描述。会话里只保存文件引用。
+7. 被路由的角色若消息明确要求查资料，先做一次 DeepSeek 搜索，结果作为不可信参考附在该角色的输入后。
+8. **每个在作用域内的角色都把这条消息追加进自己的会话**（`sendCustomMessage`，类型 `discord_context_v1`）；只有被路由的角色 `triggerTurn: true` 生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
+9. 回复：工具已经发过图片/语音/表情就结束；否则发送最终文字（明确要求语音且配置了语音时改发 MP3），回复原消息。
+
+### 路由（`src/core/router.ts`）
+
+作用域：角色在该平台有账号，且 `spaces` 未设置或包含该空间。优先级：
+
+1. 明确 @ 提及（按该平台的账号 ID 匹配）
+2. 回复了该角色的消息
+3. 文本包含角色 `name` 或任一 `aliases`（不区分大小写）
+4. 概率：`HMAC-SHA256(routingSecret, "space:channel:messageId")` 取前 48 位得到 `u ∈ [0,1)`，按配置顺序累加 `routingP`，落在哪个区间就是谁，超出总和则无人
+
+bot 消息永不触发。同一条消息在重放时路由结果相同。
+
+### 会话
+
+- 每个 `(角色, 空间, 频道)` 一个持久 Pi 会话，文件在 `data/sessions/<personaId>/`，映射存 `sessions` 表。Discord thread 有自己的频道 ID，因此自成会话。
+- 会话禁用 Pi 内置编码工具（`noTools: "builtin"`），不加载项目扩展、技能、提示模板和上下文文件；只挂一个隐藏扩展 `jingmei-context`。
+- Pi 自动压缩开启。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
+- system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
+
+### 上下文投影（`src/core/context.ts`）
+
+每次请求 provider 前在 Pi `context` 事件里重建，不写回会话文件：
+
+- **丢弃已完成轮次的 thinking**：最后一条 user/custom 消息之前的 assistant 消息去掉 thinking 块；进行中的工具循环保留自己的 thinking。
+- **展开聊天消息**：`discord_context_v1` 自定义消息展开为文字 + 图片块，图片从 `data/media/` 读取；文件缺失就跳过该图。
+- **看不了图的模型**：有 `visionModel` 描述时替换为 `[图片：描述]` 文字；否则保留图片块，由 Pi 按模型能力替换为省略说明。
+- **已晋升的 soul 暂存笔记**：内容已并入正式 soul 的 `discord_pending_soul_v1` 消息被丢弃，避免重复。
+
+`discord_context_v1`、`discord_pending_soul_v1` 这两个类型名已写进现有会话文件，不能改名。
+
+## 工具
+
+| 工具 | 注册条件 | 说明 |
+|---|---|---|
+| `run_js` | 总是 | 纯计算沙箱，见下文威胁模型 |
+| `remember_member_fact` / `recall_member_memory` | 总是 | 只记当前消息作者本人明确说的安全事实；回想限本频道近期出现或被当前作者提及/回复的成员，每轮最多 3 次 |
+| `update_soul` | 总是 | 暂存私人 soul 笔记 |
+| `send_reaction_image` | `sendReactionImages` | 发一张内置 PNG 并结束本轮 |
+| `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
+| `speak` | 配了 `voice` 且 `voiceEnabled` | Fish Audio MP3 并结束本轮 |
+| `react_to_message` | 未开启 Jev 秒回表情 | 给本轮消息或本频道近期人类消息点表情并结束本轮 |
+
+发送类工具只在被路由角色的当前回复轮内生效，一轮最多发送一次。
+
+## Jev
+
+```mermaid
+flowchart TD
+  M[人类消息且有文字] --> A{被点名?}
+  A -- 是 --> Q[Jev: 选表情 + 情绪强烈 + 好笑]
+  A -- 否 --> R{本频道距上次普通表情 ≥ minIntervalMs?}
+  R -- 否 --> X[不调用 Jev]
+  R -- 是 --> Q
+  Q --> B{被点名?}
+  B -- 是 --> E[被点名角色点所选表情<br/>none 则不点]
+  B -- 否 --> T{max 情绪, 好笑 ≥ threshold<br/>且仍未限频?}
+  T -- 是 --> F[该空间第一个角色点表情<br/>记录限频时间]
+  T -- 否 --> X2[不点]
 ```
 
-- **daemon**：唯一长驻进程。`composeDeployment()`按配置为每个 bot 建立identity state与runtime map，`composePollers()`建立同数量poller；router、Telegram control与IPC消费同一组动态id/name/user-id map。daemon同时持有 SQLite 与 IPC server。
-- **Pi 插件**：没有独立 TUI 进程——chat UI 就是 Pi 插件本身：`.pi/extensions/tg-extension.ts`（Pi extension，拥有组件树与命令）+ `src/plugin/timeline.ts`（无展示逻辑的 IPC client）。项目 package 被 Pi 自动发现；通过 IPC 拉历史、订阅实时事件。关闭 Pi 或 `/tg detach` 不影响 daemon。
+- 一次请求：`choice`（表情表 + `none`）和两个 `noul`，`state` 为消息与最多 5 行近期聊天。超时 3 秒，失败只记 `quick_reaction_failed`。
+- 表情表取 `jev.emojis[platform]` 或平台默认表，再用 `transport.isValidReaction` 过滤。
+- 记忆排序：`recall_member_memory` 把候选事实/关系（保留数的 4 倍）与当前消息文本一起发给 `scoreRelevance`，每个候选一个 `noul`，同一次请求；失败时退回时间/互动次数排序。
+- 客户端从不记录消息文本、`state` 或密钥。
 
-## 运行时与依赖
+## 媒体
 
-- 运行时：**Bun**（Pi SDK × Bun 兼容性已经 smoke 验证）
-- Pi：registry `@earendil-works/pi-coding-agent`、`pi-ai`、`pi-agent-core`、`pi-tui` 精确锁定为 v0.84.1；`scripts/pi-launcher.ts` 在 project-local CLI 缺失时执行 `bun install --frozen-lockfile`，随后始终以 Bun 启动 lockfile 对应版本。运行与构建不读取 sibling `../pi`。
-- Telegram：raw Bot API（fetch long polling），无第三方 SDK
+- 图片：`prepareImage` 把 WebP/GIF 转 PNG，缩放到 1024×1024、200 KB 以内，失败时回退为 `[图片]`。每条消息最多 4 张（视频帧计入）。
+- 视频：Discord 视频附件、Telegram video/animation/video_note/视频贴纸，下载上限 20 MiB，`ffprobe` 读时长后 `ffmpeg` 抽 1–3 帧 JPEG，标记 `[视频 N帧]`；工具缺失或失败时为 `[视频]`。
+- 其他：`[语音]`、`[文件]`、`[贴纸 😀]`（Telegram 静态贴纸同时作为图片）。
 
-## Telegram ingestion
+## 成员记忆、soul、祝福
 
-- 每个 bot token 一个 getUpdates long-polling 循环（offset 持久化在 SQLite）
-- 每条 update：raw update→canonical message/revision→immutable `message_events` delta→`pending_telegram_dispatch`→offset 在一个 SQLite transaction 提交；任一步失败整体回滚。poller 先交付持久化 handoff，routing 与 Telegram control 都在该回调内同步/await 完成后才删除；失败与重启优先恢复该 handoff，之后才继续拉取。ingestion 只接受 `groupChatId`（`-100<peer>`，`loadConfig` 计算一次）这一种 chat id 形式，与所有 send 目标一致。每 bot 最多一条 pending，raw retention 不删除其来源。canonical以(chat_id,message_id)去重，更旧或同时间的 edit 不回写 canonical；second-bot副本可只补齐null `reply_to_sender_id`并追加metadata delta。`external_reply`（跨群引用）不入 canonical——父消息不在本群 `messages` 表，模型侧引用渲染为 `(原消息不可见)`。`rich_message` 也走同一 normalize：canonical列只保存≤256 KiB source（超限为有界JSON诊断），`text`保存确定性plain projection；projector上限为16层、500 blocks、4096 nodes、32768 code points，未知metadata不泄露URL/file id。revision保留旧source/projection，provider只读取不可变event projection。
-- Telegram create 是不可回滚的 commit boundary。Bot API 返回 Message 后先按 25/100/250 ms 有界重试 canonical SQLite/event insert，再更新 context visibility、broadcast、agent event 与 typing cleanup；这些后置副作用任一失败都只能返回 terminal `committed/no_retry`并写脱敏`send_degraded`，绝不把整次tool call抛回模型。timeout、断线、非JSON、429/5xx等无法证明未创建的结果直接terminal `unknown/no_retry`；message已提交后sticker失败则是`partial/no_retry`。poller echo继续以canonical/event key完成本地幂等恢复。
-- agent `send.message` 先由Pi TUI公开的`Marked` lexer和本地有界renderer转换为classic `sendMessage {text,entities?}`；普通paragraph没有style entity，显式Markdown才产生格式。只有Telegram明确以确定性400拒绝entity/format且确认未创建消息时，才对同一生成text做一次无entities fallback。operator manual compose仍保持literal plain text，两条路径复用`src/telegram/send.ts`的send→canonical persistence primitive；incoming RichMessage normalize/raw persistence/projection继续保留。
-
-## Routing
-
-- deterministic：`u = HMAC(router_secret, chatId + ":" + messageId)` → 按配置数组顺序累积 `routing_p` 阈值：`u < p[0]` → bots[0]；`p[0] ≤ u < p[0]+p[1]` → bots[1]；…否则 nobody（Σp ≤ 1 启动期校验）
-- 优先级：明确 @mention > reply target > 名字关键词 > 概率 routing；每级扫描全部 bot 后才进入下一级，mention 支持 text 与 caption
-- Bot 消息不进 trigger（`routeMessageDecision` 内部单一权威判断）
-- router 返回target + reason + chat/message id；reply先认canonical `reply_to_sender_id` snapshot、再查父行。只有 `probability` 走runtime availability gate；bucket先按原HMAC决定，目标busy/cooldown时直接skip，绝不改投其他bot。
-- 每 bot 的 probability run 完成后用 monotonic deadline 冷却 `sampling_cooldown_ms`（默认 2000 ms）；deadline 不设 timer、不补抽，之后只有新消息才重新采样。不同 bot 仍可并发。
-- mention/reply/name 是 explicit path：配置 `name` 在 text/caption 中字面命中（例如“小雨”命中“我叫小雨”）即使 `routing_p=0` 也成立；busy 时继续 pending coalesce，cooldown 中也可立即启动；shutdown 不等待 cooldown。
-- Telegram control 只开放 `routing_p` 与 `cooldown_ms` 两个可变项：`/set` 经 `updateBotConfigField` 写穿 `telegram.config.ts`（配置文件是唯一权威，新值重启后仍生效），并同步更新内存中的同一 `BotConfig` 对象，router/runtime 下一次决策立即读取新值。任何 routing set 都先按全部配置 bot 原子校验 Σp≤1；校验失败不落盘、不改内存。
-- Telegram control service只接受offset 0的`bot_command` entity；命令固定为 `/help`、`/status`（human public read）与 `/compact`、`/set`（admin mutation），带 `@bot_username` 后缀时定向到对应 bot。未知命令、未知后缀不接管，参数严格按固定arity/type解析。daemon在normal route前同步分流，所有mutation共用一个串行队列；manual compact先占runtime control lock，只在idle时无instructions调用Pi `session.compact()`，期间explicit coalesce、probability fast-skip，绝不abort在途回复。`/status` 只展示实际接收/后缀定向的单个bot，并从其Pi session读取实时context usage；compact后Pi明确返回unknown，直到下一次主请求，绝不把旧epoch usage配给新epoch。状态由确定性代码同时生成有界的InputRichMessage Markdown与独立plain projection；正常只调用一次`sendRichMessage`，仅在Telegram以400/404明确证明方法/格式未创建消息时单次plain fallback。其余回复保持plain；所有回复都由suffix目标或实际接收bot走Telegram create→canonical DB→IPC broadcast，并用`reply_parameters`引用原命令。timeout/断线/429/5xx/非JSON等unknown outcome与local failure只脱敏记录、不远端重试。`telegram_control_messages` 独立保存永久 identity，不受 telemetry retention 影响，跨restart/epoch排除这些message id；compact替换visibility也不会送入provider。每bot启动并行best-effort `setMyCommands`（help/status/compact/set 菜单），失败不阻塞polling。
-- route acceptance先取得`routing_claims` durable claim；insert/enrichment/replay只会让同一bot启动一次。pending/nonaccepted可重取，accepted started/coalesced永久抑制重复；probability bucket和explicit优先级本身不变。
-- human direct address（explicit @mention / reply / 配置名称点名）在provider前已持久化per-bot obligation；所有类型统一由 runtime trigger 按最终路由目标在消息尚未可见时幂等创建；poller 的 durable handoff 保护触发前的恢复窗口。flush最多索引读取256条近期event与64条obligation event，先打包全部可容纳的pending direct-address消息，再从最新普通event向前选择并恢复Telegram顺序。普通overflow可以推进cursor但不标visible；pending direct-address消息不因普通预算被删除，并按后续flush继续交付。只有结构化custom message与commit marker持久化、且该 provider turn 的最终 assistant message 不是 error/aborted 时才清obligation；Pi 耗尽 retry 后会正常 resolve turn，这种失败 turn 记 `reply_obligation_retained`、不写 commit marker、不立即重跑，欠着的消息在下一次 trigger 作为 mandatory event 重新打包。失败 turn 的零 usage 不写 `llm_runs`。startup从session details幂等reconcile。
-- accepted trigger 同步 acquire per-bot Telegram `typing` lease：当前目标是 supergroup，只调用 `sendChatAction`，不调用 private-only message/rich draft。单个递归 timer每4秒续约且最多一个in-flight；release同时abort在途action，避免短回复已发送后迟到的action重新点亮5秒状态。沉默/异常/abort/flush settle/shutdown由finally兜底，coalesced pending在下一轮flush重新acquire。side channel失败按streak脱敏告警，不写DB/IPC/provider context，也不改变cursor、visibility、routing、cooldown或send结果。
-
-## Agent
-
-- 每 bot 一个 `createAgentSession()`，各自拥有SessionManager和DefaultResourceLoader；整个daemon只创建一个Pi `ModelRuntime`。shared runtime通过Pi原生`createAgentSessionServices()`加载用户级已安装provider extension的catalog/auth/cost registration，但以untrusted project scope排除项目extension；bot session仍只加载本项目固定hidden extensions与tools。各session绑定解析后的provider/model/reasoning/cache retention。shared runtime在pid lock后、任何Telegram调用前刷新被选中的extension provider并预检全部聊天、compaction与启用的vision模型；`media.mode: "context"`时每个聊天模型的catalog `input`还必须包含image——上下文媒体以image内容块直接交给主模型，不支持会把所有媒体静默降级为文本占位——否则按`image_input_unsupported` fail fast（默认vision模式无此要求）。live refresh失败可继续使用插件baked/persisted catalog，但模型缺失、认证缺失或不支持reasoning仍fail fast。Pi SDK会静默clamp不支持的档位，本项目禁止这种requested/effective分叉；认证完全由Pi auth store提供。
-- runtime在打开session前计算完整context fingerprint（Pi/provider/api/model/reasoning/cache retention/schema/shared protocol/persona/serializer/compaction/catalog snapshot/extensions/tools）。manifest fingerprint与session文件都匹配才resume；否则保留旧文件、创建新session、推进epoch并清当前visibility。
-- 固定hidden extension顺序为`tg-context → tg-compaction → tg-cache-observer → tg-assistant-persistence`。shared protocol是system prompt首段，persona随后，sticker catalog block（`s<id>: <emoji> <描述>` 行）在末尾。主模型有效context window = min(Pi catalog `contextWindow`, 顶层 `context_window`，默认 65,536)；compaction 触发点 = window − max(16,384, window − compaction_threshold)，threshold 超过 context_window − 16,384 会被配置校验拒绝；压缩后保留最近 `compaction_keep_recent` token 原文（单位是 token：缺省 1 token 实际不保留完整 turn、只剩摘要；生产推荐 20,000）。
-- 触发/flush 是 BotRuntime 串行状态机：`idle → flushing → idle`。在途trigger只合并为`pendingTrigger`；shutdown最多等待30秒。每轮从`message_events`按cursor做有界索引读取，随后按`media.mode`分流媒体准备（见「媒体模式」）：vision模式对有描述缺口的媒体做有界lazy vision（新描述以`media_update` event追加入队，同轮按新high-water重扫一次使本批立即看到描述）；context模式经`ensureBatchContextMedia`为本批有图媒体准备派生图片（只下载+转码，零LLM调用）。再用保守token估算打包成`telegram_context_v2` custom message（details version 4，`blocks`保存text|image交错；context模式每张图片固定计1,100 token）。Pi 的`sendCustomMessage(triggerTurn)`会在promise返回前执行完整provider/tool turn，因此本批完整打包的message id先获得turn-local内存可见性，使同轮`send.reply_to`可通过preflight；session提交失败则从structured entries恢复。只有session持久化成功或startup reconcile证明entry存在后才推进durable cursor/visibility。turn 返回后从真实 active entries 重建可见集合并原子替换 SQLite visibility，再做后置压缩；Pi 在 turn 内已压缩时也不回填旧 batch IDs。
-- 群消息、edit、metadata与media completion（vision模式）使用固定紧凑grammar追加；写入session的message entry字节永不重算——vision描述以`[media_update #id] [图片: 描述]` delta追加，context模式准备好的图片作为image内容块交错在所属消息位置。recent sticker候选独立存进structured details，provider只在最后一个Telegram batch后投影一次。恢复和compaction只读structured details，不从文本正则反推identity。成功compaction只替换visibility与epoch，业务cursor永不回退；visibility commit之后同步运行一次最多256项的本地媒体回收observer，observer失败不会回滚compaction。
-- tools 固定为 `send`、`search`、`run_js`，禁用 coding agent 默认文件工具。`src/agent/tools.ts` 是 provider-facing 用法唯一权威；persona/protocol 不复制参数。`src/agent/send.ts` 拥有 send preflight、远端提交与全部后置副作用边界；耗时/observer 失败不能覆盖 terminal 结果。`send(message?,sticker?,reply_to?,reaction?)` 是唯一公开通道，`message` 为自然Markdown；本地仅映射bold/italic/strike/code/public link/heading/list/blockquote/simple table等固定子集，不启用HTML/MarkdownV2 parser或远程图片。`reaction` 经 `setMessageReaction` 落在 `reply_to` 消息上，限 Bot API 固定 reaction emoji 枚举（本地白名单 preflight，VS16 规范化）；它不是消息 create——幂等、best-effort：reaction-only 失败抛回模型安全重试，已提交消息后的失败只记 `reaction_failed` 不降级结果，reaction-only 成功不产生 sent id、不算 direct-address 的公开回应。完整成功返回固定 `ok`，远端 committed/partial/unknown 的退化路径返回固定 `no_retry`，两者都用 `terminate:true` 阻止 follow-up provider call，sent ids 只留本地 details/event。
-- `search(query?|url?)`复用同一TinyFish tool且强制二选一：query只发送现行`query`并在本地保留≤5条短结果；url只允许≤2048字符的public HTTP(S)，本机不做DNS/GET，提交一个URL到Fetch API。fetch固定一页、≤1 MiB、≤8,000字符/50秒，进入provider前再截到≤2,048 tokens并套untrusted boundary；事件不记录query、URL path/query/fragment、正文或key。群消息不会触发eager fetch。
-- local assistant text（未调send）→ agent_events + TUI；session里只保留固定`[no_send]`，不把未发布prose带入后续provider context。
-
-- provider watchdog 只负责单次请求从创建 stream 到消费结束的 deadline 与取消；聊天使用 Pi session retry，摘要使用 Pi `retryAssistantCall`，共用 `provider_retries`，adapter retry 设为 0。摘要只请求配置的 compaction model，传递 compaction signal，停止时 abortCompaction，不另切主模型。摘要覆盖 Pi 丢弃的完整消息及 split-turn 前缀。
-- 上下文图片只存在 `custom_message.details`，Pi 的 chars/4 cut point 对它们计 0。runtime 在 Pi preparation **之前**把图片成本换算成临时文本保留预算：原生自动路径用 `agent_end`，手动/图片压力路径在 `compact()` 前更新；settled/finally 恢复配置值。合法切点、split-turn、阈值/overflow 与 retry 仍由 Pi 原生拥有，不在扩展中重建 preparation。post-turn hook 只看额外的图片字节压力，provider 失败时跳过该 hook。摘要模型支持 image 时，按原消息位置投影待丢弃图片，且排除动态 sticker 候选；输入超摘要模型窗口时拒绝调用，保留原状态。runtime 不删除图片，统一由 media lifecycle 按跨 bot 引用回收。估算、退化与成本边界见 [Cache 工程](cache.md)。
-- direct-address obligation 只在 send 返回 terminal outcome 后结清；unknown/partial/committed 均禁止自动重发，unknown 独立记入本地 commit outcome。健康但零 send 的 turn 在待回复消息仍可见时最多获得一次补答机会；再次沉默或 provider 失败保留 obligation 并结束，不把 `replyObligationCount > 0` 变成无限调用循环。send 被禁用的观察 bot 不新建回复 obligation。当前 trigger ID 在整个 flush 内固定，busy/cooldown 跳过不修改它，合并的新 trigger 另存待处理身份。
-
-## run_js sandbox 威胁模型
-
-- **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到 daemon 同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。
-- **防到什么**：vm context 由 `Object.create(null)` 创建且 `codeGeneration: { strings: false, wasm: false }`，context 内**不存在任何 host realm 对象/函数**——`console.log.constructor` / `this.constructor.constructor` / `Function` / `eval` 全部拿不到 host `Function`，逃逸链在第一步就断。console/日志在 context 内部 bootstrap；结果只在 context 内 `JSON.stringify` 后以字符串跨界（primitive 跨界安全）。child 进程 env 被 scrub（仅 PATH，无 secret）、隔离 tmp cwd、`--smol` 限内存、同步代码 vm timeout 3s、进程级 5s SIGKILL 兜底、输出 4KB 上限。
-- **残余风险（明确承认）**：
-  1. node:vm 官方声明不是安全边界；若引擎层 0day/未知向量打穿 realm 隔离，child 仍以 daemon uid 运行，可读 `.env`、可联网。缓解：child env 不含 secret（secret 只存在于 daemon 进程内存与磁盘 `.env`），但这不防「直接读磁盘文件」。
-  2. `--smol` 是内存使用倾向而非硬 rlimit；内存硬上限依赖 5s SIGKILL 兜底。
-  3. SIGKILL 只杀直接 child；若 vm 被打穿后 spawn 孙进程，孙进程脱离超时范围。
-  4. vm timeout 只约束同步代码；异步 microtask 膨胀由 SIGKILL 兜底（实测 Bun 下约 vm timeout 即被打断）。
-- **为什么可接受**：纵深防御（realm 隔离 + codegen 禁用 + env scrub + 资源限制 + 超时）使攻击需要未知引擎漏洞而非已知技术；单人项目、威胁源限于群成员 prompt injection。OS 级隔离（低权用户 / seatbelt / seccomp）列为后续增强，非当前威胁模型的必要项。
+- **记忆**：`memory_profiles` 记名字、活跃度、生日；`memory_facts` 只收白名单键（preference、interest、role、project、timezone、language、goal、note），拒绝敏感键和可疑内容；`memory_relationships` 来自提及、回复和明确的朋友/同学说法。`/forget` 删档案与关系并写入 `memory_opt_out`，之后不再收集，直到 `/memory enable`。
+- **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；压缩成功后事务性并入正式 soul，只重载该会话。
+- **祝福**：每分钟检查一次；目标时区当地 09:00 之后，每个成员生日、每个节日各发一次。发送前在 `celebration_deliveries` 占位，完成后标记；失败当天重试，超过 30 分钟仍在发送中的占位视为中断并重试。
 
 ## SQLite
 
-- 见 docs/data-model.md。WAL 模式，直接 SQL
+`data/jingmei.db`，bun:sqlite 直接 SQL，文件权限 0600。
 
-## Observability 与 debug
+| 表 | 主键 / 用途 |
+|---|---|
+| `messages` | `(space_id, channel_id, message_id)`；所有见过的消息，去重与近期上下文 |
+| `sessions` | `(persona_id, space_id, channel_id)` → Pi 会话文件 |
+| `memory_profiles` | 成员档案 |
+| `memory_facts` | 成员事实 |
+| `memory_relationships` | 成员关系 |
+| `memory_observed_messages` | 已观察消息，重放不重复计数 |
+| `memory_opt_out` | `/forget` 后停止收集的成员 |
+| `session_souls` | 私人 soul |
+| `celebration_deliveries` | 祝福发送记录 |
 
-- `src/observability/log.ts`是daemon生产日志唯一入口：schema v1 JSONL、flat bounded fields、secret/content-shaped key与credential/URL/path二次脱敏；sink失败永不改变业务结果。controller在spawn前把`daemon.log`按8 MiB轮转，保留3代并统一0600。
-- 日志覆盖daemon/ingest/routing/runtime/provider/tool/send/IPC/media边界，但不承担业务authority。SQLite routing claims、cursor/obligation、agent events与llm runs仍是durable evidence；日志用既有bot/message/run/epoch identity关联，不保存正文、prompt/response/thinking、tool args、完整URL/path或stack。
-- `bun run debug`通过不暴露credential的deployment loader、本机Pi模型目录、readonly SQLite/Pi session与最后64 KiB JSONL生成有界业务报告；模型目录解析不发网络请求，只输出requested/effective/supported reasoning与固定category。报告默认重建无正文的完整pre-adapter provider结构；显式单bot开关才把完整system与active messages写到stdout。机械finding还区分unsupported reasoning、cursor backlog、pending reply、route无run、model silence、tool preflight failure与send degraded。完整调查流程和新功能门禁见`docs/engineering/debugging-guide.md`。
+**旧库迁移**（`migrateLegacyTables`）：每张 `discord_*` 表改名为去掉前缀的名字（`discord_core_` 连同 `core_` 一起去掉），`guild_id` 列改名为 `space_id` 并加 `discord:` 前缀。整个迁移一个事务、可重复执行；目标表已存在则报错而不是覆盖。
 
-## Pi 原生 Telegram transcript
+## 平台适配器
 
-- package 入口是 `.pi/extensions/tg-extension.ts`；`package.json` 的 `pi.extensions` 使项目可被 Pi 自动发现，规范启动命令是 `bun run pi`。
-- `/tg attach [bot-id]` 通过 `registerEntryRenderer` + `appendEntry` 在 Pi 自己的 transcript 中挂载一个 **TUI-only custom entry**。一次 attach 只写一个锚点；Telegram snapshot、实时消息和历史页只存在于该 entry 的内存组件树，不逐条写 Pi session，也不进入 provider context。
-- 消息、LOCAL 事件、日期与媒体由 Pi 的 `Container`、`Box`、`Text`、`Image`、`Spacer` 和 theme 组合。Pi fullscreen host 拥有滚动、resize、选择、editor、宽度处理及 Kitty image placement/cropping；项目不持有 viewport、终端尺寸、键盘处理或 ANSI 主题代码。
-- `src/plugin/timeline.ts` 是无展示逻辑的 IPC client，只负责连接、snapshot/live/history、复合游标、去重、stats 增量折叠、有界媒体读取与 ephemeral stream frame 转发。连接状态不经事件流传递：extension 直接读 `client.isConnected / hasMore`，只有 `disconnected` 是生命周期事件。
-- public extension API 没有 transcript scroll-top 事件，因此更早历史由 `/tg more` 显式加载；`/tg detach` 只断开 live socket，已显示内容保留。session restore 的旧锚点以 detached 状态呈现，不自动重连。
-- **feed 生命周期只有一条路径**：attach 替换、`/tg detach`、daemon 断线、`/tg config` 重启、`/tg restart` 与 session shutdown 全部经同一个 teardown（关 compose、`feed.detach()` 断 socket / 取消媒体回调 / 清临时卡、恢复 widget 与 footer）。断线后 `active` 立即清空，后续 `/tg more` / `compose` 报“未连接”而非“请求进行中”；只有 `/tg restart` 保留已 detach 的 feed 以便 daemon ready 后原地 `reconnect()`，新 client 继承旧 client 的 oldestCursor，`/tg more` 从上次翻到的位置继续而不重拉已显示页。daemon ready 判定统一为子进程 exit code 0 + 输出含 `DAEMON_READY_MESSAGE`（`src/daemon/control.ts` 单一常量）。
-- config 只在进程内读一次（`/tg config` 成功后失效），补全、状态、compose 与 filter 解析共用同一缓存，不在每次命令时读盘。
-- attach 通过官方 `ctx.ui.setWidget` 在 editor 上方显示一行 feed scope、连接与 compose 状态，并从 factory 取得真实 host `TUI.requestRender()`；attached期间用官方`ctx.ui.setFooter`按Pi原生顺序显示路径与Telegram usage/model，其他extension status仅在存在时追加，隐藏无关的operator usage行。Pi没有把远端usage注入原生`FooterComponent`的公开接口，所以插件复刻布局但不伪造或读取Pi session；detach后恢复默认footer。
-- `/tg` 只注册一个 Pi slash command；声明式递归 command tree 是 syntax/help/dispatch/completion 的共同来源。`getArgumentCompletions` 返回 replace-entire-argument value，动态节点只从启动期已验证 config 缓存 bot `id/name`，不读 DB、网络或 secret。
-- IPC：Unix socket JSONL，daemon 为 server；协议 = hello（可带 bot filter）/ history 分页拉取 / event 订阅 / usage 增量推送 / additive `send_message`→`send_result` / additive `agent_stream` / identity-only `vision_update`与owner-local `media_ready`。stats baseline 同时携带每bot的runtime snapshot，使`/tg status`使用daemon已经解析的effective model/reasoning/context window，而不是在插件进程重建第二份真相。daemon 与 Pi extension 同仓库原子升级：stats/usage 字段是必填契约，不支持新 client 连旧 daemon 的滚动重启窗口；旧 client 忽略新 daemon 的未知字段仍允许（additive 演进只向新字段方向开放）。
-- **manual send（daemon contract）**：extension 只提交 request id、bot id 与纯文本；daemon 校验身份/空文本/4096 字符上限，在有界 256-entry request cache 中合并并发重复，再调用 Telegram。API 成功后先写 canonical DB、再 broadcast、最后 ACK；ACK 丢失不触发 daemon retry。相同 id 不同内容返回 conflict；API/DB 边界给出 explicit failure/unknown outcome，token 不出 daemon。
-- **原生 editor compose**：成功`/tg attach [bot-id]`自动建立scope compose。filtered scope或全局唯一bot直接得到身份；全局多bot在每次interactive提交时调用Pi公开`ctx.ui.select`，取消恢复原文并保持`handled`。`/tg compose <bot-id>`是sticky override，`compose off`让editor回到Pi，bare `compose`恢复scope。editor上方的单行feed header在`attached`后以独立强调色持续显示`send as ...`或`choose bot on send`，选择/发送中的状态原位更新；compose不再占用footer行。extension不替换editor/select，只拦截interactive `input`且不写Pi session/provider context；RPC/extension source继续交给Pi。选择/发送期间拒绝第二次提交；明确失败恢复原文，ACK超时/断线恢复原文并关闭compose、提示先查群且不自动重试。附件不降级。generation使attach replacement、detach、restart/config、daemon断线与session shutdown后的迟到选择/ACK不能关闭或使用新scope。
-- **传输层**：FrameDecoder 持单个 streaming TextDecoder（多字节字符跨 chunk 不腐蚀）；接收缓冲 4MB 上限，超限断开；socket.write <0 即踢连接，出站队列 1MB 上限，超限断开（TUI 挂起时 daemon 内存有界）
-- **分页**：merged timeline 统一排序键 (ts, rank, id)（rank 0=agent 事件，1=群消息），history 用复合游标，同秒多条消息不丢不重。
-- **本机暴露面**：socket 文件 chmod 600；history limit 服务端夹取 [1,500]
-- **终端注入防护**：渲染前 strip ANSI/OSC/DCS 转义与控制字符（保留 \n/\t），群消息无法清屏/改色/写剪贴板（OSC 52）
-- **竞态去重**：snapshot 与 broadcast 重复条目按 (chatId,messageId)/(evtId) 去重；live `EvtItem` 必须携带持久化 rowid `evtId` 与同一 `ts`（无回退 key）；翻页补日期分隔线
-- **attach 过滤**：`/tg attach <bot-id>` 以单 bot 视角观察——daemon 端对 snapshot / history / broadcast / usage 过滤 agent_events（群消息始终全量）；不指定时为全局视角。listener在有效hello建立global或单bot scope前保持静默；extension先按本地配置校验id，daemon在hello边界独立校验，stale/未知filter必须断开listener，绝不静默降级为全局视角。
-- **统一 usage/status telemetry**：Pi `/tg status` 与 Telegram `/status` 共用 `docs/telemetry.md` 的状态读模型、字段和公式。每个response按其实际provider/model当时费率固化cost，SQLite retention totals跨模型只求和、不按当前catalog回算。SQLite 保留期 totals、最新主对话 run 与 daemon runtime snapshot只在一个共享字段投影中合并；Pi plain与Telegram plain/rich只负责外层渲染。compaction usage参与totals但不替换latest。全局只聚合当前配置bots并取最新主对话run的model。snapshot附全历史基线（`lastId`防live双计），每条主对话或compaction usage都经additive IPC推送。attached feed把同一数据投影成Pi同构的路径与usage/model footer并共享费用formatter，compose状态留在feed header，不混入operator usage；detach/断线/restart/config/shutdown时清理并恢复Pi默认footer。
-- **Pi 原生 assistant activity**：runtime在session policy改写未发布正文前取得原始assistant content blocks，并以一次`agent_start → agent_settled`为一个有界activity（最多64 sections/512 KiB）。live `agent_stream`保留thinking/text顺序，feed用Pi公开的`AssistantMessageComponent`显示完整普通输出、Markdown与真实thinking，用`ToolExecutionComponent`显示pending/success/error工具调用；formatted/plain send和最终outcome依发生顺序留在同一张临时卡。settle后只持久化一条`agent_activity`展示投影并移除stream；带同一`activity_id`的原始`agent_events`仍是SQLite/debug authority但不在timeline重复建卡，旧的无id事件继续显示。feed最多保留32张临时卡，end/abort/disconnect原位移除，迟到ended id被有界tombstone忽略；extension从`setWidget` factory保留真实 host `TUI.requestRender()`，Pi宿主继续拥有合帧与刷新。
-- **卡片信息层级**：Telegram消息卡主标题固定为display name + `@username`（存在时），右侧只放message id、own bot id、时间与edited状态；bot/local activity同样把身份和状态分列。用户名颜色由稳定identity hash从Pi当前theme的语义/语法色中选择，不写死RGB，背景与正文仍使用Pi原生message tokens。相同身份跨卡同色，不为颜色引入持久状态或provider bytes。
-- **媒体内联**：终端能力只读 Pi `getCapabilities()`。PNG 直接交给 Pi `Image`；Pi 判定为 Kitty protocol 时，JPEG/WebP/GIF 先用 coding-agent 公开的 `convertToPng()` 异步归一化，完成后只重建引用同一文件的原生卡片并请求 host render。sticker 使用 Pi `Image` 的 24×12 cell 上限，photo 等其他图片保留 56×16；比例、窄宽度 clamp、resize、crop 与 fallback 仍全部由 Pi 负责。转换按 path + size + mtime revision 合并 in-flight，结果/失败共用最多 32 项、32 MiB 的 LRU（单项 8 MiB，pending 32）；detach/restart/shutdown 会移除旧 feed callback。iTerm2/无图像能力继续走 Pi 自身 Image/fallback，TGS/WebM不作为inline image并保留文字占位。IPC 只传≤1 MiB static display path与`mediaDesc`（vision模式持久化描述）；video source与上下文派生图片绝不进入IPC。base64与绝对路径不进入日志、DB或session，SQLite只保存cache-relative basename。
-- **media readiness**：poller先提交raw/canonical/offset，daemon再broadcast placeholder并把 user/bot 的 static photo/sticker identity交给同一个后台queue；animated/video sticker与普通video不由display queue下载，其source只在真实消费它的管线中lazy拉取——vision模式在真实vision turn中，context模式在flush打包前的上下文媒体准备阶段（见「媒体模式」）。live queue按identity去重、最多2 active/128 pending；startup只从仍有活跃引用的缺口中按最新`media.rowid`排100条static display backfill，compaction已回收的无引用历史不会在restart时复活。display cache与两种媒体准备管线共享同一Telegram download in-flight；下载source必须保持`media_file_ids.bot_id/file_id`与同一个bot的Bot API配对，优先回复bot自己的mapping，不存在时使用任一已配置且拥有mapping的接收bot，绝不能把一个bot的`file_id`交给另一个bot。≤1 MiB static display image和≤20 MiB video source都以hash basename写同目录0600临时文件后rename，SQLite成功后才保存basename；只有static image广播`media_ready`。timeline用256项/10分钟乱序cache合并display path，shutdown先stop/abort queue再关DB，失败只留label fallback与脱敏聚合。
-- **media lifecycle**：当前配置bot的任一visible message、pending reply obligation或尚未消费的非`media_update` event都会保留其本地文件。引用检查通过 canonical media identity 的 TEXT 表达式索引定位消息，不逐文件扫描历史。成功compaction提交新visibility后，daemon按同一deployment-wide判定删除最多256个无引用cache identity：先把DB basename约束到当前`data/media`，source与`media.context_files`列出的派生上下文图片一起unlink，随后无论unlink成败都把`local_path`与`context_files`置空——非ENOENT的unlink失败只计入`failed`（日志warn），不保留引用重试，否则一个删不掉的文件会永久占住按rowid排序的批次并饿死其余回收。canonical message/event、media identity/format/short id/vision结果、bot-specific file mapping与Pi session均不删除，所以未来重新需要时可下载source且不重付已有vision结果，或重新准备派生图片。
+| | Discord | Telegram |
+|---|---|---|
+| 接收 | 每个角色一个 Gateway 连接（GUILDS、GUILD_MESSAGES、MESSAGE_CONTENT） | 每个角色一个 `getUpdates` 长轮询 |
+| 去重 | 核心 `messages` 主键 | 先到的轮询在内存里认领 `chat:message`，再由核心主键兜底 |
+| 其他 bot 的消息 | 可见，作为 bot 消息进入各角色会话 | Bot API 不投递，彼此不可见 |
+| 允许列表 | 服务器 + 频道；thread 按父频道 | 群 ID；首次见到未列入的群记 `chat_ignored` |
+| 发送 | Markdown，2000 字符分段，禁止一切 @ 通知 | Markdown→entities，4096 限制下分段；实体被拒时退回纯文本一次 |
+| 附件 | 图片/MP3 作为附件 | `sendPhoto` / `sendAudio` |
+| 表情 | Unicode 与自定义表情语法 | Bot API 允许的表情集合 |
+| 命令 | 服务器级斜杠命令，回执仅自己可见 | `setMyCommands` + 以 `bot_command` 实体开头的文字命令，回执发在群里 |
 
-## 媒体模式
+## run_js sandbox 威胁模型
 
-`media.mode` 选择媒体如何到达模型：`"vision"`（默认，历史行为）由辅助视觉模型把媒体描述成文字；`"context"`（opt-in）把图片作为image内容块直接交给主模型。两种模式的共同边界：voice、audio、非视频document与TGS动态贴纸永远只有文本占位——Pi 0.84.1只支持image内容块，没有audio/file block，这是硬限制；TGS只保证可发送，不进入下载或渲染。视频（`video`、`animation`、`video_note`、video MIME document与video sticker）在两种模式下都用`ffprobe`读时长、`ffmpeg`抽1–3帧（1帧50%，2帧33%/67%，3帧20%/50%/80%；时长<1s取1帧、<3s取2帧），输出≤1280×1280 JPEG，绝不整段交给模型。两种模式共用同一条图片准备管线（`src/media/prepare-images.ts` `prepareMediaImages`）：`ensureLocalMedia`下载/复用source → 下载后才暴露为video容器的sticker翻转为video → 视频抽帧 / 静态图片经Pi公开`convertToPng()`（WebP/GIF）与`resizeImage`（统一上限1024×1024、≈200KB、JPEG质量80；resize失败保留转换/原图）；`cacheDir`与`videoTranscoder`快照是必填参数，生产由daemon传入，无默认值。失败以固定category返回（`{ok:false, outcome}`），绝不抛出。
+- **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到主进程同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。
+- **防到什么**：vm context 由 `Object.create(null)` 创建且 `codeGeneration: { strings: false, wasm: false }`，context 内不存在任何 host realm 对象/函数——`console.log.constructor` / `this.constructor.constructor` / `Function` / `eval` 都拿不到 host `Function`。console 在 context 内部 bootstrap；结果只在 context 内 `JSON.stringify` 后以字符串跨界。子进程 env 只有 `PATH`、隔离 tmp cwd、`--smol`、同步代码 vm timeout 3 s、进程级 5 s SIGKILL 兜底、输出 4 KB 上限。
+- **残余风险**：
+  1. node:vm 不是安全边界；若引擎漏洞打穿 realm 隔离，子进程仍以服务用户运行，可读磁盘上的 `.env`、可联网。
+  2. `--smol` 不是硬内存上限，靠 5 s SIGKILL 兜底。
+  3. SIGKILL 只杀直接子进程；逃逸后派生的孙进程不受超时约束。
+  4. vm timeout 只约束同步代码；异步膨胀由 SIGKILL 兜底。
+- **为什么可接受**：realm 隔离 + 禁用代码生成 + 清空环境 + 资源限制 + 超时，使攻击需要未知引擎漏洞；威胁源限于群成员 prompt injection。OS 级隔离（低权用户、seccomp）是后续增强，不是当前必需。
 
-daemon启动只读检查`ffmpeg`与`ffprobe`；缺失任一工具且当前模式需要抽帧（`vision.enabled`或context模式）时，startup log记一条non-blocking advisory（category `video_transcoder_unavailable`，`blocking=false`），`start`/`restart`/`status`给operator用途与安装建议，`bun run debug`输出带固定impact/action的同名finding；不阻塞ready，不影响photo/sticker链路或三种sticker发送，也不向群内用户发故障消息。安装并restart后自动重试；probe/抽帧失败不记录stderr/path。
+`test/runjs.test.ts` 覆盖这些边界；改沙箱后必须重跑。
 
-### Vision（默认模式）
+## 日志
 
-- 默认关闭；只有显式`vision.enabled: true`才启用；`auxiliary_visual_model`只选择任务模型，不隐式开启功能。图片落库即可显示，UI不触发vision。该配置段只在vision模式生效。
-- 识别结果按 media identity 持久化在`media.vision`，所有配置 bot 共享（vision cache）。只持久化terminal结果：非空描述，或永久不可能成功的`unsupported_format`。provider timeout/请求失败/abort、空响应、转码与抽帧失败、下载失败等transient outcome不写`media.vision`，后续turn在`vision.foreground_media_limit`预算内自然重试。
-- photo、static sticker、video与video sticker使用各自prompt语义。视频帧全部进入**一次**`completeSimple()`；图片由共享准备管线产出（PNG/JPEG，已按统一上限resize），executor只做base64编码。provider请求固定256 output tokens、90秒timeout、retry 0，临时目录随后删除。
-- `vision.enabled`时，daemon在任何Telegram调用前把视觉选择与所有聊天模型一起交给唯一Pi `ModelRuntime`做catalog/auth预检；视觉默认/示例为严格的`provider/model:effort`引用`openai-codex/gpt-5.6-luna:low`，不接受旧拼写别名。模型缺失、未认证或不支持image input均按固定category终止启动，项目不读取credential。
-- 缺`ffmpeg`/`ffprobe`时，视频链路在Telegram下载和provider调用之前立即返回`video_transcoder_unavailable`，不持久化terminal vision cache；static image vision不受影响。vision executor由daemon启动时创建并经`assertPiVisionExecutorReady`预检后注入runtime；runtime没有lazy fallback，vision启用而executor缺失是接线错误，直接抛出。
-- production vision event只含kind、frames、providerCalled、source/converted bytes bucket、latency、input/output/reasoning token、cost与outcome；不含media identity/path/prompt/response。deployment scheduler是默认并发2的单FIFO门，每轮foreground最多`vision.foreground_media_limit`（默认2）。图片只在provider调用时占scheduler；视频在下载前占用同一个deployment-wide slot，直到抽帧与单次provider调用结束，因此所有bot合计最多同时运行`vision.concurrency`条视频流水线。direct reply媒体优先；失败或unsupported使用确定性fallback。
-- foreground vision的runtime可以与最先收到Telegram update的bot不同；本地媒体层必须复用正确接收bot的下载能力，只有所有已配置bot都没有该media mapping时才返回`file_id_unavailable`。这不增加provider call、retry或等待第二个poller。
-- 新的非空描述持久化后追加唯一`media_update` event；已经写入session的message entry不重算、不重写。固定 sticker catalog 不做 vision 回填，但已持久化的描述会渲染进 catalog 行并参与 fingerprint（描述落地即开新 epoch）。
-- 新的非空描述成功写入 DB 后，`ensureVision` 只发布一次 `(fileUniqueId,text)`；cache hit、unsupported、空结果与失败不发布。background catalog 与 lazy batch 共用同一 in-flight promise，因此 UI transport 不增加 vision provider call。
-- `MsgItem.fileUniqueId` 与 additive `vision_update` 经 daemon IPC 广播给所有 live transcript；单bot filter只过滤LOCAL/usage，不过滤共享群消息及其视觉描述。旧 client 可忽略新字段/帧。snapshot/history 仍从同一 `media.vision` 读取，provider serialization 不变。
-- timeline 以 256-entry / 10-minute map 有界缓存乱序 update；message/live/history 到达时按 `fileUniqueId` 合并。已显示消息收到新描述时，feed 更新所有匹配 item 并用 Pi component tree 原位 rebuild，不追加 session entry；重复 update 幂等。
-- media card 在图片或 fallback 正下方用 Pi theme `Text` 显示 `Vision · <text>`，snapshot 与 live 文案一致；显示前继续走 `sanitize()`，ANSI/OSC 不进入终端控制流。
-
-### Context（opt-in）
-
-- 不做任何视觉模型调用；主模型直接收到交错在消息位置的image内容块。媒体准备只做下载+转码，零LLM调用，不生成文字描述。历史已持久化的 vision 描述同样绝不注入：本模式不产生任何 `media_update` 事件（live 路径只在 vision 模式运行；旧 vision 缓存的 ingest 回放与 bot 自发 sticker 的持久化路径按模式 gate），媒体只以图片块到达模型。
-- 范围：photo与静态sticker（共享准备管线：WebP/GIF转PNG、统一1024px/200KB上限resize）；视频类按本节开头的共享规则抽帧。本模块只负责把准备好的图片安装为`data/media`派生文件并写入`media.context_files`。
-- 时机与预算：flush打包前`ensureBatchContextMedia`处理本批事件，direct-reply obligation消息优先；每轮最多`media.max_images_per_turn`（默认4，0=完全关闭）个媒体身份、`media.download_concurrency`（默认2）并发。同一identity跨bot只准备一次（`dedupeInFlight`合并in-flight，`media.context_files`命中直接复用）。`ensureContextMedia`返回`{ok:true, images} | {ok:false, outcome}`，绝不抛出；`!ok`时runtime记`agent_events` error（`stage=context_media`，`category`=固定outcome，如`telegram_download_failed`、`video_frame_extraction_failed`、`install_failed`）并写一条只含category的`log.warn`，该消息仍以纯文本占位进上下文，失败是transient，后续轮次重试。准备媒体的runtime bot可以与最先收到update的bot不同：本地媒体层复用任一拥有该media mapping的已配置bot的下载能力，不增加provider call或等待第二个poller。
-- 派生文件：`data/media/`下`<sha256(fileUniqueId#ctx)>.png|jpg`，视频为`<sha256(fileUniqueId#frameN)>.jpg`（0600临时文件后rename）；DB `media.context_files`存JSON `[{name,mime}]`，与source同属media lifecycle回收（见上节）。
-- token计费：每张上下文图片固定估1,100 token（`CONTEXT_IMAGE_TOKEN_ESTIMATE`，provider按tile/patch计费，用保守常量保持打包确定性）；超suffix预算或超每轮图片上限的媒体降级纯文本占位；force-cap保留的mandatory event永远纯文本。
-- 上下文扩展details v4（`TELEGRAM_CONTEXT_VERSION=4`）：`blocks`保存text|image交错，相邻text合并；投影时resolver把image ref同步读成本地base64 `ImageContent`，文件已回收/缺失则丢弃该块，绝不抛进projection。resolver只在context模式接线；无图片或无resolver时投影保持历史纯字符串路径字节一致。sticker候选suffix追加到最后一个text块。
-- 主模型image input是启动硬要求（仅本模式）：shared runtime预检每个聊天模型catalog `input`含image，否则按`image_input_unsupported` fail fast（见Agent节）。自定义OpenAI兼容provider通过Pi原生`~/.pi/agent/models.json`注册（声明`input: ["text","image"]`、contextWindow、maxTokens），不经过项目extension。
-
-## Sticker 可发送性
-
-- `media.file_unique_id` / `short_id` 是共享身份；`media_file_ids(bot_id,file_id,file_unique_id)` 才是 bot-specific 可发送能力。
-- catalog block 只用当前 bot mapping 过滤后的可发送 sticker 构建；set name 不能证明可发送。固定 catalog 每行为 `s<short_id>: <emoji> <描述>`（描述为持久化 vision 文本，缺失时逐级降级为 `s<short_id>: <emoji>`、`s<short_id>`），按 set 名 + rowid 排序，set 名与 format 不进入模型可见文本；上限 `STICKER_CATALOG_MAX` 条，完整进入 stable prefix。catalog snapshot hash 覆盖 short_id + emoji + 描述文本，任一变化开新 epoch。
-- runtime 不恢复旧的全库语义 top-K；它只从当前 generation 真正 visible 的消息与本轮新 visible 消息中选最近 8 个不同的用户 sticker，再按当前 bot mapping 过滤，行格式与固定 catalog 一致（`s<id>: <emoji> <描述>`）。候选块不写入持久化字节，只在 context 投影时追加到当前最后一批消息之后（每请求重建、只出现一次），预算不足整体省略；历史 sticker 的 short id 按 `s<media.rowid>` 惰性补齐。
-- `sendSticker` 直接使用当前 bot mapping 的 Telegram `file_id`，同一路径支持 `.WEBP` static、`.TGS` animated 与 `.WEBM` video sticker；不下载重传，也不跨 bot 混用 file id。
-- `send` tool 在任何 network call 前再次用同一 mapping 做 preflight；若已提交的 short id 缺 mapping，记录 `candidate_invariant`，不会先发文字再失败。
-- catalog 启动日志给出fetched/catalog/sendable/missing_file_id；缺mapping行不进入 catalog block。short id仍可由本地send preflight解析。
-
-## Provider context flow
-
-- 稳定prefix：共享群聊protocol先于persona，末尾是 sticker catalog block（`s<id>: <emoji> <描述>` 行），之后是固定顺序tool name/description/parameter schema。
-- 动态suffix：有界immutable event batch（context模式下图片以image块交错在消息位置，不产生 `media_update`；vision模式描述以`media_update` delta追加）、direct-address obligation与tool outputs只追加；最近上下文 sticker 候选是本轮 event projection 后的最终有界块（与目录同一行语法，携带已持久化描述；context 模式图片本身已在上下文）。
-- `bot_cursors`保证业务消费单调；`bot_visible_messages`只表示当前generation真实可见的完整消息。两者不混用。daemon 启动时删除不在当前配置中的 bot 的 `bot_cursors`/`reply_obligations`，否则改名/移除的 bot 会永久钉住 `MIN(consumed_seq)` 使 `message_events` retention 失效。
-- 成功compaction替换visible refs并开启新epoch但不改cursor；完整fingerprint不匹配则在restore前建立新session/epoch。
-- payload observer只持久化deployment-local HMAC和首个差异位置；不保存provider plaintext。
-
-## 配置
-
-- **`telegram.config.ts`**（项目根，唯一配置文件）通过`defineConfig()`提供静态字段类型与注释；它是用户明确信任的本机代码，不是sandbox。除identity/routing/model/tools外，顶层和per-bot可配置`cache_retention`、compaction model/threshold/keep、`max_suffix_tokens`、`max_message_tokens`；顶层另有`context_window`（默认65,536，范围32,768–10,000,000，钳制Pi catalog `contextWindow`）、`media`段（`mode`：`"vision"`默认 / `"context"` opt-in；context模式的`max_images_per_turn` 0–16默认4、`download_concurrency` 1–16默认2）与vision scheduler（`vision.enabled`/`foreground_media_limit`/`concurrency`，仅vision模式生效），deployment另有telemetry/raw/event retention。canonical example显式选择Luna/off/short、media mode `"vision"`、关闭search/vision并使用12k/4096上限。旧配置省略provider/model时仍读取Pi defaults以保持兼容，但reasoning默认`off`；跨provider覆盖必须显式给model。
-- **`.env`**（`key: value`冒号格式，自解析）+ `.env.example`：只放项目拥有的secret（bot tokens / TinyFish / router_secret / gpg passphrase）；Pi auth store独占provider credential。旧`.env`中的provider key即使保留也不会被loader读取，配置、启动日志与运行时对象均不含其env key或值。
-- **onboarding write boundary**：`src/onboarding/config-core.ts`只接受完整内存draft；先校验peer、Telegram token/env key与persona，再将`.env`、typed config与private persona写为各自同目录0600临时文件。fresh `.env`只含Telegram token；向导把已经通过catalog/auth预检的Pi provider/model固定进新config，其余字段省略，由`src/config.ts`默认值作唯一权威。旧手写配置仍可省略provider/model兼容继承Pi。create模式遇到任一现有目标即保留并拒绝；明确replace才先rename到唯一backup，再安装全部新文件。任一rename/chmod/final `loadConfig()`失败会删除新目标并恢复backup。
-- **Pi 原生配置向导**：`/tg config`是command tree中的静态节点，config loader失败时仍可帮助、补全和dispatch。fresh/replace流程在第一个输入dialog前用Pi defaults + catalog/auth status做零provider-call预检，只显示脱敏`provider/model:thinking`；失败固定分类并引导Pi `/login`、`/model`，writer调用为0。`src/onboarding/config-wizard.ts`只编排Pi公开的`select/input/confirm/editor/notify`；public persona template先于Telegram secret输入读取，取消任一步不调用writer。向导只操作项目根的 `telegram.config.ts` 与 `.env`；自定义source只允许安全的validate/项目根原文edit，坏配置先修复而不旁写一个daemon不会读取的default。首次写入或已确认的原文替换通过production loader后，extension只用固定参数委托既有`bun run src/main.ts restart`控制路径；只有exit 0且输出明确`daemon ready`才建立all-bots native feed。失败保留已验证文件、清除旧连接并显示经过credential redaction的status/retry诊断。dialog值不写notification、进程参数、Pi session或provider context。
-- **启动期校验**：运行时 schema 校验（id 唯一合法、token_env 在 .env 存在、persona 文件可读、routing_p ∈[0,1] 且 Σ≤1、数值有限>0）+ env 数值检查；peer id 三种形式统一归一化；校验失败收集**全部**错误一次性抛出（ConfigError 逐条点名），不静默 NaN
-- **进程管理**：daemon 最早时机 `openSync(wx)` 排他创建 pid file，退出只删除仍属于自己的 pid file。只有 pid 已死才接管旧文件；pid 存活但无法识别为本 deployment（`ps`/`lsof` 超时、非常规启动命令）时与 CLI 一样拒绝启动，绝不让两个 daemon 轮询同一 token。任一 poller 因 401/404 致命退出时走同一 `shutdown()`（exit 1），不留 pid/socket。CLI controller把start/restart共用同一detached spawn与readiness：按同仓库cwd/绝对entry验证PID（Linux 读 `/proc/<pid>/cmdline` 与 `/proc/<pid>/cwd`；macOS 用 `ps` 识别精确入口、`lsof` 验证真实 cwd，支持项目路径含空格），枚举并优雅停止该deployment的pid owner与孤儿进程，等待所有PID/pid file/socket消失后才spawn；同步初始化和信号处理器就绪后才创建 socket；新socket必须真实connect且新PID身份有效才是ready。restart另有可回收control lock，foreign PID与命令文本decoy绝不signal。Pi只异步委托CLI，保留原transcript并以原filter更换IPC client；跨client snapshot按canonical identity去重，compose/pending send按unknown outcome/no-retry关闭。
-- **单群deployment边界**：一个daemon只读取一个`group_peer_id`，且当前`data/`、DB、session、pid、control lock与socket均由工作目录决定。同一checkout内只换配置文件并行多群不安全且不支持；多群必须使用隔离工作目录/data资源，不能共享持久化或进程控制文件。
-- context window与价格来自Pi catalog；runtime以当前context、输出/reasoning/tool reserve和配置上限确定每轮suffix预算，不维护平行model表。
+只经 `src/observability/log.ts` 写 stdout JSONL（`schema`、`ts`、`level`、`component`、`event`、`fields`）。字段名含 token/secret/prompt/content/query/url/path 等的值一律写成 `[redacted]`，字符串里的 token、API key、URL、绝对路径会被替换掉。日志只用于观察，业务逻辑不依赖日志。

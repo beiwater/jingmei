@@ -1,87 +1,82 @@
 # AGENTS.md
 
-本文件是 agent 会话自动加载的唯一常载文档：短、稳定、高信号。详细内容一律在 `docs/`，这里只放哲学、路由、硬约束和坑。
+精魅（jingmei）：跑在 Pi 上、同时服务 Discord 与 Telegram 群的 AI 群宠。本文件是 agent 会话自动加载的唯一常载文档：短、稳定、高信号。细节在 `docs/`。
 
 ## 1. 项目哲学
 
-- **极简，最少机制**：一套设计，不留兼容层。Breaking change 随时可以做，只要求迁移干净、一步到位。
-- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works` 各包导出了什么；Pi 能做的事不自造轮子（审计结论见 `docs/engineering/code-review-2608.md`）。
-- **不花冤枉钱**：能用确定性代码解决的不花 LLM token；任何功能先评估 cache hit 率与每 turn 新增 token（`docs/cache.md`、`docs/engineering/development-guide.md`）。
-- 删代码优先于加抽象；防御代码只防真实可能的分支。
+- **极简，最少机制**：一套设计，不留兼容层。Breaking change 可以做，但迁移要干净、一步到位。删代码优先于加抽象；防御代码只防真实可能的分支。
+- **Pi 原生优先**：动手前先查 `node_modules/@earendil-works/*` 导出了什么（会话、压缩、模型目录与认证、图片转码缩放、按模型能力降级图片）。Pi 能做的不自造。
+- **不花冤枉钱**：能用确定性代码（路由、SQL、规则）解决的判断不花 LLM token。system prompt 与工具定义保持稳定以命中 provider 前缀缓存，动态内容只进消息或 `context` 事件投影；每轮新增的 provider 可见 token 必须有界。reasoning 默认 `off`。
+- 平台是薄适配器：平台差异留在 `src/platforms/<platform>/`，核心只认 `src/core/types.ts`。
 
 ## 2. 仓库地图
 
-- `docs/index.md` — 文档总索引
-- `docs/project.md` — 项目目标、约束、术语
-- `docs/architecture.md` — 架构边界与 invariant
-- `docs/cache.md` — provider cache 工程（prefix invariant / CACHE_SCHEMA_VERSION）
-- `docs/data-model.md` — SQLite schema
-- `docs/testing.md` — 测试策略与规范命令
-- `docs/engineering/development-guide.md` — 日常开发流程
-- `docs/engineering/debugging-guide.md` — 结构化日志与 Debug impact
-- `docs/engineering/documentation-guide.md` — 文档写作规范
-- `docs/engineering/code-review-2608.md` — 2026-08 全面 review 结论与 Pi 能力审计
-- `docs/engineering/code-review-2608-2.md` — 2026-08-13 四路并行 review:误报记录、修复决策与未采纳清单
-- `docs/engineering/code-review-2608-3.md` — 2026-08-20 六区并行 review:造轮子 / hack / 过度防御 / 冗余清理
-- `docs/engineering/code-review-2609-2.md` — 2026-09-16 生产故障诊断（图片 compaction 切点 / developer role / 失败 turn）与全面整改
-- `docs/runbooks/daemon.md` — daemon 运维
-- `docs/user-guide/` — 双语用户指南
+- `src/main.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）
+- `src/config.ts` — `jingmei.config.json` + `.env` 的唯一读取与校验
+- `src/core/` — 对话核心：`conversation.ts`（主流程）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`soul.ts`、`celebrations.ts`、`db.ts`、`model-runtime.ts`、`types.ts`
+- `src/platforms/discord/`、`src/platforms/telegram/` — 平台适配器
+- `src/decision/jev.ts` — TypeSafe Jev 客户端
+- `src/media/` — 图片准备、视频抽帧；`src/tools/` — run_js、DeepSeek 搜索、Fish TTS；`src/net/` — 公网 URL 过滤、有界读取
+- `src/observability/log.ts` — 结构化日志
+- `scripts/migrate-config.ts` — 旧配置迁移；`scripts/git-gpg.sh` — 提交签名
+- `docs/architecture.md` — 架构、数据流、表结构、上下文投影、Jev、run_js 威胁模型
+- `docs/testing.md` — 测试清单与验证漏斗
+- `docs/deploy.md` — 部署、数据目录、迁移
 
-动手前只读与受影响边界相关的章节，不要把无关文档塞进上下文。
+动手前只读与改动相关的章节。
 
 ## 3. 硬约束
 
-- **Cache invariant**：永不改写已存在的 provider prefix；动态内容只以新 suffix 追加。sticker 候选等动态尾部只经 `context` 事件投影注入 provider payload（每请求重建、只挂最后一条），永不写入持久化 custom message content——compaction 直接读持久化字节。cache-visible 协议（system prompt shape、persona 序列化、tool schema 与顺序、消息 / 摘要序列化 grammar、sticker catalog block）任一变化：bump `CACHE_SCHEMA_VERSION`、更新 `test/cache.test.ts` golden、同步 `docs/cache.md`。
 - Secret 不进日志、测试 fixture、commit；`.env` 不入库。
-- daemon 生产模块只用 `src/observability/log.ts` 结构化日志；不记正文 / prompt / response / tool args / 完整 URL 与 path；业务正确性不得依赖日志。
-- 不得为通过验证而削弱测试、类型检查或安全控制（如 run_js sandbox）。
-- 不改 SQLite schema、IPC 协议、消息序列化 grammar，除非有明确需求并同步文档。
-- 配置只有一套：`telegram.config.ts`（业务配置）+ Pi 内部 settings + `.env`（secrets）。禁止引入第二来源。
+- 生产代码只经 `src/observability/log.ts` 记日志；不记正文 / prompt / response / tool 参数 / 完整 URL 与路径；业务正确性不依赖日志。
+- 配置只有一套：`jingmei.config.json`（业务）+ `.env`（secret，`key: value` 格式）。配置文件只写环境变量名，不写 secret。禁止引入第二来源。
+- `bun test` 零外网、零付费调用，由 `bunfig.toml` 预加载 `test/network-guard.ts` 机械保证。
+- 不得为通过验证而削弱测试、类型检查或安全控制（如 run_js 沙箱）。
+- 已写入会话文件的协议名不改：`discord_context_v1`、`discord_pending_soul_v1`。表结构变更必须在 `src/core/db.ts` 做幂等迁移并更新 `docs/architecture.md`。
+- 用户可见行为变化同步 `README.md` 与 `README.en.md`。
 
 ## 4. 改动路由
 
-行为放进拥有该职责的层；不为归属不清新建共享抽象。归属不清先查 `docs/architecture.md` 和现有调用点。
+行为放进拥有该职责的层；不为归属不清新建共享抽象。
 
-- Telegram API / 轮询 / normalize → `src/telegram/`
-- schema / 持久化 → `src/db/`（schema 变更必须更新 `docs/data-model.md`）
-- prompt / serialize / routing / runtime / provider-facing 工具 → `src/agent/`（tool description 是 cache-visible，见 `src/agent/tools.ts`）
-- 进程管理 / IPC server → `src/daemon/`、`src/ipc.ts`
-- TUI → `.pi/extensions/tg-extension.ts` + `src/plugin/timeline.ts`（UI-only 改动不得影响 provider payload）
-- 工具实现（search / run_js）→ `src/tools/`，注册顺序固定在 `src/agent/runtime.ts`
-- 安装向导 → `src/onboarding/`
+- 平台 API、归一化、发送、命令 → `src/platforms/<platform>/`
+- 路由、会话、上下文、提示词、模型工具 → `src/core/`（system prompt 与工具定义是缓存前缀，改动要有理由）
+- 数据库表与迁移 → 拥有该表的 `src/core/*.ts` + `src/core/db.ts`
+- 配置字段 → `src/config.ts` + `jingmei.config.example.json` + README 配置表
+- 外部服务客户端 → `src/tools/`、`src/decision/`
+- 图片/视频 → `src/media/`
 
 ## 5. 测试规则
 
-- 鼓励 TDD：新行为先写失败测试再实现。脚手架测试在功能稳定后必须删除——`test/` 只保留护长期 invariant / 安全边界的守卫，清单见 `docs/testing.md`。
-- 能确定性复现的 bug 必须有回归测试；agent 行为测可观察轨迹与结果，不断言 prompt 字符串。
-- `bun test` 零外网、零付费调用，由 `bunfig.toml` 的 test preload 机械保证。
+- 鼓励 TDD。脚手架测试在功能稳定后删除——`test/` 只保留守护长期行为与安全边界的测试，清单见 `docs/testing.md`。
+- 能确定性复现的 bug 必须有回归测试；测可观察的轨迹与结果，不断言 prompt 字符串。
 
 ## 6. 验证漏斗
 
-1. `bun test <相关文件>` → `bun test`
+1. `bun test test/<相关文件>.test.ts` → `bun test`
 2. `bun run check`（tsc --noEmit）
 3. `bun run lint`（Biome lint + format check；`bun run format` 自动修）
-4. `bun run docs:check`（文档站构建 + 链接检查）
-5. opt-in e2e：`scripts/e2e-*.ts`（需 `.env`，触真实服务，用户明确授权才跑）
+4. 跨边界改动：测试 bot + 测试群 `bun run start` 实测
 
-规范命令以 `docs/testing.md` 为准；仓库已有脚本时不要猜底层命令。
+仓库已有脚本时不要猜底层命令。
 
 ## 7. 提交规范
 
-- 原子提交：一个行为变化一个 commit；提交前只显式暂存本任务路径，禁止 `git add -A`。
-- 提交自动 GPG 签名；签名失败停下诊断，不得绕过。不做破坏性 git 操作（reset --hard / force push / 改写历史）。
-- subject：英文祈使句、首字母大写、≤72 字符、描述具体代码结果；纯机械变更末尾加 `Work-Type: mechanical`。
+- 原子提交：一个行为变化一个 commit；只显式暂存本任务路径，禁止 `git add -A`。
+- 提交自动 GPG 签名（`scripts/git-gpg.sh`）；签名失败停下诊断，不得绕过。不做破坏性 git 操作（reset --hard / force push / 改写历史）。
+- subject：英文祈使句、首字母大写、≤72 字符、描述具体代码结果；纯机械变更末尾加 `Work-Type: mechanical` trailer。
 - 提交前跑覆盖本次改动的测试。
 
 ## 8. 已知坑
 
-- `bun test` 强制 UTC：涉时间序列化的测试必须 pin TZ（参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
-- Bun `socket.write` 返回字节数且可能部分写入：必须编码成 Uint8Array 后按字节偏移排队写（参考 `src/ipc.ts`）。
-- `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv 的 `KEY=value`。
-- Pi 四包精确锁定 registry `0.84.1`；升级必须同一原子提交更新 manifest、lock 并做兼容性验证。
-- sticker / alias 的 short_id 用 rowid 分配，不用 COUNT+1（并发 / 删除下撞号）。
-- `streamFunction` 包装（`src/agent/runtime.ts`）是 Pi 的官方注入形态（`Agent.streamFunction` 是公开可变字段，函数包函数注入 `cacheRetention`）；`createAgentSession()` 不接受 streamFn 选项，只能事后覆盖。升级 Pi 时仍必须验证该包装（见 `docs/engineering/code-review-2608.md`）。
+- `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv。它的值不会进入 `process.env`，唯一例外是 `src/main.ts` 导出的 `DEEPSEEK_API_KEY`；其他 provider 的 env key 必须在进程环境里。
+- Pi 的 agent 目录是 `data/pi-agent`（不是 `~/.pi/agent`）：`models.json`、`auth.json` 都在这里。用 Pi `/login` 需 `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi`。
+- Telegram Bot API 不向 bot 投递其他 bot 的消息：同群多角色在 Telegram 上互相看不到。群消息还需要关闭 privacy mode。
+- Telegram 表情回应只能用 Bot API 枚举（没有 😂，用 🤣）；Discord 与 Telegram 的默认表情表因此不同。
+- 同一条消息会被每个角色的连接各收到一次：去重靠 `messages` 主键 `INSERT OR IGNORE`，不要在别处另做一套。
+- `bun test` 默认 UTC：涉及时区的测试显式传时区（参考 `test/celebrations.test.ts`）。
+- Pi 四包精确锁定 `0.84.1`；升级必须在同一原子提交里更新 manifest 与 lock，并验证兼容性。
 
 ## 9. 指南更新规则
 
-单次失误不加规则。新增 / 修改规则须满足：非显然、会复发、可执行。能机械强制的优先做成测试 / lint / schema check，而不是文字。
+单次失误不加规则。新增 / 修改规则须满足：非显然、会复发、可执行。能机械强制的优先做成测试 / lint，而不是文字。

@@ -1,60 +1,59 @@
-# 测试策略与状态
+# 测试
 
-> 当前真实测试状态，不是计划书。本文件是测试与验证的唯一权威来源。
+> 当前真实的测试状态。增删测试文件时同步更新清单。
 
-## 验证漏斗（由便宜到贵，按序跑到能覆盖改动的那层）
+## 验证漏斗
 
-1. **目标**：`bun test test/<相关文件>` —— 直接覆盖被改行为的最小测试
-2. **全量 unit**：`bun test`（不触网络）+ `bun run check`（tsc --noEmit）
-3. **e2e**：`bun run scripts/e2e-agent.ts --bot <id>` / `e2e-compaction.ts --bot <id>`（需 `.env`，触真实配置 provider / Telegram，opt-in）
-4. **真实群 / 长运行 smoke**：跨边界或稳定性改动才需要；观察 daemon.log、遥测、内存
+由便宜到贵，跑到能覆盖改动的那一层：
 
-## 当前测试集
+1. `bun test test/<相关文件>.test.ts`
+2. `bun test`：全量，零外网、零付费调用
+3. `bun run check`：`tsc --noEmit`
+4. `bun run lint`：Biome lint + 格式检查（`bun run format` 自动修复）
+5. 真实平台 smoke：跨边界改动才需要。用测试 bot 和测试群/频道 `bun run start`，观察日志与实际回复
 
-`test/` 只保留长期 invariant 与安全边界的守卫，共 14 个测试文件：
+CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile`、`bun test`、`bun run check`、`bun run lint`。
 
-- `cache.test.ts` — cache golden：锁定 cache-visible protocol 的 hash（system prompt、tool schema 与顺序、消息/compaction 序列化 grammar、extension 顺序、sticker catalog block）。任何 provider-visible 变化都会在这里报警。
-- `context-protocol.test.ts` — context fingerprint / extension / model capability 契约：恢复 session 的 cache-identity 判断、structured context 协议、相邻 raw payload 严格前缀的本地 cache estimate、用户级已安装provider extension进入daemon shared runtime，以及不允许 Pi 静默 clamp 不支持的 reasoning 档位。
-- `network-isolation.test.ts` — 证明 `bun test` 在真实 `.env` 存在时也机械拒绝外网 / 付费 API fetch（配合 `network-guard.ts` preload，只放行 loopback）。
-- `runjs.test.ts` — run_js sandbox：正常计算可用，host realm 隔离与资源限制成立。
-- `search.test.ts` — TinyFish search/fetch 契约：参数边界、SSRF prefilter（public IP 表）、untrusted boundary、telemetry 脱敏；只用本地 Bun server。
-- `db.test.ts` — SQLite migration：旧库迁移幂等且保留历史 telemetry；本地 cache estimate 只回填同 cohort 的严格 payload 前缀，不覆盖 provider usage 或 `cache_retention=none`。
-- `media.test.ts` — 跨bot Telegram media source配对、static/animated/video sticker metadata与原始file_id发送、vision模式（描述singleflight/persistent cache跨bot复用、视频固定代表帧单次vision调用、deployment全视频流水线并发门、缺FFmpeg时下载前no-op且不持久化terminal结果）与context模式（photo/static sticker转换、video抽帧singleflight与`context_files`持久化复用、失败可重试）、TGS/voice/audio不产出上下文图片、部署路径迁移、static sticker展示缓存、compaction后跨bot引用保护/派生文件清理/失败重试/启动不复活回收文件、媒体引用查询按身份索引查找的执行计划，以及Pi attach filter握手、activity单卡/原生thinking/完整正文、username与视觉描述乱序合并。
-- `telegram-control.test.ts` — `/status` 的 InputRichMessage Markdown、统计数字千位分隔与缓存命中率、独立 plain projection、create→canonical persistence，以及仅在确定性rich拒绝时单次fallback的exactly-once边界。
-- `telemetry.test.ts` — Pi/Telegram status共享读模型：latest排除compaction、lifetime/live totals包含compaction、切换provider/model后的immutable per-run cost累计、本地 estimate 的 `≈` 标记、统一费用精度、runtime snapshot、统一字段顺序、context/window与`CH = R/(↑+R+W)`派生口径。
-- `provider-guard.test.ts` — stream 创建与消费 deadline、主动取消、成功后清理，以及 Pi 原生零重试配置。
-- `visibility.test.ts` — active context 的完整消息可见性与 compaction 边界。
-- `telegram-delivery.test.ts` — 全局 mention 优先级与 caption、乱序 edit、manual send unknown outcome、control retention 与 pending handoff 跨重启交付。
-- `daemon-control.test.ts` — 临时假 daemon 的精确进程归属与含空格路径，拒绝其他部署与测试进程。
-- `runtime-obligation.test.ts` — 真实 Pi AgentSession 的图片多/文字少时自动、手动、取消压缩及设置恢复；视觉/纯文本摘要模型输入与图片顺序、窗口超限的零调用拒绝和日志脱敏；发送后遥测失败、turn 内/后可见性、split-turn 取消与共享图片保留；direct address 的真实 send 完成条件、沉默最多一次补答、unknown 禁止重发、busy trigger 身份不漂移，以及 coalesced obligation、普通 overflow 设计锁定与 flushLoop teardown 不滞留。
+## 网络隔离
 
-## 测试选择规则
+`bunfig.toml` 预加载 `test/network-guard.ts`：测试期间 `fetch` 只放行 loopback，其他 HTTP(S) 地址直接拒绝；日志输出同时被静音。即使本机有真实 `.env`，测试也不会调用 Discord、Telegram、模型、DeepSeek、Fish Audio 或 Jev。需要 HTTP 的测试注入 `fetchImpl` 或起本地 Bun server。
 
-- **鼓励 TDD**：新行为先写失败的测试再实现。但脚手架测试在功能稳定后必须删除——测试集只保护长期 invariant 与安全边界，不锁实现细节，不为覆盖率保留一次性验收测试。
-- 能确定性复现的 bug fix 必须有回归测试。
-- 契约变化（IPC 协议 / schema / 序列化 grammar）需要跨边界测试。
-- Agent 行为测可观察轨迹与结果，不断言 prompt 字符串。
-- provider cache 相关改动必须跑 `test/cache.test.ts` golden；golden 失败是报警，先查原因，确认是有意变更后按 `docs/cache.md` 流程 bump version 再更新 golden，不要随手改 expected value。
-- 涉时间序列化的测试必须 pin TZ（`bun test` 强制 UTC，参考 `test/cache.test.ts`，生产为 Asia/Singapore）。
-- `bun test` 即使检测到真实 `.env` 也不得调用外网或付费 API；`bunfig.toml` 的 test preload 只放行 loopback。真实 TinyFish / provider / Telegram 验证只能用明确 opt-in 的 e2e 脚本或一次性脚手架，脚手架验收后立即删除，不能按 credential 存在自动启用。
-- 不得为了通过而删除或削弱断言、类型检查或安全控制。
+## 测试清单
 
-## 运行命令
+`test/` 只保留守护长期行为与安全边界的测试。
 
-```bash
-bun test                # 全量 unit（零外网、零付费调用）
-bun run check           # tsc --noEmit
-bun run lint            # Biome lint + format check（bun run format 自动修）
-bun run docs:check      # 文档站构建 + 链接检查
-bun run scripts/smoke-pi.ts --bot <id>              # 当前 bot 的 Pi provider/model smoke（需 .env）
-bun run scripts/e2e-agent.ts --bot <id>              # 真实链路 e2e（需 .env，opt-in）
-bun run scripts/e2e-compaction.ts --bot <id>         # 通过公开control入口验证compaction（需 .env，opt-in）
-```
+| 文件 | 守护什么 |
+|---|---|
+| `network-isolation.test.ts` | 有真实凭据时 `bun test` 仍拒绝外网 / 付费请求 |
+| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析、reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥 |
+| `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
+| `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
+| `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级 |
+| `quick-reactions.test.ts` | 普通消息需要强信号且按频道限频（限频期内不调用 Jev）；同频道并发决策共享一个名额；点名消息不受阈值和限频影响、由被点名角色点；bot 消息和表外表情永不点 |
+| `jev.test.ts` | Jev 请求结构与答案映射、`none` → 无表情、拒绝缺失/类型错误/越界/非选项答案、HTTP/网络/超时映射为固定错误码、错误信息不含密钥和正文；相关度打分一次请求、按序返回；`shouldQuickReact` 规则 |
+| `memory.test.ts` | 成员档案按空间隔离；只抽取本人明确的生日与稳定陈述、更正覆盖旧值；提及/回复关系去重并排除 bot；生日设置/清除/列出、`/forget` 停止收集与重新启用；拒绝不安全事实；重放不重复计数；打分回想保留最相关项、打分失败退回时间顺序 |
+| `soul.test.ts` | soul 在角色、空间、平台、频道、thread 之间隔离；关闭重开数据库后恢复；暂存去重、压缩快照之后新增的笔记不被消费；容量或数据库失败时回滚并保留暂存；字节上限、身份与内容安全检查 |
+| `soul-session.test.ts` | 真实 Pi 会话中 soul 工具、压缩与重启只影响所属会话，不重载其他会话 |
+| `celebrations.test.ts` | 悉尼夏令时切换下仍在当地 09:00 后发送；农历节日与两种日历的元旦合并；劳动节与 Boxing Day；2026、2027 年 NSW 复活节日期；跨 tick 和重启幂等；失败当天重试；中断的发送重启后恢复；2 月 29 日生日；生日按空间查找并经该空间的平台发送 |
+| `discord-transport.test.ts` | Snowflake 保持字符串；按可读边界分段不丢字；分段发送禁用提及并校验频道；只在允许频道点表情且幂等；Unicode 与自定义表情语法；按 `retry_after` 重试且不暴露响应内容；平台 transport 按角色路由且禁止提及；Gateway identify、心跳与 resume |
+| `discord-media.test.ts` | Discord CDN 图片有界下载并校验真实格式；真实小 PNG 转为 Pi 图片；拒绝非 CDN、非图片、声明或实际超大、HTML/畸形字节；缩放失败的超大原图被拒；视频下载同样受 CDN 与大小限制 |
+| `telegram-platform.test.ts` | 归一化：@用户名和 text_mention 解析为 ID、UTF-16 偏移、论坛话题根不算回复、允许列表外丢弃、匿名管理员归属、非图片媒体占位、视频抽帧或 `[视频]`、照片与静态贴纸成图；文字命令解析、非开头命令当聊天、多角色时管理员命令要求指定；Markdown→entities、非公网链接去链接、代码块语言清洗；表情白名单、实体被拒退回纯文本一次且不 @、超长回复分条且只有第一条回复原消息 |
+| `video-frames.test.ts` | 固定的代表帧位置；只探测一次、最多抽三帧并清理临时文件；缺 ffmpeg 返回固定结果而不抛错 |
+| `reaction-assets.test.ts` | 表情图只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
+| `runjs.test.ts` | `run_js` 正常计算、超时、异步膨胀、输出上限、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
+| `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
+| `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
+
+`test/network-guard.ts` 是预加载文件，不是测试。
+
+## 写测试的规则
+
+- 新行为鼓励先写失败的测试。功能稳定后删掉脚手架测试，只留守护长期行为与安全边界的测试。
+- 能确定性复现的 bug 修复必须带回归测试。
+- 测可观察的行为与结果，不断言 prompt 字符串或实现细节。
+- `bun test` 默认 UTC；涉及时区的测试显式指定时区（参考 `celebrations.test.ts`）。
+- 不为通过测试而削弱断言、类型检查或安全控制（如 run_js 沙箱）。
 
 ## 失败诊断
 
-改源码前先定位失败来源：1) 被改的行为 2) 过期的生成物 / golden 3) 缺 bootstrap / build 产物 4) 环境或工具链不一致（TZ、bun 版本）5) flaky / 外部依赖（Telegram、DeepSeek、TinyFish、codex）6) 与本次改动无关的既有失败。外部 / 既有失败单独报告，不混入本次结论。
-
-## 已知 flaky
-
-（暂无）
+改代码前先定位失败来源：被改的行为、环境或工具链（Bun 版本、时区）、外部依赖、与本次改动无关的既有失败。外部和既有失败单独报告，不混入本次结论。
