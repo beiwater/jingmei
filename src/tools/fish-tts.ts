@@ -31,17 +31,6 @@ export interface FishAudioTtsOptions {
 	timeoutMs?: number;
 }
 
-async function readAudioBounded(response: Response): Promise<Uint8Array> {
-	const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-	if (contentType.includes("application/json") || contentType.includes("text/")) {
-		throw new FishAudioTtsError("invalid_response");
-	}
-	const audio = await readBoundedBody(response, MAX_AUDIO_BYTES);
-	if (!audio) throw new FishAudioTtsError("audio_too_large");
-	if (audio.byteLength === 0) throw new FishAudioTtsError("invalid_response");
-	return audio;
-}
-
 /** Generate an MP3 from Fish Audio and return the binary audio for a chat attachment. */
 export async function synthesizeFishAudioTts(
 	apiKey: string,
@@ -66,8 +55,7 @@ export async function synthesizeFishAudioTts(
 		throw new FishAudioTtsError("invalid_options");
 	}
 
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const signal = AbortSignal.timeout(timeoutMs);
 	try {
 		const response = await (options.fetch ?? fetch)(DEFAULT_ENDPOINT, {
 			method: "POST",
@@ -77,17 +65,22 @@ export async function synthesizeFishAudioTts(
 				model,
 			},
 			body: JSON.stringify({ text, reference_id: referenceId, format: "mp3" }),
-			signal: controller.signal,
+			signal,
 		});
 		if (!response.ok) throw new FishAudioTtsError("http_error");
-		return await readAudioBounded(response);
+		const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+		if (contentType.includes("application/json") || contentType.includes("text/")) {
+			throw new FishAudioTtsError("invalid_response");
+		}
+		const audio = await readBoundedBody(response, MAX_AUDIO_BYTES);
+		if (!audio) throw new FishAudioTtsError("audio_too_large");
+		if (audio.byteLength === 0) throw new FishAudioTtsError("invalid_response");
+		return audio;
 	} catch (error) {
 		if (error instanceof FishAudioTtsError) throw error;
-		if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+		if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
 			throw new FishAudioTtsError("timeout");
 		}
 		throw new FishAudioTtsError("network_error");
-	} finally {
-		clearTimeout(timer);
 	}
 }

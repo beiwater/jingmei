@@ -23,14 +23,17 @@ export async function prepareImage(
 			() => null,
 		);
 		if (!converted) return { ok: false, reason: "conversion_failed" };
-		current = new Uint8Array(Buffer.from(converted.data, "base64"));
+		current = Buffer.from(converted.data, "base64");
 		mime = converted.mimeType;
 	}
 	const resized = await (options.resize ?? resizeImage)(current, mime, IMAGE_LIMITS).catch(() => null);
 	if (resized) {
-		current = new Uint8Array(Buffer.from(resized.data, "base64"));
-		mime = resized.mimeType;
-	} else if (current.byteLength > IMAGE_LIMITS.maxBytes) {
+		if (resized.mimeType !== "image/png" && resized.mimeType !== "image/jpeg") {
+			return { ok: false, reason: "unsupported_format" };
+		}
+		return { ok: true, image: { mimeType: resized.mimeType, base64: resized.data } };
+	}
+	if (current.byteLength > IMAGE_LIMITS.maxBytes) {
 		return { ok: false, reason: "oversize" };
 	}
 	if (mime !== "image/png" && mime !== "image/jpeg") return { ok: false, reason: "unsupported_format" };

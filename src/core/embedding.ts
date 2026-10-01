@@ -23,10 +23,7 @@ export async function createFastEmbedder(options: { model: string; cacheDir: str
 	const model = Object.hasOwn(MODELS, options.model) ? MODELS[options.model] : undefined;
 	if (!model) throw new Error("不支持的 embedding 模型");
 	const instance = await FlagEmbedding.init({ model, cacheDir: options.cacheDir, showDownloadProgress: false });
-	let dimensions = instance.listSupportedModels().find((entry) => entry.model === model)?.dim;
-	if (!dimensions) {
-		for await (const batch of instance.embed(["维度探测"])) dimensions = batch[0]?.length;
-	}
+	const dimensions = instance.listSupportedModels().find((entry) => entry.model === model)?.dim;
 	if (!dimensions) throw new Error("embedding 模型未返回向量维度");
 	return {
 		dimensions,

@@ -47,8 +47,7 @@ export async function runDeepSeekWebSearch(
 		return failure("invalid_endpoint");
 	}
 
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const signal = AbortSignal.timeout(timeoutMs);
 	try {
 		const response = await fetch(endpoint, {
 			method: "POST",
@@ -63,7 +62,7 @@ export async function runDeepSeekWebSearch(
 				tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }],
 				messages: [{ role: "user", content: normalizedQuery }],
 			}),
-			signal: controller.signal,
+			signal,
 		});
 		if (!response.ok) return failure("http_error");
 		const bytes = await readBoundedBody(response, MAX_RESPONSE_BYTES);
@@ -100,10 +99,7 @@ export async function runDeepSeekWebSearch(
 			sources: selectedSources,
 		};
 	} catch (error) {
-		if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError"))
-			return failure("timeout");
+		if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return failure("timeout");
 		return failure("network_error");
-	} finally {
-		clearTimeout(timer);
 	}
 }

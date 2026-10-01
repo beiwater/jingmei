@@ -30,34 +30,14 @@ function isBlockedIpv4([a, b, c]: [number, number, number, number]): boolean {
 	);
 }
 
-function parseIpv6(hostname: string): number[] | undefined {
-	let value = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-	if (value.includes("%") || isIP(value) !== 6) return undefined;
-	if (value.includes(".")) {
-		const colon = value.lastIndexOf(":");
-		const ipv4 = parseIpv4(value.slice(colon + 1));
-		if (!ipv4) return undefined;
-		value = `${value.slice(0, colon)}:${((ipv4[0] << 8) | ipv4[1]).toString(16)}:${((ipv4[2] << 8) | ipv4[3]).toString(16)}`;
-	}
-	const halves = value.split("::");
-	if (halves.length > 2) return undefined;
-	const left = halves[0] ? halves[0].split(":") : [];
-	const right = halves[1] ? halves[1].split(":") : [];
-	const missing = 8 - left.length - right.length;
-	if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return undefined;
-	const words = [...left, ...Array(missing).fill("0"), ...right].map((word) => Number.parseInt(word, 16));
-	if (words.length !== 8 || words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff))
-		return undefined;
-	return words;
-}
-
 /**
  * Only globally routable unicast (2000::/3) outside the documentation prefix is public. This also
  * rejects loopback, unspecified, IPv4-mapped/NAT64 forms, discard-only 100::/64, ULA,
  * link-local and multicast.
  */
-function isBlockedIpv6(words: number[]): boolean {
-	return (words[0]! & 0xe000) !== 0x2000 || (words[0] === 0x2001 && words[1] === 0x0db8);
+function isBlockedIpv6(hostname: string): boolean {
+	// URL canonicalization removes leading zeros and dotted tails before this prefix check.
+	return !/^[23][0-9a-f]{3}:/.test(hostname) || hostname.startsWith("2001:db8:");
 }
 
 /** Parse one literal public HTTP(S) URL without DNS resolution or network access. */
@@ -85,7 +65,6 @@ export function parsePublicHttpUrl(input: string, maxChars = 2_048): PublicHttpU
 		return null;
 	const ipv4 = parseIpv4(hostname);
 	if (ipv4 && isBlockedIpv4(ipv4)) return null;
-	const ipv6 = parseIpv6(hostname);
-	if (ipv6 && isBlockedIpv6(ipv6)) return null;
+	if (hostname.includes(":") && isBlockedIpv6(hostname)) return null;
 	return { url: parsed.toString(), hostname };
 }
