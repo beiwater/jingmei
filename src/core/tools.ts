@@ -175,17 +175,18 @@ export function createRecallMemberMemoryTool(
 		name: "recall_member_memory",
 		label: "Recall member memory",
 		description:
-			"On demand, recall one bounded profile only when personalization, a relationship, or a birthday is relevant to the current request. Call only for a human who recently spoke in this same space and channel, or was mentioned/replied to by the current author. The result is private model context; do not quote the full profile in the public channel. Use at most three lookups in a turn.",
-		parameters: Type.Object({ user_id: Type.String({ minLength: 1, maxLength: 64 }) }, { additionalProperties: false }),
-		execute: async (_toolCallId: string, params: { user_id: string }) => {
+			"Recall one bounded private profile when personalization about a member is relevant (for example, questions about them, birthdays, or 'do you remember me?'). Pass member as their display name shown in chat, or user id. Only humans recently visible in this space/channel, or mentioned/replied to by the current author, can be resolved; ambiguous names fail. Never quote the full profile or birthdays publicly. Use at most three lookups in a turn.",
+		parameters: Type.Object({ member: Type.String({ minLength: 1, maxLength: 80 }) }, { additionalProperties: false }),
+		execute: async (_toolCallId: string, params: { member: string }) => {
 			const turn = scope.getTurn();
 			if (!turn) return memoryFailure("no_active_turn");
 			if (turn.memoryRecallCount >= 3) return memoryFailure("recall_limit_reached");
 			turn.memoryRecallCount += 1;
-			if (!turn.visibleMemberIds.has(params.user_id)) return memoryFailure("member_not_recently_visible");
+			const resolved = memberMemory.resolveMember(turn.spaceId, params.member, turn.visibleMemberIds);
+			if ("error" in resolved) return memoryFailure(resolved.error);
 			const recalled = await memberMemory.recall(
 				turn.spaceId,
-				[params.user_id],
+				[resolved.userId],
 				scoreRelevance ? { query: turn.query, score: scoreRelevance } : undefined,
 			);
 			return memoryResult(recalled || "No saved profile for this member.");

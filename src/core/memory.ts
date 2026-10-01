@@ -206,6 +206,29 @@ export class MemberMemory {
 		})();
 	}
 
+	/** Resolve only names/ids of humans visible to the current channel turn; never expose candidates. */
+	resolveMember(
+		spaceId: SpaceId,
+		member: string,
+		visibleMemberIds: ReadonlySet<string>,
+	): { userId: string } | { error: "member_not_recently_visible" | "member_ambiguous" } {
+		const requested = member.trim();
+		if (visibleMemberIds.has(requested)) return { userId: requested };
+		const ids = [...visibleMemberIds];
+		if (!ids.length) return { error: "member_not_recently_visible" };
+		const visible = this.db
+			.query(
+				`SELECT user_id, name FROM memory_profiles WHERE space_id = ? AND user_id IN (${ids.map(() => "?").join(",")})`,
+			)
+			.all(spaceId, ...ids) as Array<{ user_id: string; name: string }>;
+		const exact = visible.filter((profile) => profile.name === requested);
+		const matches = exact.length
+			? exact
+			: visible.filter((profile) => profile.name.toLowerCase() === requested.toLowerCase());
+		if (matches.length > 1) return { error: "member_ambiguous" };
+		return matches[0] ? { userId: matches[0].user_id } : { error: "member_not_recently_visible" };
+	}
+
 	/**
 	 * Return a compact, bounded memory snippet; every lookup is constrained to this space.
 	 * With `relevance`, candidate facts/relationships are ranked against the query in one scorer
@@ -221,7 +244,7 @@ export class MemberMemory {
 		const marks = ids.map(() => "?").join(",");
 		const profiles = this.db
 			.query(`
-			SELECT user_id, name, birthday_month, birthday_day FROM memory_profiles
+			SELECT user_id, name, birthday_month, birthday_day, message_count FROM memory_profiles
 			WHERE space_id = ? AND user_id IN (${marks}) ORDER BY last_seen_at DESC LIMIT ${MAX_RECALL_MEMBERS}
 		`)
 			.all(spaceId, ...ids) as Array<{
@@ -229,6 +252,7 @@ export class MemberMemory {
 			name: string;
 			birthday_month: number | null;
 			birthday_day: number | null;
+			message_count: number;
 		}>;
 		const candidateLimit = relevance ? SCORED_CANDIDATES : 1;
 		const entries = profiles.map((profile) => {
@@ -277,7 +301,8 @@ export class MemberMemory {
 			if (entry.profile.birthday_month && entry.profile.birthday_day)
 				details.push(`生日: ${entry.profile.birthday_month}月${entry.profile.birthday_day}日`);
 			details.push(...topByScore(entry.rels, relScores, RECALL_RELATIONSHIPS));
-			if (details.length) lines.push(`${entry.profile.name}：${details.join("；")}`);
+			if (!details.length) details.push(`已在群里发言 ${entry.profile.message_count} 次`);
+			lines.push(`${entry.profile.name}：${details.join("；")}`);
 		}
 		return truncate(lines.join("\n"), MAX_RECALL_CHARS);
 	}

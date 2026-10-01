@@ -31,10 +31,10 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
-| `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级 |
+| `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级；Discord/Telegram 触发轮次注入作者/回复/提及人类记忆，排除 bot/opt-out，观察角色无记忆块、空结果省略 |
 | `quick-reactions.test.ts` | 普通消息需要强信号且按频道限频（限频期内不调用 Jev）；同频道并发决策共享一个名额；点名消息不受阈值和限频影响、由被点名角色点；bot 消息和表外表情永不点 |
 | `jev.test.ts` | Jev 请求结构与答案映射、`none` → 无表情、拒绝缺失/类型错误/越界/非选项答案、HTTP/网络/超时映射为固定错误码、错误信息不含密钥和正文；System One 话题概率解析、畸形概率表忽略；相关度打分一次请求、按序返回；`shouldQuickReact` 规则；远程失败回退到本地一次并保留话题概率 |
-| `memory.test.ts` | 成员档案按空间隔离；只抽取本人明确的生日与稳定陈述、更正覆盖旧值；提及/回复关系去重并排除 bot；生日设置/清除/列出、`/forget` 停止收集与重新启用；拒绝不安全事实；重放不重复计数；打分回想保留最相关项、打分失败退回时间顺序 |
+| `memory.test.ts` | 成员档案按空间隔离；只抽取本人明确的生日与稳定陈述、更正覆盖旧值；提及/回复关系去重并排除 bot；生日设置/清除/列出、`/forget` 停止收集与重新启用；拒绝不安全事实；重放不重复计数；打分回想保留最相关项、打分失败退回时间顺序；工具按显示名/ID 回想，精确名字优先、忽略大小写、歧义不泄露档案，拒绝不可见/其他空间成员，保留三次上限与 opt-out |
 | `soul.test.ts` | soul 在角色、空间、平台、频道、thread 之间隔离；关闭重开数据库后恢复；暂存去重、压缩快照之后新增的笔记不被消费；容量或数据库失败时回滚并保留暂存；字节上限、身份与内容安全检查 |
 | `soul-session.test.ts` | 真实 Pi 会话中 soul 工具、压缩与重启只影响所属会话，不重载其他会话 |
 | `celebrations.test.ts` | 悉尼夏令时切换下仍在当地 09:00 后发送；农历节日与两种日历的元旦合并；2027 年春节按目标当地日期发送且相邻日不发；2026、2027 年端午/中秋与闰月不重复；劳动节与 Boxing Day；2026、2027 年 NSW 复活节日期；跨 tick 和重启幂等；失败当天重试；中断的发送重启后恢复；2 月 29 日生日；生日按空间查找并经该空间的平台发送 |

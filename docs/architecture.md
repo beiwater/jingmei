@@ -119,8 +119,8 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 | 工具 | 注册条件 | 说明 |
 |---|---|---|
 | `run_js` | 总是 | 纯计算沙箱，见下文威胁模型 |
-| `remember_member_fact` / `recall_member_memory` | 总是 | 只记当前消息作者本人明确说的安全事实；回想限本频道近期出现或被当前作者提及/回复的成员，每轮最多 3 次 |
-| `update_soul` | 总是 | 暂存私人 soul 笔记 |
+| `remember_member_fact` / `recall_member_memory` | 总是 | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
+| `update_soul` | 总是 | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
 | `send_reaction_image` | `sendReactionImages` | 发一张内置 PNG 并结束本轮 |
 | `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
 | `speak` | 配了 `voice` 且 `voiceEnabled` | Fish Audio MP3 并结束本轮 |
@@ -162,7 +162,8 @@ flowchart TD
 ## 成员记忆、soul、祝福
 
 - **记忆**：`memory_profiles` 记名字、活跃度、生日；`memory_facts` 只收白名单键（preference、interest、role、project、timezone、language、goal、note），拒绝敏感键和可疑内容；`memory_relationships` 来自提及、回复和明确的朋友/同学说法。`/forget` 删档案与关系并写入 `memory_opt_out`，之后不再收集，直到 `/memory enable`。
-- **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；压缩成功后事务性并入正式 soul，只重载该会话。
+- **自动参考**：仅触发回复的角色收到作者、被回复作者和提及成员的 `[成员记忆（仅供参考，不要在群里复述完整档案）：…]`；排除角色 bot 和 opt-out，空结果不追加。直接 `recall(spaceId, ids)`，不调用相关度决策；最多 20 人、总计 2,000 字符，每人最近 5 条事实与最强 4 条关系，没有详情时给出发言次数。其他观察角色只收到原消息。按需工具回想仍可调用相关度排序，不公开完整档案或生日，也不把推断当作事实。
+- **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。学到关于自身风格的稳定教训时用 `update_soul` 暂存，不写入成员资料；暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；压缩成功后事务性并入正式 soul，只重载该会话。
 - **祝福**：每分钟检查一次；目标时区当地 09:00 之后，每个成员生日、每个节日各发一次。发送前在 `celebration_deliveries` 占位，完成后标记；失败当天重试，超过 30 分钟仍在发送中的占位视为中断并重试。
 
 ## SQLite

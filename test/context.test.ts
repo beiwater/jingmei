@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 
 type SessionSeam = { getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession> };
 type Block = AssistantMessage["content"][number];
@@ -20,7 +20,9 @@ afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-function fixture(options: { imageInput: boolean; vision?: boolean }) {
+function fixture(options: { imageInput: boolean; vision?: boolean; observer?: boolean; platform?: Platform }) {
+	const platform = options.platform ?? "discord";
+	const space: SpaceId = platform === "discord" ? SPACE : "telegram:-100111";
 	const model = {
 		id: "fixture",
 		name: "fixture",
@@ -75,11 +77,17 @@ function fixture(options: { imageInput: boolean; vision?: boolean }) {
 		reasoningEffort: "off",
 		sendReactionImages: false,
 		voiceEnabled: false,
-		accounts: { discord: { userId: "900", username: "luna" } },
+		accounts: { [platform]: { userId: "900", username: "luna" } },
+	};
+	const observer: Persona = {
+		...persona,
+		id: "sol",
+		name: "sol",
+		accounts: { [platform]: { userId: "901", username: "sol" } },
 	};
 	const transport: PlatformTransport = {
-		platform: "discord",
-		displayName: "Discord",
+		platform,
+		displayName: platform,
 		promptLines: [],
 		quickReactions: {},
 		sendMessage: async () => ({ id: "1" }),
@@ -87,15 +95,16 @@ function fixture(options: { imageInput: boolean; vision?: boolean }) {
 		isValidReaction: () => true,
 	};
 	const db = new Database(":memory:");
+	const memory = new MemberMemory(db);
 	const core = new Conversation({
 		db,
-		memberMemory: new MemberMemory(db),
-		soulStore: new SoulStore({ db, personaIds: [persona.id] }),
+		memberMemory: memory,
+		soulStore: new SoulStore({ db, personaIds: [persona.id, observer.id] }),
 		dataDir,
 		routingSecret: "fixture",
-		personas: [persona],
+		personas: options.observer ? [persona, observer] : [persona],
 		modelRuntime: runtime,
-		transports: new Map([["discord", transport]]),
+		transports: new Map([[platform, transport]]),
 		...(options.vision ? { visionModel: { provider: "fixture", model: "vision" } } : {}),
 	});
 	cleanups.push(() => {
@@ -104,26 +113,32 @@ function fixture(options: { imageInput: boolean; vision?: boolean }) {
 		rmSync(dataDir, { recursive: true, force: true });
 	});
 	const contexts: Context[] = [];
+	const observerContexts: Context[] = [];
 	const script: AssistantMessage[] = [];
 	const ready = (async () => {
 		// Private seam: attach a deterministic provider stream to the real Pi session.
 		const seam = core as unknown as SessionSeam;
-		const session = await seam.getSession(persona, SPACE, "222");
-		session.agent.streamFunction = (_model, context) => {
-			// Snapshot only the messages: the live context also carries non-cloneable tool handlers.
-			contexts.push({ messages: JSON.parse(JSON.stringify(context.messages)) });
-			const stream = createAssistantMessageEventStream();
-			const message = script.shift() ?? reply([{ type: "text", text: "ok" }]);
-			stream.push({ type: "done", reason: message.stopReason as "stop", message });
-			return stream;
-		};
+		for (const [target, captured] of [
+			[persona, contexts],
+			...(options.observer ? [[observer, observerContexts] as const] : []),
+		] as const) {
+			const session = await seam.getSession(target, space, "222");
+			session.agent.streamFunction = (_model, context) => {
+				// Snapshot only the messages: the live context also carries non-cloneable tool handlers.
+				captured.push({ messages: JSON.parse(JSON.stringify(context.messages)) });
+				const stream = createAssistantMessageEventStream();
+				const message = script.shift() ?? reply([{ type: "text", text: "ok" }]);
+				stream.push({ type: "done", reason: message.stopReason as "stop", message });
+				return stream;
+			};
+		}
 	})();
 	let id = 10;
 	const send = async (overrides: Partial<InboundMessage> = {}) => {
 		await ready;
 		await core.handleMessage({
-			platform: "discord",
-			spaceId: SPACE,
+			platform,
+			spaceId: space,
 			channelId: "222",
 			messageId: String(id++),
 			authorId: "5",
@@ -134,7 +149,7 @@ function fixture(options: { imageInput: boolean; vision?: boolean }) {
 			...overrides,
 		});
 	};
-	return { send, contexts, script, reply, visionCalls: () => visionCalls };
+	return { send, contexts, observerContexts, memory, space, script, reply, visionCalls: () => visionCalls };
 }
 
 const thinkingOf = (context: Context) =>
@@ -196,3 +211,57 @@ test("without a vision model the image block is left for Pi's own downgrade", as
 	const content = f.contexts[0]!.messages.at(-1)!.content;
 	expect(Array.isArray(content) && content.map((part) => part.type)).toEqual(["text", "image"]);
 });
+
+for (const platform of ["discord", "telegram"] as const) {
+	test(`${platform} triggered turns privately recall author, reply and mentioned humans only`, async () => {
+		const f = fixture({ imageInput: false, observer: true, platform });
+		for (const [id, name, value] of [
+			["5", "alice", "author-music"],
+			["6", "bob", "reply-hiking"],
+			["7", "carol", "mention-art"],
+			["8", "dave", "opted-out-secret"],
+			["900", "luna", "bot-secret"],
+			["901", "sol", "observer-bot-secret"],
+		] as const) {
+			f.memory.observe({
+				platform,
+				spaceId: f.space,
+				channelId: "222",
+				messageId: `seed-${id}`,
+				authorId: id,
+				authorName: name,
+				isBot: false,
+				content: "hello",
+			});
+			f.memory.rememberFact({
+				spaceId: f.space,
+				memberId: id,
+				key: "interest",
+				value,
+				sourceChannelId: "222",
+				sourceMessageId: `seed-${id}`,
+			});
+		}
+		f.memory.forgetMember(f.space, "8");
+		await f.send({
+			content: "hi luna",
+			replyToMessageId: "reply",
+			replyToAuthorId: "6",
+			mentionedUserIds: ["900", "7", "8", "901"],
+		});
+		const input = JSON.stringify(f.contexts[0]!.messages.at(-1));
+		expect(input).toContain("成员记忆");
+		for (const value of ["author-music", "reply-hiking", "mention-art"]) expect(input).toContain(value);
+		for (const value of ["opted-out-secret", "bot-secret", "observer-bot-secret"]) expect(input).not.toContain(value);
+		await f.send({
+			authorId: "8",
+			authorName: "dave",
+			content: "hi sol",
+			mentionedUserIds: ["901"],
+		});
+		const observerInput = JSON.stringify(f.observerContexts[0]!.messages);
+		expect(observerInput).not.toContain("成员记忆");
+		expect(observerInput).not.toContain("author-music");
+		expect(observerInput).not.toContain("bot-secret");
+	});
+}

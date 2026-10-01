@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { MemberMemory } from "../src/core/memory.ts";
+import { type ActiveTurn, createRecallMemberMemoryTool, type ToolScope } from "../src/core/tools.ts";
 import type { InboundMessage } from "../src/core/types.ts";
 
 const GUILD_A = "discord:11111111111111111";
@@ -49,7 +50,7 @@ describe("MemberMemory", () => {
 		expect(memory.getProfile(GUILD_A, ALICE)?.name).toBe("Alice");
 		expect(memory.getProfile(GUILD_B, ALICE)?.name).toBe("Alice B");
 		expect(memory.getProfile(GUILD_B, ALICE)?.facts).toEqual([]);
-		expect(await memory.recall(GUILD_B, [ALICE])).toBe("");
+		expect(await memory.recall(GUILD_B, [ALICE])).toContain("Alice B");
 		db.close();
 	});
 
@@ -204,6 +205,74 @@ describe("MemberMemory", () => {
 			},
 		});
 		expect(failed).toBe(recency);
+		db.close();
+	});
+
+	test("recall resolves visible names with exact precedence and fails privately for ambiguity or outsiders", async () => {
+		const { db, memory } = setup();
+		for (const [id, name] of [
+			[ALICE, "Alice"],
+			[BOB, "ALICE"],
+			[BOT, "Hidden"],
+		] as const)
+			memory.observe(message({ messageId: id, authorId: id, authorName: name }));
+		memory.observe(
+			message({ spaceId: GUILD_B, messageId: "foreign", authorId: "foreign-human", authorName: "Foreign" }),
+		);
+		for (const [id, value] of [
+			[ALICE, "music"],
+			[BOB, "hiking"],
+			[BOT, "private-project"],
+		] as const)
+			memory.rememberFact({
+				spaceId: GUILD_A,
+				memberId: id,
+				key: "interest",
+				value,
+				sourceChannelId: CHANNEL,
+				sourceMessageId: id,
+			});
+		const turn: ActiveTurn = {
+			spaceId: GUILD_A,
+			authorId: ALICE,
+			sourceChannelId: CHANNEL,
+			sourceMessageId: "source",
+			query: "What does Alice like?",
+			visibleMemberIds: new Set([ALICE, BOB, "foreign-human"]),
+			memoryRecallCount: 0,
+			replyToMessageId: "source",
+			reply: { status: "idle" },
+		};
+		let scoreCalls = 0;
+		const tool = createRecallMemberMemoryTool(
+			{ getTurn: () => turn } as ToolScope,
+			memory,
+			async (_query, candidates) => {
+				scoreCalls++;
+				return candidates.map(() => 1);
+			},
+		);
+		const exact = await tool.execute("exact", { member: "Alice" });
+		expect(JSON.stringify(exact.content)).toContain("Alice");
+		expect(JSON.stringify(exact.content)).toContain("music");
+		expect(JSON.stringify(exact.content)).not.toContain("hiking");
+		expect(scoreCalls).toBe(1);
+		const ambiguous = await tool.execute("ambiguous", { member: "alice" });
+		expect(ambiguous.details).toEqual({ error: "member_ambiguous" });
+		expect(JSON.stringify(ambiguous)).not.toContain("music");
+		const hidden = await tool.execute("hidden", { member: "Hidden" });
+		expect(hidden.details).toEqual({ error: "member_not_recently_visible" });
+		expect(JSON.stringify(hidden)).not.toContain("private-project");
+		expect((await tool.execute("limit", { member: ALICE })).details).toEqual({ error: "recall_limit_reached" });
+		turn.memoryRecallCount = 0;
+		for (const member of [BOT, "Foreign"])
+			expect((await tool.execute("outside", { member })).details).toEqual({ error: "member_not_recently_visible" });
+		turn.visibleMemberIds = new Set([ALICE]);
+		expect((await tool.execute("case", { member: "aLiCe" })).content).toEqual(exact.content);
+		turn.memoryRecallCount = 0;
+		expect((await tool.execute("id", { member: ALICE })).content).toEqual(exact.content);
+		memory.forgetMember(GUILD_A, ALICE);
+		expect(JSON.stringify(await tool.execute("opt-out", { member: ALICE }))).not.toContain("music");
 		db.close();
 	});
 });
