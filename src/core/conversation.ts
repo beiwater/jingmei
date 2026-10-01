@@ -80,6 +80,8 @@ export interface ConversationOptions {
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
 const MAX_IMAGES = 4;
 const RECENT_LINES_FOR_JEV = 5;
+/** Group chat needs recent context only: compaction runs at the same size whatever window the model offers. */
+const MAX_CONTEXT_WINDOW = 65_536;
 const VISION_PROMPT = "用一两句中文客观描述这张图片的内容，包括可读文字。";
 const MENTION_TOKEN = /<@!?\d+>|(?<![\w.])@[A-Za-z]\w{3,31}/g;
 const SESSION_TABLE = `
@@ -205,11 +207,12 @@ export class Conversation implements ConversationCore {
 		});
 	}
 
-	/** The operator-selected model (set by the CLI, read per call), else the configured model. */
+	/** The operator-selected model (set by the CLI, read per call), else the configured model; window capped. */
 	private async modelFor(persona: Persona): Promise<Model<Api> | undefined> {
 		const override = this.botState.modelOverride(persona.id);
+		let model: Model<Api> | undefined;
 		if (override) {
-			let model = this.modelRuntime.getModel(override.provider, override.model);
+			model = this.modelRuntime.getModel(override.provider, override.model);
 			const key = `${persona.id}\0${override.provider}/${override.model}`;
 			if (!model && !this.unavailableOverrides.has(key)) {
 				try {
@@ -224,9 +227,9 @@ export class Conversation implements ConversationCore {
 					log.warn("core", "model_override_unavailable", { persona_id: persona.id });
 				}
 			}
-			if (model) return model;
 		}
-		return this.modelRuntime.getModel(persona.provider, persona.model);
+		model ??= this.modelRuntime.getModel(persona.provider, persona.model);
+		return model && model.contextWindow > MAX_CONTEXT_WINDOW ? { ...model, contextWindow: MAX_CONTEXT_WINDOW } : model;
 	}
 
 	private requireAdminPersona(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string): Persona {
@@ -732,7 +735,7 @@ export class Conversation implements ConversationCore {
 			noTools: "builtin",
 			customTools: [
 				...(reactTool ? [createReactionTool(scope, this.db)] : []),
-				...(persona.sendReactionImages ? [createReactionImageTool(scope)] : []),
+				...(persona.sendReactionImages ? [createReactionImageTool(scope, persona.reactionImages)] : []),
 				createRememberMemberFactTool(scope, this.memberMemory),
 				createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
 				createUpdateSoulTool(scope, this.soulStore),

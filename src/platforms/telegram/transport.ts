@@ -215,7 +215,7 @@ export class TelegramPlatformTransport implements PlatformTransport {
 		const attachment = input.attachments?.[0];
 		if (attachment) {
 			const caption = texts.length === 1 && [...texts[0]!.text].length <= CAPTION_CHARS ? texts.shift() : undefined;
-			const method = attachment.contentType === "image/png" ? "sendPhoto" : "sendAudio";
+			const method = attachment.contentType.startsWith("image/") ? "sendPhoto" : "sendAudio";
 			const sent = await withPlainFallback(caption?.entities ?? [], (entities) =>
 				api.sendFile(method, chatId, attachment, caption && { text: caption.text, entities }, replyTo),
 			);

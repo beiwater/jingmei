@@ -44,7 +44,7 @@ export interface InboundMessage {
 export interface OutboundAttachment {
 	name: string;
 	data: Uint8Array;
-	contentType: "image/png" | "audio/mpeg";
+	contentType: "image/png" | "image/jpeg" | "audio/mpeg";
 }
 
 /** Everything the core needs from a platform. One instance per platform, multiplexing personas. */
@@ -84,6 +84,18 @@ export interface PersonaAccount {
 	username: string;
 }
 
+export const BUILTIN_REACTION_IMAGE_IDS = ["hello", "laugh", "think", "hug"] as const;
+
+/** Validated at config load; tool callers supply ids, never filesystem paths. */
+export interface ReactionImage {
+	path: string;
+	caption: string;
+	name: string;
+	contentType: "image/png" | "image/jpeg";
+}
+
+export type ReactionImageCatalog = Readonly<Record<string, ReactionImage>>;
+
 export interface Persona {
 	id: string;
 	name: string;
@@ -100,6 +112,8 @@ export interface Persona {
 	/** `${platform}:${userId}` entries allowed to run admin commands. */
 	adminUserIds: readonly string[];
 	sendReactionImages: boolean;
+	/** Persona-local image catalog resolved from the optional reactionImages directory. */
+	reactionImages?: ReactionImageCatalog;
 	voiceEnabled: boolean;
 	/** Filled by platform startup after verifying each token. */
 	accounts: Partial<Record<Platform, PersonaAccount>>;

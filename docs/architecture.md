@@ -107,7 +107,8 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 
 - 每个 `(角色, 空间, 频道)` 一个持久 Pi 会话，文件在 `data/sessions/<personaId>/`，映射存 `sessions` 表。Discord thread 有自己的频道 ID，因此自成会话。
 - 会话禁用 Pi 内置编码工具（`noTools: "builtin"`），不加载项目扩展、技能、提示模板和上下文文件；只挂一个隐藏扩展 `jingmei-context`。
-- Pi 自动压缩开启。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
+- Pi 自动压缩开启。`modelFor()` 把模型的 `contextWindow` 截到 `MAX_CONTEXT_WINDOW = 65536`，所以无论模型标称多大窗口，都在约 `65536 − 16384` token 时压缩。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
+- 记忆工具：system prompt 给出 `remember_member_fact` / `recall_member_memory` 的具体时机——作者陈述自己的长期信息时先保存（按 key 举例；玩笑、一时状态、他人信息、敏感信息不存；同 key 覆盖，需合并旧值）；被问到成员个人情况而输入里没有时先回想；查不到就说不记得，不编造记忆。
 - 模型：`persona_models` 有记录（`jingmei model` 写入）时用该模型，否则用配置的 `provider`/`model`。`getSession()`（lane 内）每次读一次记录，因此 CLI 的切换不用重启；会话空闲且模型不同时 `setModel()` 并重设 `reasoningEffort`，新会话直接用当前模型创建。记录的模型不在目录里时，先离线 `refresh()` 该 provider（CLI 登录或选择模型时已把动态目录缓存到 `pi-agent/models-store.json`），仍找不到则用配置模型并记一次 `model_override_unavailable`，记录保留。
 - system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；固定写入角色名字、别名和当前平台已验证账号（用户名、用户 ID、入站提及形式），明确路由已选中本轮回复角色，不让模型重新判断是否被叫到。媒体说明按能力分支描述直接图片输入、可选辅助描述和占位，以及视频少量抽帧；不绑定创建时的模型，因此运行时 `setModel()` 后仍正确。会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
 
@@ -133,7 +134,7 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 | `run_js` | 总是 | 纯计算沙箱，见下文威胁模型 |
 | `remember_member_fact` / `recall_member_memory` | 总是 | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
 | `update_soul` | 总是 | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
-| `send_reaction_image` | `sendReactionImages` | 发一张内置 PNG 并结束本轮 |
+| `send_reaction_image` | `sendReactionImages` | 按内置或该角色 `reactionImages` 图库的 id 发一张 PNG/JPEG，默认用 catalog 配文并结束本轮；启动校验路径与元数据，角色工具 schema 的 id 排序固定，不随轮次变化 |
 | `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
 | `speak` | 配了 `voice` 且 `voiceEnabled` | Fish Audio MP3 并结束本轮 |
 | `react_to_message` | 未开启 Jev 秒回表情 | 给本轮消息或本频道近期人类消息点表情并结束本轮 |

@@ -33,7 +33,8 @@ const model = (provider: string, id: string): Model<"openai-responses"> => ({
 });
 
 test("a model chosen by the CLI connection switches the running bot's open session, survives restart and resets", async () => {
-	const models = [model("fixture", "alpha"), model("fixture", "beta")];
+	// beta advertises a 1M window; the bot still compacts as if it had 64K.
+	const models = [model("fixture", "alpha"), { ...model("fixture", "beta"), contextWindow: 1_048_576 }];
 	// A provider whose catalog the CLI caches only after this process started (e.g. after `jingmei login`).
 	const late = model("live", "delta");
 	let refreshes = 0;
@@ -143,6 +144,7 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	operator.setModelOverride("luna", "fixture", "beta");
 	await send(core);
 	expect(used.at(-1)).toBe("fixture/beta");
+	expect((await core.getContextStatus("luna", "discord", SPACE, "222", "5")).contextWindow).toBe(65_536);
 
 	operator.setModelOverride("luna", "live", "delta");
 	await send(core);

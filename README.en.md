@@ -34,8 +34,9 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 - **Web search**: with `DEEPSEEK_API_KEY` set, DeepSeek server-side web search is enabled. Messages that explicitly say “查一下” / “搜索” / “look up” are searched first and answered with source links; the model can also search on its own when a question depends on external facts.
 - **Calculation**: `run_js` runs small pure-computation JavaScript in a node:vm realm inside a short-lived child process (no access to files, network or environment variables by default; this is not an OS-level sandbox, see the run_js threat model in [docs/architecture.md](docs/architecture.md)) for exact arithmetic, date math and unit conversions.
 - **Member memory and soul**: per group, profiles hold names, birthdays, stable self-stated facts, and relationships formed by mentions and replies. The replying character automatically receives bounded private memory for the author, replied-to author, and mentioned humans (excluding bots and members who used `/forget`, with no extra decision call); it can recall other recently visible members by their chat display name. Characters save explicit self-stated interests, roles, projects, timezones, languages, goals, and preferences, never reciting full profiles or birthdays publicly. Each character keeps a private soul per channel; stable lessons about its own formatting, tone, or response length are staged and become formal only after successful compaction. Members can `/forget` at any time.
+  The system prompt spells out when to save and when to recall: save before replying when the author states lasting facts about themselves (never jokes, passing states, other people's details or sensitive data); recall before answering about a member when the input lacks it; if nothing is found, say so instead of inventing memories.
 - **Holiday and birthday greetings** (optional): sent to a chosen channel after 09:00 local time, covering birthdays and Chinese/Australian holidays; deliveries are recorded in the database, so restarts never resend.
-- **Reaction images**: characters can send one of 4 bundled PNGs (hello, laugh, think, hug); can be turned off per character.
+- **Reaction images**: characters can send one of 4 bundled PNGs (hello, laugh, think, hug) or an image from their own local PNG/JPEG catalog, using its default caption and ending the turn; can be turned off per character.
 - **No thinking by default, fewer tokens**: `reasoningEffort` defaults to `off`; even when enabled, thinking from completed turns is not sent back to the model. The system prompt and tool definitions stay stable for provider prefix caching.
 - **Fixed identity and summary boundaries**: characters know their names, aliases, and verified platform accounts and accept turns selected by the router. Media instructions distinguish direct image input, optional auxiliary descriptions, and placeholders without inventing processing. History compaction instructions preserve fixed identity, retain confirmed facts, attribute member claims, and exclude assistant guesses or past refusals as permanent rules; style lessons require an explicit member request.
 
@@ -151,6 +152,7 @@ Run them in the project directory as the same user that runs the bot. They read 
 - **Pause**: the bot stays online and keeps storing messages, but does not reply, react, update member memory or topics, or send celebrations, and makes no model calls. It applies to a running bot immediately without a restart, and survives restarts until `resume`. Messages received while paused do not enter the characters' session context; greetings due that day go out after resuming. To actually stop the process, use `systemctl --user stop pi-discord-agent` or Ctrl+C.
 - **Status**: the bot writes a heartbeat every minute; with no heartbeat for two minutes it counts as stopped (including crashes). Replies are counted from the release that introduced this command; message and other totals cover all history.
 - **Switch model**: only the CLI on the server can switch models; there is no chat command for it. The choice is stored in the database, the running bot moves each channel over before its next reply without a restart, and it survives restarts. `default` restores `provider`/`model` from `jingmei.config.json`. `reasoningEffort` is kept and Pi clamps it when the new model does not support it. To use another provider, `login` first or put its API key in the service environment. If the bot cannot find the chosen model (for example its provider was removed), it logs `model_override_unavailable` and keeps using the configured model. A switch invalidates the provider's prefix cache once.
+- **Context cap**: whatever window the model advertises (for example Gemini's 1M), each channel session is treated as 64K and compacts automatically around 48K tokens, so replies never carry huge histories that slow them down and drain quota.
 
 ## Configuration reference
 
@@ -181,14 +183,30 @@ Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
 | `id` | Unique, `a-z 0-9 _ -` only |
 | `name` | Display name; a message containing it addresses the character |
 | `personaPath` | Persona file, must be readable |
+| `reactionImages` | Optional local catalog directory containing `catalog.json`; resolved from the project root like `personaPath`, also accepting absolute paths and `~/` |
 | `provider` / `model` | Pi provider and model ID |
 | `reasoningEffort` | `off` (default), `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; a level the model doesn't support fails at startup |
 | `routingP` | 0–1, the chance this character answers an ordinary message; the sum over all characters that can speak in one group/server must not exceed 1. Use 0 to answer only when addressed |
 | `aliases` | Optional extra names that address the character (≤ 64 characters each) |
 | `spaces` | Optional restriction to some groups/servers, e.g. `["discord:<guildId>", "telegram:<chatId>"]`; omit for all |
-| `sendReactionImages` | Whether the bundled reaction images may be sent, default `true` |
+| `sendReactionImages` | Whether bundled and local catalog reaction images may be sent, default `true` |
 | `voiceEnabled` | Whether to use `voice` when configured, default `true` |
 | `discord` / `telegram` | The character's account on that platform: `{ tokenEnv, adminUserIds? }`. At least one is required, and each platform used needs its top-level section. `adminUserIds` may use `/context` and `/compact` |
+
+Keep local catalogs private: place the whole directory at `personas/feiba/`, add `"reactionImages": "personas/feiba"` to that character's object, and keep `"sendReactionImages": true`. Example layout:
+
+```text
+personas/
+  idk.local.md
+  feiba/
+    catalog.json
+    001_innocent.png
+    ...
+```
+
+`catalog.json` maps ids to metadata, e.g. `{"innocent":{"file":"feiba/001_innocent.png","name":"Innocent","caption":"Who, me?"}}`. Files are relative to the catalog directory; if the first segment exactly matches the directory name (`feiba/` here), it is stripped first. Thus the old `assets/reactions/feiba/` directory can be copied wholesale to `personas/feiba/` without editing its 120 catalog paths; keep the directory name `feiba`.
+
+Startup validation collects errors: ids use only `a-z 0-9 _` and cannot collide with hello/laugh/think/hug; `name` and `caption` must be strings; files must be readable, with `.png`, `.jpg`, or `.jpeg` extensions (case-insensitive). Absolute paths, `..`, backslashes, and symlinks escaping the directory are rejected. Extra metadata is ignored. Available ids enter the character's tool schema in stable order; selection guidance belongs in its persona file, not a repeated full list in the system prompt. Restart after changing the directory or catalog to reload it.
 
 ### `celebrations[]`
 

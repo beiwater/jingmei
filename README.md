@@ -34,8 +34,9 @@
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
 - **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript（默认拿不到文件、网络和环境变量；这不是操作系统级沙箱，见 [docs/architecture.md](docs/architecture.md) 的 run_js 威胁模型），用于精确计算、日期运算和单位换算。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。接话角色自动收到作者、被回复作者和提及人类的有界私人记忆参考（排除 bot 和已 `/forget` 的成员，不额外调用决策模型）；需要其他近期可见成员时可按聊天显示名回想。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，压缩成功后才转为正式内容。成员可随时 `/forget`。
+  何时保存、何时回想写在 system prompt 里：作者自述长期信息时先保存再回复（玩笑、一时状态、他人信息、敏感信息不存）；被问到成员情况而手头没有时先回想；查不到就说不记得，不编造。
 - **节日与生日祝福**（可选）：在指定频道、当地时间 09:00 之后发送生日祝福和中国/澳洲节日祝福；发送记录存在数据库里，重启不会重发。
-- **表情图**：角色可以从内置的 4 张 PNG（hello、laugh、think、hug）里挑一张发出去，可按角色关闭。
+- **表情图**：角色可以从内置的 4 张 PNG（hello、laugh、think、hug）或自己的本地 PNG/JPEG 图库里挑一张发出去，默认使用图库说明作配文，发图后结束本轮；可按角色关闭。
 - **默认不思考，省 token**：`reasoningEffort` 默认 `off`；即使打开，已完成轮次的 thinking 也不会再发给模型。system prompt 和工具定义保持稳定，便于 provider 前缀缓存。
 - **固定身份与摘要边界**：角色明确知道自己的名字、别名和已验证平台账号，接受路由交给它的回复轮次；媒体说明区分直接图片输入、可选辅助描述和占位，不编造处理流程。历史压缩摘要要求保留固定身份、只记确认事实并归因成员说法，不把助手猜测或过去拒绝固化为规则；风格教训仅在成员明确要求时保留。
 
@@ -151,6 +152,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 - **暂停**：bot 保持在线并照常把消息存进数据库，但不回复、不点表情、不更新成员记忆和话题、不发祝福，也不调用任何模型。对正在运行的 bot 立即生效，不用重启；重启后仍保持暂停，直到 `resume`。暂停期间的消息不会进入角色的会话上下文；当天到期的祝福在恢复后补发。要真正停掉进程，用 `systemctl --user stop pi-discord-agent` 或 Ctrl+C。
 - **运行状态**：bot 每分钟写一次心跳，超过两分钟没有心跳即视为已停止（包括崩溃）。回复数从引入这个命令的版本开始统计；消息等数据统计全部历史。
 - **切换模型**：只能在服务器上用 CLI 切换，群里没有对应命令。选择存在数据库里，运行中的 bot 在每个频道下一次回复前换过去，不用重启，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider 先 `login`，或把 API key 放进服务进程环境。选中的模型 bot 找不到时（例如 provider 被删除），它会记 `model_override_unavailable` 警告并继续用配置模型。切换会让 provider 前缀缓存失效一次。
+- **上下文上限**：不管模型标称多大的上下文窗口（例如 Gemini 的 1M），每个频道的会话都按 64K 处理，约 48K token 时自动压缩，避免每次回复都带上巨量历史、拖慢速度和耗尽额度。
 
 ## 配置参考
 
@@ -181,14 +183,30 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `id` | 唯一，只能用 `a-z 0-9 _ -` |
 | `name` | 显示名；消息里出现这个名字即视为点名 |
 | `personaPath` | 人设文件路径，必须可读 |
+| `reactionImages` | 可选，本地图库目录（含 `catalog.json`）；路径与 `personaPath` 一样按项目根目录解析，也支持绝对路径和 `~/` |
 | `provider` / `model` | Pi 的 provider 与模型 ID |
 | `reasoningEffort` | `off`（默认）、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；模型不支持的档位会在启动时报错 |
 | `routingP` | 0–1。普通消息由该角色接话的概率；同一个群/服务器内所有能发言角色之和不得超过 1。设为 0 则只在被点名时回应 |
 | `aliases` | 可选，额外的点名词（每个不超过 64 字符） |
 | `spaces` | 可选，把角色限定在部分群/服务器，如 `["discord:<guildId>", "telegram:<chatId>"]`；省略即全部 |
-| `sendReactionImages` | 是否能发内置表情图，默认 `true` |
+| `sendReactionImages` | 是否能发内置及本地图库表情图，默认 `true` |
 | `voiceEnabled` | 配置了 `voice` 时是否使用语音，默认 `true` |
 | `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact` 的用户 ID |
+
+本地图库不入库：把整个目录放到 `personas/feiba/`，在对应角色对象中加 `"reactionImages": "personas/feiba"`，保留 `"sendReactionImages": true`。目录示例：
+
+```text
+personas/
+  idk.local.md
+  feiba/
+    catalog.json
+    001_innocent.png
+    ...
+```
+
+`catalog.json` 是 id 到元数据的对象，例如 `{"innocent":{"file":"feiba/001_innocent.png","name":"无辜","caption":"我什么都不知道"}}`。`file` 默认相对于图库目录；若首段恰好是目录名（这里是 `feiba/`），先去掉这一段。因此旧 `assets/reactions/feiba/` 整个目录可直接复制到 `personas/feiba/`，无需修改旧 catalog 中的 120 条路径；目录名须保持 `feiba`。
+
+启动时统一校验：id 只能用 `a-z 0-9 _`，不能与 hello/laugh/think/hug 重名；`name`、`caption` 必须是字符串；文件必须可读，扩展名只允许 `.png`、`.jpg`、`.jpeg`（不区分大小写），禁止绝对路径、`..`、反斜杠和逃出图库目录的符号链接；额外元数据忽略。可用 id 按稳定顺序进入该角色的工具 schema，人设文件可说明选图场景，不在 system prompt 里重复列出全图库。修改目录或 catalog 后重启以重新加载。
 
 ### `celebrations[]`
 

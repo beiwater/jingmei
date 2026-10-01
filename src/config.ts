@@ -1,10 +1,25 @@
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
 import { JEV_ENDPOINT } from "./decision/jev.ts";
-import type { Persona, Platform, SpaceId } from "./core/types.ts";
+import {
+	BUILTIN_REACTION_IMAGE_IDS,
+	type Persona,
+	type Platform,
+	type ReactionImageCatalog,
+	type SpaceId,
+} from "./core/types.ts";
 
 const CONFIG_FILE = "jingmei.config.json";
 
@@ -160,6 +175,78 @@ function resolvePath(rootDir: string, path: string): string {
 	return resolve(rootDir, path);
 }
 
+function readReactionImages(
+	value: unknown,
+	rootDir: string,
+	field: string,
+	errors: string[],
+): ReactionImageCatalog | undefined {
+	if (value === undefined) return undefined;
+	if (!nonEmptyString(value)) {
+		errors.push(`${field} must be a nonempty directory path`);
+		return undefined;
+	}
+	const directory = resolvePath(rootDir, value);
+	let realDirectory: string;
+	let catalog: unknown;
+	try {
+		realDirectory = realpathSync(directory);
+		catalog = JSON.parse(readFileSync(join(directory, "catalog.json"), "utf8"));
+	} catch {
+		errors.push(`${field} must contain a readable, valid catalog.json`);
+		return undefined;
+	}
+	if (!isObject(catalog)) {
+		errors.push(`${field}.catalog.json must be an object`);
+		return undefined;
+	}
+	const images: Record<string, ReactionImageCatalog[string]> = Object.create(null);
+	for (const [id, entry] of Object.entries(catalog)) {
+		const entryField = `${field}.catalog.${id}`;
+		const before = errors.length;
+		if (!/^[a-z0-9_]+$/.test(id)) errors.push(`${entryField} id must match [a-z0-9_]+`);
+		if (BUILTIN_REACTION_IMAGE_IDS.some((builtin) => builtin === id))
+			errors.push(`${entryField} duplicates a built-in reaction image id`);
+		if (!isObject(entry)) {
+			errors.push(`${entryField} must be an object`);
+			continue;
+		}
+		for (const key of ["caption", "name"] as const)
+			if (typeof entry[key] !== "string") errors.push(`${entryField}.${key} must be a string`);
+		if (!nonEmptyString(entry.file)) {
+			errors.push(`${entryField}.file must be a nonempty relative path`);
+			continue;
+		}
+		const parts = entry.file.split("/");
+		if (isAbsolute(entry.file) || entry.file.includes("\\") || parts.includes("..")) {
+			errors.push(`${entryField}.file must stay inside the catalog directory`);
+			continue;
+		}
+		// Existing feiba catalogs prefix files with "feiba/"; strip only this exact directory name.
+		const file = parts[0] === basename(directory) ? parts.slice(1).join("/") : entry.file;
+		const path = resolve(directory, file);
+		const extension = extname(path).toLowerCase();
+		if (![".png", ".jpg", ".jpeg"].includes(extension)) errors.push(`${entryField}.file must be PNG or JPEG`);
+		try {
+			const within = relative(realDirectory, realpathSync(path));
+			if (within === ".." || within.startsWith(`..${sep}`) || isAbsolute(within))
+				errors.push(`${entryField}.file must stay inside the catalog directory`);
+			accessSync(path, constants.R_OK);
+			if (!statSync(path).isFile()) errors.push(`${entryField}.file must be a readable file`);
+		} catch {
+			errors.push(`${entryField}.file is missing or unreadable`);
+		}
+		if (errors.length === before)
+			images[id] = {
+				path,
+				caption: entry.caption as string,
+				name: entry.name as string,
+				contentType: extension === ".png" ? "image/png" : "image/jpeg",
+			};
+	}
+	return images;
+}
+
 /** Undefined when `dataDir` is present but invalid. */
 function resolveDataDir(input: Json, rootDir: string): string | undefined {
 	if (input.dataDir === undefined) return resolve(rootDir, "data");
@@ -312,6 +399,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 					errors.push(`${field}.personaPath is not readable: ${personaPath}`);
 				}
 			}
+			const reactionImages = readReactionImages(entry.reactionImages, rootDir, `${field}.reactionImages`, errors);
 			const reasoningEffort = entry.reasoningEffort ?? "off";
 			if (!THINKING_LEVELS.includes(reasoningEffort as ThinkingLevel))
 				errors.push(`${field}.reasoningEffort must be one of ${THINKING_LEVELS.join(", ")}`);
@@ -390,6 +478,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				...(personaSpaces ? { spaces: personaSpaces } : {}),
 				adminUserIds: [...new Set(adminUserIds)],
 				sendReactionImages: entry.sendReactionImages !== false,
+				...(reactionImages ? { reactionImages } : {}),
 				voiceEnabled: entry.voiceEnabled !== false,
 				tokens,
 			});

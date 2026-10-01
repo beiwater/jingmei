@@ -22,6 +22,7 @@ discord.config.json
 
 # Local persona prompts are private by default. Only explicit public templates are tracked.
 personas/*.md
+personas/*/
 !personas/README.md
 !personas/template.zh.md
 !personas/template.en.md

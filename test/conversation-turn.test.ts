@@ -3,9 +3,10 @@ import { type AssistantMessage, createAssistantMessageEventStream, type Model } 
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test, vi } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validateConfig } from "../src/config.ts";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { useExtensibleSqlite } from "../src/core/db.ts";
@@ -32,7 +33,15 @@ function eventId(db: Database, messageId: string) {
 	return row.event_id;
 }
 
-function fixture(options: { platform?: Platform; timeoutMs?: number; events?: boolean; voice?: boolean } = {}) {
+function fixture(
+	options: {
+		platform?: Platform;
+		timeoutMs?: number;
+		events?: boolean;
+		voice?: boolean;
+		reactionImages?: boolean;
+	} = {},
+) {
 	useExtensibleSqlite();
 	const platform = options.platform ?? "telegram";
 	const space: SpaceId = platform === "telegram" ? "telegram:-100111" : "discord:111";
@@ -91,6 +100,46 @@ function fixture(options: { platform?: Platform; timeoutMs?: number; events?: bo
 		voiceEnabled: !!options.voice,
 		accounts: { [platform]: { userId: "900", username: "luna_bot" } },
 	};
+	if (options.reactionImages) {
+		const directory = join(dataDir, "feiba");
+		mkdirSync(directory);
+		writeFileSync(
+			join(directory, "001_innocent.png"),
+			readFileSync(join(import.meta.dir, "../assets/reactions/hello.png")),
+		);
+		writeFileSync(
+			join(directory, "catalog.json"),
+			JSON.stringify({
+				innocent: {
+					id: "innocent",
+					num: 1,
+					file: "feiba/001_innocent.png",
+					name: "Innocent",
+					caption: "Who, me?",
+					category: "reaction",
+				},
+			}),
+		);
+		persona.reactionImages = validateConfig(
+			{
+				telegram: { chatIds: ["-100111"] },
+				personas: [
+					{
+						id: persona.id,
+						name: persona.name,
+						personaPath,
+						provider: model.provider,
+						model: model.id,
+						routingP: 0,
+						reactionImages: directory,
+						telegram: { tokenEnv: "BOT_TOKEN" },
+					},
+				],
+			},
+			dataDir,
+			{ ROUTING_SECRET: "fixture", BOT_TOKEN: "fixture" },
+		).personas[0]!.reactionImages;
+	}
 	const sends: Array<Parameters<PlatformTransport["sendMessage"]>[0]> = [];
 	const transport: PlatformTransport = {
 		platform,
@@ -351,6 +400,34 @@ test("reaction-image tool sends are stored with their caption and source topic",
 	).toEqual({
 		content: "wave",
 		reply_to_message_id: "10",
+		event_id: eventId(f.db, "10"),
+	});
+});
+
+test("a persona catalog image is sent with its default caption and ends the turn", async () => {
+	const f = fixture({ events: true, reactionImages: true });
+	f.script.push(
+		f.reply(
+			[{ type: "toolCall", id: "image", name: "send_reaction_image", arguments: { asset_id: "innocent" } }],
+			"toolUse",
+		),
+	);
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.sends).toHaveLength(1);
+	expect(f.calls()).toBe(1);
+	expect(f.sends[0]).toMatchObject({
+		content: "Who, me?",
+		replyToMessageId: "10",
+		attachments: [
+			{
+				name: "001_innocent.png",
+				data: readFileSync(f.persona.reactionImages!.innocent!.path),
+				contentType: "image/png",
+			},
+		],
+	});
+	expect(f.db.query("SELECT content, event_id FROM messages WHERE message_id = '1001'").get()).toEqual({
+		content: "Who, me?",
 		event_id: eventId(f.db, "10"),
 	});
 });

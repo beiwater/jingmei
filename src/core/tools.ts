@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { errorCategory, log } from "../observability/log.ts";
 import { FishAudioTtsError, synthesizeFishAudioTts } from "../tools/fish-tts.ts";
@@ -9,7 +9,13 @@ import { runDeepSeekWebSearch } from "../tools/web-search.ts";
 import { isRawId } from "./ids.ts";
 import type { MemberMemory, RelevanceScorer } from "./memory.ts";
 import type { SoulStore } from "./soul.ts";
-import type { PlatformTransport, SpaceId } from "./types.ts";
+import {
+	BUILTIN_REACTION_IMAGE_IDS,
+	type PlatformTransport,
+	type ReactionImage,
+	type ReactionImageCatalog,
+	type SpaceId,
+} from "./types.ts";
 
 export interface VoiceConfig {
 	apiKey: string;
@@ -51,14 +57,21 @@ const REACTION_ASSETS = {
 	laugh: { file: "laugh.png", caption: "😂" },
 	think: { file: "think.png", caption: "🤔" },
 	hug: { file: "hug.png", caption: "🫂" },
-} as const;
-export type ReactionAssetId = keyof typeof REACTION_ASSETS;
+} as const satisfies Record<(typeof BUILTIN_REACTION_IMAGE_IDS)[number], { file: string; caption: string }>;
+export type ReactionAssetId = (typeof BUILTIN_REACTION_IMAGE_IDS)[number];
 
-/** Resolve only the baked-in catalog entries; caller input is never interpreted as a path. */
-export function resolveReactionAsset(assetId: string): { path: string; caption: string } | null {
-	if (!Object.hasOwn(REACTION_ASSETS, assetId)) return null;
-	const asset = REACTION_ASSETS[assetId as ReactionAssetId];
-	return { path: join(import.meta.dir, "../../assets/reactions", asset.file), caption: asset.caption };
+/** Resolve only catalog entries; caller input is never interpreted as a path. */
+export function resolveReactionAsset(assetId: string, catalog?: ReactionImageCatalog): ReactionImage | null {
+	if (Object.hasOwn(REACTION_ASSETS, assetId)) {
+		const asset = REACTION_ASSETS[assetId as ReactionAssetId];
+		return {
+			path: join(import.meta.dir, "../../assets/reactions", asset.file),
+			caption: asset.caption,
+			name: assetId,
+			contentType: "image/png",
+		};
+	}
+	return catalog && Object.hasOwn(catalog, assetId) ? catalog[assetId]! : null;
 }
 
 function failure(text: string, error: string) {
@@ -312,7 +325,8 @@ export function createVoiceTool(scope: ToolScope, voice: VoiceConfig) {
 	};
 }
 
-export function createReactionImageTool(scope: ToolScope) {
+export function createReactionImageTool(scope: ToolScope, catalog?: ReactionImageCatalog) {
+	const ids = [...BUILTIN_REACTION_IMAGE_IDS, ...Object.keys(catalog ?? {}).sort()];
 	return {
 		name: "send_reaction_image",
 		label: "Send reaction image",
@@ -320,18 +334,13 @@ export function createReactionImageTool(scope: ToolScope) {
 			"Send exactly one original reaction image to the chat. Choose one catalog id and an optional short caption. Use only when an image clearly fits; this sends the image immediately and ends the turn, so do not also write a text reply.",
 		parameters: Type.Object(
 			{
-				asset_id: Type.Union([
-					Type.Literal("hello"),
-					Type.Literal("laugh"),
-					Type.Literal("think"),
-					Type.Literal("hug"),
-				]),
+				asset_id: Type.Union(ids.map((id) => Type.Literal(id))),
 				caption: Type.Optional(Type.String({ maxLength: 200 })),
 			},
 			{ additionalProperties: false },
 		),
-		execute: async (_toolCallId: string, params: { asset_id: ReactionAssetId; caption?: string }) => {
-			const asset = resolveReactionAsset(params.asset_id);
+		execute: async (_toolCallId: string, params: { asset_id: string; caption?: string }) => {
+			const asset = resolveReactionAsset(params.asset_id, catalog);
 			if (!asset) return failure("Unknown reaction image id.", "unknown_asset");
 			const turn = scope.getTurn();
 			if (!turn) return failure("No active reply turn.", "no_active_turn");
@@ -345,7 +354,7 @@ export function createReactionImageTool(scope: ToolScope) {
 					channelId: scope.channelId,
 					content: (params.caption?.trim() || asset.caption).slice(0, 200),
 					replyToMessageId: turn.replyToMessageId,
-					attachments: [{ name: `${params.asset_id}.png`, data: readFileSync(asset.path), contentType: "image/png" }],
+					attachments: [{ name: basename(asset.path), data: readFileSync(asset.path), contentType: asset.contentType }],
 				});
 				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
 				scope.recordSentMessage(

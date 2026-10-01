@@ -32,9 +32,9 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
 | `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；暂停时消息入库但不跑模型、不发送，恢复后回复并计数；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级；Discord/Telegram 触发轮次注入作者/回复/提及人类记忆，排除 bot/opt-out，观察角色无记忆块、空结果省略 |
-| `conversation-turn.test.ts` | 真实 Pi 会话中永不完成且忽略取消的 provider 到总期限释放 lane，排队的同频道消息继续回复；最终 error/aborted 不发半截文字、日志不泄露 provider 文本，一次重试成功不误报失败；无回声平台的文字/表情图/工具语音/明确请求语音入库并继承话题，随后人类回复直接继承；有回声平台不预先入库且正常处理 bot 回声 |
+| `conversation-turn.test.ts` | 真实 Pi 会话中永不完成且忽略取消的 provider 到总期限释放 lane，排队的同频道消息继续回复；最终 error/aborted 不发半截文字、日志不泄露 provider 文本，一次重试成功不误报失败；无回声平台的文字/表情图/工具语音/明确请求语音入库并继承话题，随后人类回复直接继承；角色本地图库图片按 id 发送原文件、默认配文并结束本轮；有回声平台不预先入库且正常处理 bot 回声 |
 | `bot-state.test.ts` | CLI 连接写入的暂停对 bot 连接立即可见、重复暂停保留首次时间；累计运行时长：已结束运行求和、运行中算到当前、崩溃的运行止于最后心跳；本次与累计回复数 |
-| `model-select.test.ts` | CLI 连接写入的模型覆盖让运行中 bot 已打开的会话下一轮换模型；后启动的 provider 目录经一次离线刷新后可用；选择在重启后保留；找不到的模型退回配置模型且只刷新一次；清除后恢复配置模型 |
+| `model-select.test.ts` | CLI 连接写入的模型覆盖让运行中 bot 已打开的会话下一轮换模型；1M 窗口的模型按 64K 报告与压缩；后启动的 provider 目录经一次离线刷新后可用；选择在重启后保留；找不到的模型退回配置模型且只刷新一次；清除后恢复配置模型 |
 | `quick-reactions.test.ts` | 普通消息需要强信号且按频道限频（限频期内不调用 Jev）；同频道并发决策共享一个名额；点名消息不受阈值和限频影响、由被点名角色点；bot 消息和表外表情永不点 |
 | `jev.test.ts` | Jev 请求结构与答案映射、`none` → 无表情、拒绝缺失/类型错误/越界/非选项答案、HTTP/网络/超时映射为固定错误码、错误信息不含密钥和正文；System One 话题概率解析、畸形概率表忽略；相关度打分一次请求、按序返回；`shouldQuickReact` 规则；远程失败回退到本地一次并保留话题概率 |
 | `memory.test.ts` | 成员档案按空间隔离；只抽取本人明确的生日与稳定陈述、更正覆盖旧值；提及/回复关系去重并排除 bot；生日设置/清除/列出、`/forget` 停止收集与重新启用；拒绝不安全事实；重放不重复计数；打分回想保留最相关项、打分失败退回时间顺序；工具按显示名/ID 回想，精确名字优先、忽略大小写、歧义不泄露档案，拒绝不可见/其他空间成员，保留三次上限与 opt-out |
@@ -45,7 +45,8 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `discord-media.test.ts` | Discord CDN 图片有界下载并校验真实格式；真实小 PNG 转为 Pi 图片；拒绝非 CDN、非图片、声明或实际超大、HTML/畸形字节；缩放失败的超大原图被拒；视频下载同样受 CDN 与大小限制 |
 | `telegram-platform.test.ts` | 归一化：@用户名和 text_mention 解析为 ID、UTF-16 偏移、论坛话题根不算回复、匿名管理员归属、非图片媒体占位、视频抽帧或 `[视频]`、照片与静态贴纸成图；适配器入口丢弃允许列表外的群（不分发、不回复、不下载）；文字命令解析、非开头命令当聊天、多角色时管理员命令要求指定；Markdown→entities（嵌套样式、代码、列表、astral emoji 的实体范围合法）、非公网链接去链接、代码块语言清洗；表情白名单、实体被拒退回纯文本一次且不 @、超长回复分条且只有第一条回复原消息 |
 | `video-frames.test.ts` | 按时长选择的代表帧 seek 位置（含 1 秒与 3 秒边界）；只探测一次、最多抽三帧并清理临时文件；缺 ffmpeg 返回固定结果而不抛错 |
-| `reaction-assets.test.ts` | 表情图只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
+| `reaction-assets.test.ts` | 未配置本地图库时只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
+| `reaction-catalog.test.ts` | 接受旧目录名前缀与目录相对路径、绝对配置目录、JPEG content type、额外元数据；收集缺失文件、路径穿越、内置 id 重名和错误扩展名；拒绝绝对文件路径、逃逸符号链接、非法 id/配文/名称及无效 catalog/配置目录 |
 | `runjs.test.ts` | `run_js` 基本计算与输出、超时、异步膨胀、输出上限、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
 | `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
