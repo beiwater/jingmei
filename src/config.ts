@@ -6,7 +6,7 @@ import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embed
 import { JEV_ENDPOINT } from "./decision/jev.ts";
 import type { Persona, Platform, SpaceId } from "./core/types.ts";
 
-export const CONFIG_FILE = "jingmei.config.json";
+const CONFIG_FILE = "jingmei.config.json";
 
 export type ConfiguredPersona = Omit<Persona, "accounts"> & {
 	/** Resolved secret bot tokens; never log. */
@@ -94,7 +94,7 @@ export function parseEnvFile(path: string): Record<string, string> {
 }
 
 /** `.env` values overridden by `process.env`. */
-export function loadEnv(rootDir: string): Record<string, string> {
+function loadEnv(rootDir: string): Record<string, string> {
 	const env = parseEnvFile(join(rootDir, ".env"));
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	return env;

@@ -8,7 +8,7 @@ import type { InboundMessage } from "./types.ts";
 
 const ACTIVE_WINDOW_MS = 2 * 60 * 60 * 1000;
 // fast-bge-small-zh-v1.5 的归一化向量：相关话题约 0.78–0.92，无关约 1.22。
-export const EVENT_RECALL_MAX_DISTANCE = 1.0;
+const EVENT_RECALL_MAX_DISTANCE = 1.0;
 const TRANSCRIPT_LIMIT = 40;
 const PARTICIPANT_LIMIT = 20;
 

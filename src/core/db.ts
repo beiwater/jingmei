@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { load } from "sqlite-vec";
 
-export const DB_FILE = "jingmei.db";
+const DB_FILE = "jingmei.db";
 const LEGACY_DB_FILE = "discord-agent.db";
 
 let extensibleSqlite: boolean | undefined;
@@ -76,7 +76,7 @@ export function openDatabase(dataDir: string): Database {
  * loses `core_`), `guild_id` becomes `space_id`, and raw guild ids gain the `discord:` space
  * prefix. One transaction per database, so a partial migration never becomes visible.
  */
-export function migrateLegacyTables(db: Database): void {
+function migrateLegacyTables(db: Database): void {
 	const tables = (
 		db
 			.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'discord\\_%' ESCAPE '\\'")

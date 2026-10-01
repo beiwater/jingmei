@@ -4,13 +4,7 @@ import {
 	type ModelRuntime,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import {
-	clampThinkingLevel,
-	getSupportedThinkingLevels,
-	type Api,
-	type Model,
-	type ModelThinkingLevel,
-} from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 /** The subset of Pi's ModelRuntime the startup assertion reads. */
 type ConfigurableModelRuntime = Pick<ModelRuntime, "getModel" | "hasConfiguredAuth">;
@@ -31,10 +25,7 @@ export interface PiModelSelection {
 }
 
 interface ModelReasoningCapabilities {
-	provider: string;
-	model: string;
 	requested: ModelThinkingLevel;
-	effective: ModelThinkingLevel;
 	supported: ModelThinkingLevel[];
 	valid: boolean;
 }
@@ -60,12 +51,8 @@ export class PiModelConfigurationError extends Error {
 /** Read Pi's model-specific reasoning contract without sending a provider request. */
 function inspectModelReasoning(model: Model<Api>, requested: ModelThinkingLevel): ModelReasoningCapabilities {
 	const supported = getSupportedThinkingLevels(model);
-	const effective = clampThinkingLevel(model, requested);
 	return {
-		provider: model.provider,
-		model: model.id,
 		requested,
-		effective,
 		supported,
 		valid: supported.includes(requested),
 	};

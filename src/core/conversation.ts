@@ -64,8 +64,8 @@ export interface ConversationOptions {
 	/** DeepSeek key; when present, web search is available in Pi turns. */
 	webSearchApiKey?: string;
 	voice?: VoiceConfig;
-	memberMemory?: MemberMemory;
-	soulStore?: SoulStore;
+	memberMemory: MemberMemory;
+	soulStore: SoulStore;
 	jev?: JevIntegration;
 	events?: EventTracker;
 	/** Auxiliary image describer for personas whose model cannot see images. */
@@ -102,8 +102,8 @@ export class Conversation implements ConversationCore {
 	private readonly modelRuntime: ModelRuntime;
 	private readonly webSearchApiKey?: string;
 	private readonly voice?: VoiceConfig;
-	private readonly memberMemory?: MemberMemory;
-	private readonly soulStore?: SoulStore;
+	private readonly memberMemory: MemberMemory;
+	private readonly soulStore: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
 	private readonly quickReactions?: QuickReactions;
 	private readonly scoreRelevance?: RelevanceScorer;
@@ -117,15 +117,6 @@ export class Conversation implements ConversationCore {
 	private closed = false;
 
 	constructor(options: ConversationOptions) {
-		if (!options.routingSecret) throw new Error("routing secret is required");
-		if (options.personas.length === 0) throw new Error("at least one persona is required");
-		const ids = new Set<string>();
-		for (const persona of options.personas) {
-			if (!persona.id || ids.has(persona.id)) throw new Error("persona ids must be nonempty and unique");
-			if (!Number.isFinite(persona.routingP) || persona.routingP < 0 || persona.routingP > 1)
-				throw new Error(`invalid routing probability for persona ${persona.id}`);
-			ids.add(persona.id);
-		}
 		this.db = options.db;
 		this.dataDir = options.dataDir;
 		this.secret = options.routingSecret;
@@ -189,15 +180,13 @@ export class Conversation implements ConversationCore {
 			const session = await this.getSession(persona, spaceId, channelId);
 			if (!session.isIdle || session.isCompacting) throw new Error("context_busy");
 			let pendingBefore: string | null = null;
-			if (this.soulStore) {
-				try {
-					pendingBefore = this.soulStore.readPending(scope);
-				} catch (error) {
-					log.error("core", "soul_pending_read_failed", {
-						persona_id: persona.id,
-						error_category: errorCategory(error),
-					});
-				}
+			try {
+				pendingBefore = this.soulStore.readPending(scope);
+			} catch (error) {
+				log.error("core", "soul_pending_read_failed", {
+					persona_id: persona.id,
+					error_category: errorCategory(error),
+				});
 			}
 			const result = await session.compact();
 			if (pendingBefore !== null) await this.promotePendingSoulAfterCompaction(scope, pendingBefore);
@@ -241,7 +230,7 @@ export class Conversation implements ConversationCore {
 				).changes > 0;
 		if (!inserted) return { route: { personaId: null, reason: "nobody" }, messageStored: false };
 		const botUserIds = new Set(this.personas.flatMap((persona) => persona.accounts[message.platform]?.userId ?? []));
-		if (!message.isBot && this.memberMemory) {
+		if (!message.isBot) {
 			try {
 				this.memberMemory.observe(message, botUserIds);
 			} catch (error) {
@@ -256,7 +245,7 @@ export class Conversation implements ConversationCore {
 				? `[当前事件 §E${eventId}「${event?.title || "尚无标题"}」${event?.description ? `：${event.description}` : ""}。${event?.participants.length ? `主要参与者：${event.participants.map((participant) => participant.name).join("、")}。` : ""}只回应这个事件，不要混入其他事件的内容。]`
 				: "";
 
-		const route = routeMessage(message, activePersonas, this.secret);
+		const route = routeMessage(message, this.personas, this.secret);
 		if (this.quickReactions && !message.isBot) {
 			// Fire-and-forget: a quick reaction never delays or fails the main turn.
 			this.quickReactions.react(message, route, activePersonas, this.recentLines(message)).catch((error) =>
@@ -269,8 +258,7 @@ export class Conversation implements ConversationCore {
 		const imageRefs = await this.persistImages(message, activePersonas);
 		const searchQuery =
 			route.personaId && this.webSearchApiKey ? searchQueryForRoutedMessage(this.db, message, route) : null;
-		const prefetchedSearch =
-			searchQuery && this.webSearchApiKey ? await runDeepSeekWebSearch(this.webSearchApiKey, searchQuery) : null;
+		const prefetchedSearch = searchQuery ? await runDeepSeekWebSearch(this.webSearchApiKey!, searchQuery) : null;
 		let responseMessageId: string | undefined;
 		for (const persona of activePersonas) {
 			// The selected Pi session already contains its own generated assistant response. Its
@@ -422,12 +410,7 @@ export class Conversation implements ConversationCore {
 		}
 		const session = await pending;
 		const revision = this.soulRevisions.get(key) ?? 0;
-		if (
-			this.soulStore &&
-			(this.sessionSoulRevisions.get(key) ?? -1) < revision &&
-			session.isIdle &&
-			!session.isCompacting
-		) {
+		if ((this.sessionSoulRevisions.get(key) ?? -1) < revision && session.isIdle && !session.isCompacting) {
 			try {
 				await session.reload();
 			} catch (error) {
@@ -446,7 +429,6 @@ export class Conversation implements ConversationCore {
 		spaceId: SpaceId,
 		channelId: string,
 	): Promise<string | null> {
-		if (!this.soulStore) return "";
 		try {
 			const snapshot = this.soulStore.readPending({ personaId: persona.id, spaceId, channelId });
 			const pending = snapshot.trim();
@@ -487,7 +469,7 @@ export class Conversation implements ConversationCore {
 	}
 
 	private async promotePendingSoulAfterCompaction(scope: SoulScope, expectedPending: string | null): Promise<void> {
-		if (!this.soulStore || expectedPending === null) return;
+		if (expectedPending === null) return;
 		const key = sessionKey(scope.personaId, scope.spaceId, scope.channelId);
 		try {
 			const promoted = this.soulStore.promotePending(scope, expectedPending);
@@ -538,7 +520,7 @@ export class Conversation implements ConversationCore {
 			systemPromptOverride: (base) => {
 				const revision = this.soulRevisions.get(key) ?? 0;
 				try {
-					const formalSoul = this.soulStore?.read({ personaId: persona.id, spaceId, channelId }).trim() ?? "";
+					const formalSoul = this.soulStore.read({ personaId: persona.id, spaceId, channelId }).trim();
 					this.sessionFormalSouls.set(key, formalSoul);
 					this.sessionSoulRevisions.set(key, revision);
 					return formalSoul ? `${base ?? ""}\n\n## 私人 Soul 备忘（参考信息）\n\n${formalSoul}` : base;
@@ -568,13 +550,9 @@ export class Conversation implements ConversationCore {
 			customTools: [
 				...(reactTool ? [createReactionTool(scope, this.db)] : []),
 				...(persona.sendReactionImages ? [createReactionImageTool(scope)] : []),
-				...(this.memberMemory
-					? [
-							createRememberMemberFactTool(scope, this.memberMemory),
-							createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
-						]
-					: []),
-				...(this.soulStore ? [createUpdateSoulTool(scope, this.soulStore)] : []),
+				createRememberMemberFactTool(scope, this.memberMemory),
+				createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
+				createUpdateSoulTool(scope, this.soulStore),
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
 				...(voice ? [createVoiceTool(scope, voice)] : []),
 				createCalculationTool(),

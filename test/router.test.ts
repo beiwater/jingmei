@@ -8,6 +8,8 @@ import {
 	explicitVoiceRequest,
 	searchQueryForRoutedMessage,
 } from "../src/core/conversation.ts";
+import { MemberMemory } from "../src/core/memory.ts";
+import { SoulStore } from "../src/core/soul.ts";
 import { routeMessage } from "../src/core/router.ts";
 import { type ActiveTurn, createReactionImageTool } from "../src/core/tools.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport } from "../src/core/types.ts";
@@ -181,6 +183,8 @@ describe("conversation guards", () => {
 		const db = new Database(":memory:");
 		const core = new Conversation({
 			db,
+			memberMemory: new MemberMemory(db),
+			soulStore: new SoulStore({ db, personaIds: ["mio"] }),
 			dataDir: "/unused",
 			routingSecret: "secret",
 			personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],

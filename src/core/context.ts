@@ -57,7 +57,7 @@ export interface ProjectionOptions {
  * - chat messages expand to text + image blocks; for text-only models an image with a vision
  *   description becomes `[图片：…]` text, otherwise the block is left for Pi to downgrade.
  */
-export function projectContext(messages: readonly AgentMessage[], options: ProjectionOptions): AgentMessage[] {
+function projectContext(messages: readonly AgentMessage[], options: ProjectionOptions): AgentMessage[] {
 	let lastInput = -1;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const role = messages[index]!.role;
@@ -132,13 +132,6 @@ export function makeContextExtension(
 function isPromotedSoulNote(message: AgentMessage, personaId: string, formalSoul: string): boolean {
 	if (!formalSoul || message.role !== "custom" || message.customType !== PENDING_SOUL_TYPE) return false;
 	const details = message.details as { personaId?: unknown; note?: unknown } | undefined;
-	if (details?.personaId !== personaId) return false;
-	const content = typeof message.content === "string" ? message.content : "";
-	const note =
-		typeof details.note === "string"
-			? details.note
-			: content.includes("\n")
-				? content.slice(content.indexOf("\n") + 1).trim()
-				: "";
-	return !!note && formalSoul.includes(note);
+	if (details?.personaId !== personaId || typeof details.note !== "string") return false;
+	return !!details.note && formalSoul.includes(details.note);
 }

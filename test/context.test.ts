@@ -6,6 +6,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Conversation } from "../src/core/conversation.ts";
+import { MemberMemory } from "../src/core/memory.ts";
+import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
 
 type SessionSeam = { getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession> };
@@ -87,6 +89,8 @@ function fixture(options: { imageInput: boolean; vision?: boolean }) {
 	const db = new Database(":memory:");
 	const core = new Conversation({
 		db,
+		memberMemory: new MemberMemory(db),
+		soulStore: new SoulStore({ db, personaIds: [persona.id] }),
 		dataDir,
 		routingSecret: "fixture",
 		personas: [persona],

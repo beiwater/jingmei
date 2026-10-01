@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Conversation } from "../src/core/conversation.ts";
+import { MemberMemory } from "../src/core/memory.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
 import type { Persona, PlatformTransport } from "../src/core/types.ts";
 
@@ -90,6 +91,7 @@ test("soul tool, compaction and restart retain the owning conversation without r
 			routingSecret: "fixture",
 			personas,
 			soulStore: soul,
+			memberMemory: new MemberMemory(db),
 			modelRuntime: runtime,
 			transports: new Map([["discord", transport]]),
 		});

@@ -5,7 +5,6 @@ import type { SpaceId } from "./types.ts";
 const MAX_SOUL_BYTES = 4 * 1024;
 const MAX_PENDING_BYTES = 1024;
 const PENDING_SEPARATOR = "\n\n<!-- pending soul note -->\n\n";
-const ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 const SECRET_OR_INJECTION_PATTERNS = [
 	/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
 	/\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|secret)\s*[:=]\s*\S+/i,
@@ -62,9 +61,6 @@ export class SoulStore {
 	private readonly personas: Set<string>;
 
 	constructor(options: { db: Database; personaIds: readonly string[] }) {
-		for (const id of options.personaIds) {
-			if (!ID_PATTERN.test(id)) throw new Error(`Invalid persona id: ${id}`);
-		}
 		this.personas = new Set(options.personaIds);
 		this.db = options.db;
 		this.db.exec(SCHEMA);

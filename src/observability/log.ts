@@ -1,7 +1,7 @@
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type LogFields = Readonly<Record<string, unknown>>;
 
-export const LOG_SCHEMA_VERSION = 1;
+const LOG_SCHEMA_VERSION = 1;
 const MAX_LOG_FIELDS = 24;
 const MAX_LOG_STRING = 256;
 const MAX_LOG_LINE_BYTES = 4096;
@@ -102,7 +102,7 @@ export function setLogSink(next: LogSink): () => void {
 	};
 }
 
-export function writeLog(level: LogLevel, component: string, event: string, fields: LogFields = {}): void {
+function writeLog(level: LogLevel, component: string, event: string, fields: LogFields = {}): void {
 	try {
 		sink(formatLogRecord(level, component, event, fields));
 	} catch {

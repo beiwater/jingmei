@@ -30,7 +30,7 @@ export function routeMessage(message: InboundMessage, personas: readonly Persona
 	const sample = digest.readUIntBE(0, 6) / 2 ** 48;
 	let cumulative = 0;
 	for (const persona of scoped) {
-		cumulative += Math.max(0, Math.min(1, persona.routingP));
+		cumulative += persona.routingP;
 		if (sample < cumulative) return { personaId: persona.id, reason: "probability" };
 	}
 	return { personaId: null, reason: "nobody" };

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig } from "./config.ts";
 import { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
-import { loadVectorExtension, openDatabase, useExtensibleSqlite } from "./core/db.ts";
+import { openDatabase } from "./core/db.ts";
 import { createFastEmbedder } from "./core/embedding.ts";
 import { createPiEventSummarizer, EventTracker } from "./core/events.ts";
 import { MemberMemory } from "./core/memory.ts";
@@ -31,9 +31,7 @@ async function main(): Promise<void> {
 	// Pi resolves the key reference in the project-local models.json at request time.
 	if (config.webSearchApiKey) process.env.DEEPSEEK_API_KEY = config.webSearchApiKey;
 	const personas: Persona[] = config.personas.map(({ tokens: _tokens, ...persona }) => ({ ...persona, accounts: {} }));
-	if (config.events) useExtensibleSqlite();
 	const db = openDatabase(config.dataDir);
-	if (config.events) loadVectorExtension(db);
 	const memberMemory = new MemberMemory(db);
 	let core: Conversation | undefined;
 	const deps = {
