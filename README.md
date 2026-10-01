@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.webp" width="148" alt="精魅">
+<img src="assets/logo.webp" width="500" alt="精魅">
 
 # 精魅 Jingmei
 
