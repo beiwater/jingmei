@@ -16,6 +16,12 @@ const SCHEMA = `
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		paused_at INTEGER NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS persona_models (
+		persona_id TEXT PRIMARY KEY,
+		provider TEXT NOT NULL,
+		model TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
 `;
 
 export interface BotSummary {
@@ -37,8 +43,8 @@ export interface BotSummary {
 }
 
 /**
- * Operator-visible bot lifecycle in SQLite, shared between the running bot and the CLI:
- * a run history (heartbeat, stop time, reply count) and a pause flag that survives restarts.
+ * Operator-visible bot state in SQLite, shared between the running bot and the CLI: a run history
+ * (heartbeat, stop time, reply count), a pause flag and per-persona model overrides, all surviving restarts.
  */
 export class BotState {
 	private runId: number | null = null;
@@ -59,6 +65,28 @@ export class BotState {
 	/** False when not paused. */
 	resume(): boolean {
 		return this.db.query("DELETE FROM bot_pause").run().changes > 0;
+	}
+
+	/** The operator-selected model, or null when the persona runs its configured model. */
+	modelOverride(personaId: string): { provider: string; model: string } | null {
+		return this.db
+			.query<{ provider: string; model: string }, [string]>(
+				"SELECT provider, model FROM persona_models WHERE persona_id = ?",
+			)
+			.get(personaId);
+	}
+
+	setModelOverride(personaId: string, provider: string, model: string, now = Date.now()): void {
+		this.db
+			.query(`
+			INSERT INTO persona_models (persona_id, provider, model, updated_at) VALUES (?, ?, ?, ?)
+			ON CONFLICT(persona_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, updated_at = excluded.updated_at
+		`)
+			.run(personaId, provider, model, now);
+	}
+
+	clearModelOverride(personaId: string): void {
+		this.db.query("DELETE FROM persona_models WHERE persona_id = ?").run(personaId);
 	}
 
 	startRun(now = Date.now()): void {

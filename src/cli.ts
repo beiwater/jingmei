@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// 精魅 (jingmei) operator CLI: run the bot, sign in to providers, pause/resume and summarize a running bot.
+// 精魅 (jingmei) operator CLI: an interactive menu, plus subcommands to run the bot, sign in to providers,
+// switch persona models, pause/resume and summarize a running bot.
 
 import { mkdirSync } from "node:fs";
 import * as p from "@clack/prompts";
@@ -7,17 +8,19 @@ import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { defineCommand, runMain } from "citty";
 import { startBot } from "./bot.ts";
-import { loadDataDir, piAgentDir } from "./config.ts";
+import { loadOperatorConfig, type OperatorConfig, piAgentDir } from "./config.ts";
 import { BotState, type BotSummary } from "./core/bot-state.ts";
 import { openDatabase } from "./core/db.ts";
 import { createInstalledPiModelRuntime } from "./core/model-runtime.ts";
 
+/** Bound for network model-catalog refreshes, so a slow provider cannot hang the CLI. */
+const CATALOG_REFRESH_MS = 30_000;
+
+/** Cancelling a prompt fails the current action; the menu then returns to its list instead of exiting. */
 function answered(value: string | symbol, signal?: AbortSignal): string {
 	if (typeof value !== "symbol") return value;
 	// The flow aborted this prompt because another path won (e.g. the browser callback beat a manual paste).
-	if (signal?.aborted) throw new Error("Login cancelled");
-	p.cancel("Cancelled");
-	process.exit(1);
+	throw new Error(signal?.aborted ? "Login cancelled" : "Cancelled");
 }
 
 async function ask(prompt: AuthPrompt): Promise<string> {
@@ -63,7 +66,8 @@ function show(event: AuthEvent): void {
 	}
 }
 
-async function operation(title: string, run: () => Promise<string> | string): Promise<void> {
+/** One subcommand run. The process exits afterwards: provider extensions may keep timers or sockets open. */
+async function operation(title: string, run: () => Promise<string> | string): Promise<never> {
 	p.intro(title);
 	try {
 		p.outro(await run());
@@ -71,18 +75,32 @@ async function operation(title: string, run: () => Promise<string> | string): Pr
 		p.cancel(error instanceof Error ? error.message : String(error));
 		process.exitCode = 1;
 	}
+	process.exit();
 }
 
-/** Open the same Pi model runtime the bot uses, so credentials land in `<dataDir>/pi-agent/auth.json`. */
-async function openRuntime(): Promise<ModelRuntime> {
-	const agentDir = piAgentDir(loadDataDir());
-	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-	return createInstalledPiModelRuntime({ agentDir });
+let operatorConfig: OperatorConfig | undefined;
+let runtimePromise: Promise<ModelRuntime> | undefined;
+let botState: BotState | undefined;
+
+function loadOperator(): OperatorConfig {
+	operatorConfig ??= loadOperatorConfig();
+	return operatorConfig;
 }
 
-/** The bot reads the pause flag per message, so changes apply to a running bot without restart. */
+/** The same Pi model runtime the bot uses, so credentials land in `<dataDir>/pi-agent/auth.json`. */
+function openRuntime(): Promise<ModelRuntime> {
+	runtimePromise ??= (async () => {
+		const agentDir = piAgentDir(loadOperator().dataDir);
+		mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+		return createInstalledPiModelRuntime({ agentDir });
+	})();
+	return runtimePromise;
+}
+
+/** The bot reads pause and model choices per message, so changes apply to a running bot without restart. */
 function openBotState(): BotState {
-	return new BotState(openDatabase(loadDataDir()));
+	botState ??= new BotState(openDatabase(loadOperator().dataDir));
+	return botState;
 }
 
 function formatDuration(ms: number): string {
@@ -128,6 +146,166 @@ function statsLines(s: BotSummary, now: number): string[] {
 	return rows.map(([label, value]) => `${label.padEnd(13)}${value}`);
 }
 
+function pauseBot(): string {
+	const state = openBotState();
+	if (state.pause()) return "Paused. The bot stays online but stays silent until resumed.";
+	return `Already paused since ${formatTime(state.pausedAt() ?? Date.now())}`;
+}
+
+function resumeBot(): string {
+	return openBotState().resume() ? "Resumed" : "Not paused";
+}
+
+function showStats(): string {
+	const now = Date.now();
+	const summary = openBotState().summary(now);
+	p.note(statsLines(summary, now).join("\n"), "Bot");
+	return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
+}
+
+async function signIn(provider?: string): Promise<string> {
+	const runtime = await openRuntime();
+	const providers = runtime
+		.getProviders()
+		.flatMap((candidate) => (candidate.auth.oauth ? [{ id: candidate.id, name: candidate.auth.oauth.name }] : []));
+	const signedIn = new Set(
+		(await runtime.listCredentials()).filter((c) => c.type === "oauth").map((c) => c.providerId),
+	);
+	const providerId =
+		provider ??
+		answered(
+			await p.select({
+				message: "Provider",
+				options: providers.map(({ id, name }) => ({
+					value: id,
+					label: name,
+					hint: signedIn.has(id) ? "signed in" : id,
+				})),
+			}),
+		);
+	if (!providers.some(({ id }) => id === providerId))
+		throw new Error(`No OAuth provider "${providerId}"; available: ${providers.map(({ id }) => id).join(", ")}`);
+	await runtime.login(providerId, "oauth", { prompt: ask, notify: show });
+	// Live-catalog providers (e.g. antigravity) list models only after a network refresh, which also caches them for the bot.
+	const refresh = await runtime.refresh({ providers: [providerId], signal: AbortSignal.timeout(CATALOG_REFRESH_MS) });
+	const models = runtime.getModels(providerId).length;
+	return refresh.errors.size || refresh.aborted
+		? `Signed in to ${providerId}; its model list could not be refreshed (try "Switch model" again later)`
+		: `Signed in to ${providerId}; ${models} ${models === 1 ? "model" : "models"} available`;
+}
+
+async function signOut(provider?: string): Promise<string> {
+	const runtime = await openRuntime();
+	const stored = await runtime.listCredentials();
+	if (!stored.length) return "No stored credentials";
+	const providerId =
+		provider ??
+		answered(
+			await p.select({
+				message: "Provider",
+				options: stored.map(({ providerId, type }) => ({ value: providerId, label: providerId, hint: type })),
+			}),
+		);
+	if (!stored.some((c) => c.providerId === providerId)) throw new Error(`No stored credential for "${providerId}"`);
+	await runtime.logout(providerId);
+	return `Signed out of ${providerId}`;
+}
+
+/** Store a persona's model override; `default` (or the configured model) clears it. */
+async function switchModel(ref?: string, personaId?: string): Promise<string> {
+	const { personas } = loadOperator();
+	if (!personas.length) throw new Error("No personas with provider/model in jingmei.config.json");
+	const id =
+		personaId ??
+		(personas.length === 1
+			? personas[0]!.id
+			: answered(
+					await p.select({
+						message: "Persona",
+						options: personas.map((persona) => ({ value: persona.id, label: persona.id })),
+					}),
+				));
+	const persona = personas.find((candidate) => candidate.id === id);
+	if (!persona)
+		throw new Error(`No persona "${id}"; available: ${personas.map((candidate) => candidate.id).join(", ")}`);
+	const state = openBotState();
+	const runtime = await openRuntime();
+	const configured = `${persona.provider}/${persona.model}`;
+	const override = state.modelOverride(persona.id);
+	const current = override ? `${override.provider}/${override.model}` : configured;
+	let choice = ref;
+	if (!choice) {
+		const spinner = p.spinner();
+		spinner.start("Refreshing model lists");
+		const refresh = await runtime.refresh({ signal: AbortSignal.timeout(CATALOG_REFRESH_MS) });
+		spinner.stop(
+			refresh.errors.size || refresh.aborted
+				? `Some model lists could not be refreshed: ${[...refresh.errors.keys()].join(", ") || "timed out"}`
+				: "Model lists refreshed",
+		);
+		const available = (await runtime.getAvailable()).map((model) => `${model.provider}/${model.id}`).sort();
+		choice = answered(
+			await p.select({
+				message: `Model for ${persona.id} (now ${current})`,
+				initialValue: override ? current : "default",
+				maxItems: 15,
+				options: [
+					{ value: "default", label: "Configured default", hint: configured },
+					...available.map((model) => ({ value: model, label: model })),
+				],
+			}),
+		);
+	}
+	if (choice === "default" || choice === configured) {
+		state.clearModelOverride(persona.id);
+		return `${persona.id} uses its configured model ${configured}; the running bot switches before each channel's next reply`;
+	}
+	const slash = choice.indexOf("/");
+	const model = slash > 0 ? runtime.getModel(choice.slice(0, slash), choice.slice(slash + 1)) : undefined;
+	if (!model) throw new Error(`Unknown model "${choice}"; run \`bun run jingmei model\` to pick from the list`);
+	if (!(await runtime.checkAuth(model.provider)))
+		throw new Error(`No credentials for ${model.provider}; run \`bun run jingmei login ${model.provider}\``);
+	state.setModelOverride(persona.id, model.provider, model.id);
+	return `${persona.id} now uses ${choice}; the running bot switches before each channel's next reply`;
+}
+
+const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
+	stats: showStats,
+	model: () => switchModel(),
+	pause: pauseBot,
+	resume: resumeBot,
+	login: () => signIn(),
+	logout: () => signOut(),
+};
+
+/** `bun run jingmei` with no subcommand: pick actions until Exit, returning here after each one. */
+async function menu(): Promise<never> {
+	p.intro("jingmei");
+	for (;;) {
+		const paused = openBotState().pausedAt() !== null;
+		const choice = await p.select({
+			message: "What next?",
+			options: [
+				{ value: "stats", label: "Status", hint: "uptime and totals" },
+				{ value: "model", label: "Switch model" },
+				paused ? { value: "resume", label: "Resume replies" } : { value: "pause", label: "Pause replies" },
+				{ value: "login", label: "Sign in to a provider" },
+				{ value: "logout", label: "Sign out of a provider" },
+				{ value: "exit", label: "Exit" },
+			],
+		});
+		const action = p.isCancel(choice) ? undefined : MENU_ACTIONS[choice];
+		if (!action) break;
+		try {
+			p.log.success(await action());
+		} catch (error) {
+			p.log.error(error instanceof Error ? error.message : String(error));
+		}
+	}
+	p.outro("Bye");
+	process.exit();
+}
+
 const start = defineCommand({
 	meta: { name: "start", description: "Run the bot in the foreground (same as bun run start)" },
 	run: startBot,
@@ -135,28 +313,26 @@ const start = defineCommand({
 
 const pause = defineCommand({
 	meta: { name: "pause", description: "Stop replying, reacting and sending greetings; messages are still stored" },
-	run: () =>
-		operation("jingmei pause", () => {
-			const state = openBotState();
-			if (state.pause()) return "Paused. The bot stays online but stays silent until `bun run jingmei resume`.";
-			return `Already paused since ${formatTime(state.pausedAt() ?? Date.now())}`;
-		}),
+	run: () => operation("jingmei pause", pauseBot),
 });
 
 const resume = defineCommand({
 	meta: { name: "resume", description: "Resume replying after a pause" },
-	run: () => operation("jingmei resume", () => (openBotState().resume() ? "Resumed" : "Not paused")),
+	run: () => operation("jingmei resume", resumeBot),
 });
 
 const stats = defineCommand({
 	meta: { name: "stats", description: "Show uptime, total runtime and data totals" },
-	run: () =>
-		operation("jingmei stats", () => {
-			const now = Date.now();
-			const summary = openBotState().summary(now);
-			p.note(statsLines(summary, now).join("\n"), "Bot");
-			return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
-		}),
+	run: () => operation("jingmei stats", showStats),
+});
+
+const model = defineCommand({
+	meta: { name: "model", description: "Show or switch a persona's chat model (picker when no model is given)" },
+	args: {
+		model: { type: "positional", required: false, description: "provider/model, or default for the configured model" },
+		persona: { type: "string", required: false, description: "Persona id; needed only with several personas" },
+	},
+	run: ({ args }) => operation("jingmei model", () => switchModel(args.model, args.persona)),
 });
 
 const login = defineCommand({
@@ -167,59 +343,20 @@ const login = defineCommand({
 	args: {
 		provider: { type: "positional", required: false, description: "Provider id, e.g. anthropic or openai-codex" },
 	},
-	run: ({ args }) =>
-		operation("jingmei login", async () => {
-			const runtime = await openRuntime();
-			const providers = runtime
-				.getProviders()
-				.flatMap((provider) => (provider.auth.oauth ? [{ id: provider.id, name: provider.auth.oauth.name }] : []));
-			const signedIn = new Set(
-				(await runtime.listCredentials()).filter((c) => c.type === "oauth").map((c) => c.providerId),
-			);
-			const providerId =
-				args.provider ??
-				answered(
-					await p.select({
-						message: "Provider",
-						options: providers.map(({ id, name }) => ({
-							value: id,
-							label: name,
-							hint: signedIn.has(id) ? "signed in" : id,
-						})),
-					}),
-				);
-			if (!providers.some(({ id }) => id === providerId))
-				throw new Error(`No OAuth provider "${providerId}"; available: ${providers.map(({ id }) => id).join(", ")}`);
-			await runtime.login(providerId, "oauth", { prompt: ask, notify: show });
-			return `Signed in to ${providerId}`;
-		}),
+	run: ({ args }) => operation("jingmei login", () => signIn(args.provider)),
 });
 
 const logout = defineCommand({
 	meta: { name: "logout", description: "Remove a provider's stored credential" },
 	args: { provider: { type: "positional", required: false, description: "Provider id" } },
-	run: ({ args }) =>
-		operation("jingmei logout", async () => {
-			const runtime = await openRuntime();
-			const stored = await runtime.listCredentials();
-			if (!stored.length) return "No stored credentials";
-			const providerId =
-				args.provider ??
-				answered(
-					await p.select({
-						message: "Provider",
-						options: stored.map(({ providerId, type }) => ({ value: providerId, label: providerId, hint: type })),
-					}),
-				);
-			if (!stored.some((c) => c.providerId === providerId)) throw new Error(`No stored credential for "${providerId}"`);
-			await runtime.logout(providerId);
-			return `Signed out of ${providerId}`;
-		}),
+	run: ({ args }) => operation("jingmei logout", () => signOut(args.provider)),
 });
 
 await runMain(
 	defineCommand({
-		meta: { name: "jingmei", description: "精魅 operator commands" },
-		subCommands: { start, login, logout, pause, resume, stats },
+		meta: { name: "jingmei", description: "精魅 operator commands; run without a command for the interactive menu" },
+		subCommands: { start, login, logout, model, pause, resume, stats },
+		// citty also calls this after a subcommand (only `start` returns), so act only on a bare invocation.
+		run: ({ rawArgs }) => (rawArgs.length ? undefined : menu()),
 	}),
 );

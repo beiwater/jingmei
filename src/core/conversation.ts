@@ -47,7 +47,6 @@ import type {
 	Dispatch,
 	InboundImage,
 	InboundMessage,
-	ModelStatus,
 	Persona,
 	Platform,
 	PlatformTransport,
@@ -90,12 +89,6 @@ const SESSION_TABLE = `
 		updated_at INTEGER NOT NULL,
 		PRIMARY KEY (persona_id, space_id, channel_id)
 	);
-	CREATE TABLE IF NOT EXISTS persona_models (
-		persona_id TEXT PRIMARY KEY,
-		provider TEXT NOT NULL,
-		model TEXT NOT NULL,
-		updated_at INTEGER NOT NULL
-	);
 `;
 
 /**
@@ -125,8 +118,8 @@ export class Conversation implements ConversationCore {
 	private readonly sessionSoulRevisions = new Map<string, number>();
 	private readonly sessionFormalSouls = new Map<string, string>();
 	private readonly activeTurns = new Map<string, ActiveTurn>();
-	/** Operator-selected models by persona id; absent personas use their configured model. */
-	private readonly modelOverrides = new Map<string, Model<Api>>();
+	/** `persona\0provider/model` overrides already found missing, so a bad choice is retried once, not per message. */
+	private readonly unavailableOverrides = new Set<string>();
 	private closed = false;
 
 	constructor(options: ConversationOptions) {
@@ -148,18 +141,6 @@ export class Conversation implements ConversationCore {
 		if (jev?.memoryScoring) this.scoreRelevance = (query, candidates) => jev.client.scoreRelevance(query, candidates);
 		this.db.exec(SESSION_TABLE);
 		ensureMessagesTable(this.db);
-		const overrides = this.db.query("SELECT persona_id, provider, model FROM persona_models").all() as Array<{
-			persona_id: string;
-			provider: string;
-			model: string;
-		}>;
-		for (const row of overrides) {
-			if (!this.personas.some((persona) => persona.id === row.persona_id)) continue;
-			const model = this.modelRuntime.getModel(row.provider, row.model);
-			// Keep the row: credentials may come back; this run uses the configured model.
-			if (model && this.modelRuntime.hasConfiguredAuth(row.provider)) this.modelOverrides.set(row.persona_id, model);
-			else log.warn("core", "model_override_unavailable", { persona_id: row.persona_id });
-		}
 	}
 
 	async handleMessage(message: InboundMessage): Promise<Dispatch> {
@@ -220,46 +201,28 @@ export class Conversation implements ConversationCore {
 		});
 	}
 
-	async getModelStatus(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string) {
-		return this.modelStatus(this.requireAdminPersona(personaId, platform, spaceId, requesterId));
-	}
-
-	async selectModel(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string, ref: string | null) {
-		const persona = this.requireAdminPersona(personaId, platform, spaceId, requesterId);
-		let model: Model<Api> | undefined;
-		if (ref !== null) {
-			const slash = ref.indexOf("/");
-			if (slash <= 0 || slash === ref.length - 1) throw new Error("invalid_model_ref");
-			model = this.modelRuntime.getModel(ref.slice(0, slash), ref.slice(slash + 1));
-			if (!model) throw new Error("unknown_model");
-			if (!(await this.modelRuntime.checkAuth(model.provider))) throw new Error("unauthenticated_provider");
+	/** The operator-selected model (set by the CLI, read per call), else the configured model. */
+	private async modelFor(persona: Persona): Promise<Model<Api> | undefined> {
+		const override = this.botState.modelOverride(persona.id);
+		if (override) {
+			let model = this.modelRuntime.getModel(override.provider, override.model);
+			const key = `${persona.id}\0${override.provider}/${override.model}`;
+			if (!model && !this.unavailableOverrides.has(key)) {
+				try {
+					// The CLI may have cached this provider's catalog (e.g. right after `jingmei login`) after startup.
+					await this.modelRuntime.refresh({ allowNetwork: false, providers: [override.provider] });
+					model = this.modelRuntime.getModel(override.provider, override.model);
+				} catch (error) {
+					log.error("core", "model_catalog_refresh_failed", { error_category: errorCategory(error) });
+				}
+				if (!model) {
+					this.unavailableOverrides.add(key);
+					log.warn("core", "model_override_unavailable", { persona_id: persona.id });
+				}
+			}
+			if (model) return model;
 		}
-		if (!model || (model.provider === persona.provider && model.id === persona.model)) {
-			this.db.query("DELETE FROM persona_models WHERE persona_id = ?").run(persona.id);
-			this.modelOverrides.delete(persona.id);
-		} else {
-			this.db
-				.query(`
-				INSERT INTO persona_models (persona_id, provider, model, updated_at) VALUES (?, ?, ?, ?)
-				ON CONFLICT(persona_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, updated_at = excluded.updated_at
-			`)
-				.run(persona.id, model.provider, model.id, Date.now());
-			this.modelOverrides.set(persona.id, model);
-		}
-		log.info("core", "model_selected", { persona_id: persona.id, override: this.modelOverrides.has(persona.id) });
-		return this.modelStatus(persona);
-	}
-
-	private async modelStatus(persona: Persona): Promise<ModelStatus> {
-		const override = this.modelOverrides.get(persona.id);
-		const configured = `${persona.provider}/${persona.model}`;
-		const available = (await this.modelRuntime.getAvailable()).map((model) => `${model.provider}/${model.id}`).sort();
-		return { current: override ? `${override.provider}/${override.id}` : configured, configured, available };
-	}
-
-	/** The model a persona's sessions should run on right now. */
-	private modelFor(persona: Persona): Model<Api> | undefined {
-		return this.modelOverrides.get(persona.id) ?? this.modelRuntime.getModel(persona.provider, persona.model);
+		return this.modelRuntime.getModel(persona.provider, persona.model);
 	}
 
 	private requireAdminPersona(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string): Persona {
@@ -502,7 +465,7 @@ export class Conversation implements ConversationCore {
 				});
 			}
 		}
-		const model = this.modelFor(persona);
+		const model = await this.modelFor(persona);
 		if (
 			model &&
 			(session.model?.provider !== model.provider || session.model?.id !== model.id) &&
@@ -513,6 +476,7 @@ export class Conversation implements ConversationCore {
 				await session.setModel(model);
 				// A model without the configured level clamps it; switching back restores it.
 				session.setThinkingLevel(persona.reasoningEffort);
+				log.info("core", "session_model_switched", { persona_id: persona.id, provider: model.provider });
 			} catch (error) {
 				log.error("core", "session_model_switch_failed", {
 					persona_id: persona.id,
@@ -583,7 +547,7 @@ export class Conversation implements ConversationCore {
 	}
 
 	private async createSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession> {
-		const model = this.modelFor(persona);
+		const model = await this.modelFor(persona);
 		if (!model) throw new Error(`Pi model unavailable for persona ${persona.id}`);
 		const transport = this.transports.get(platformOf(spaceId));
 		if (!transport) throw new Error(`platform not served for persona ${persona.id}`);
@@ -691,7 +655,10 @@ export class Conversation implements ConversationCore {
 		const mediaDir = join(this.dataDir, "media");
 		mkdirSync(mediaDir, { recursive: true });
 		const needsDescription =
-			!!this.visionModel && personas.some((persona) => !this.modelFor(persona)?.input.includes("image"));
+			!!this.visionModel &&
+			(await Promise.all(personas.map((persona) => this.modelFor(persona)))).some(
+				(model) => !model?.input.includes("image"),
+			);
 		const descriptions = needsDescription ? await Promise.all(images.map((image) => this.describeImage(image))) : [];
 		return images.map((image, index) => {
 			const name = `img-${createHmac("sha256", this.secret).update(`${message.spaceId}:${message.channelId}:${message.messageId}:${index}`).digest("hex").slice(0, 24)}.${image.mimeType === "image/png" ? "png" : "jpg"}`;

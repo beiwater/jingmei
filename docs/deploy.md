@@ -26,7 +26,7 @@ UMask=0077
 
 服务名和启动命令沿用改名前的部署，保持不变；`src/discord/main.ts` 只有一行，导入 `src/main.ts`。如果代码目录或 Bun 路径不同，修改 `WorkingDirectory` 与 `ExecStart` 里的路径即可。`UMask=0077` 让新建的数据库、会话和媒体文件只有服务用户可读。
 
-服务运行时，在代码目录以服务用户执行 `bun run jingmei pause` / `resume` 暂停或恢复回复（立即生效、重启后保留），`bun run jingmei stats` 查看运行时长和数据汇总；详见 [README 运维命令](../README.md#运维命令)。暂停不会停止进程，停服务仍用 `systemctl --user stop pi-discord-agent`。
+服务运行时，在代码目录以服务用户执行 `bun run jingmei` 打开运维菜单；也可直接 `bun run jingmei pause` / `resume` 暂停或恢复回复（立即生效、重启后保留），`bun run jingmei model` 切换角色模型（运行中的 bot 在下一次回复前生效），`bun run jingmei stats` 查看运行时长和数据汇总；详见 [README 运维命令](../README.md#运维命令)。暂停不会停止进程，停服务仍用 `systemctl --user stop pi-discord-agent`。
 
 ```bash
 cp deploy/pi-discord-agent.service ~/.config/systemd/user/

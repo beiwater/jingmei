@@ -84,7 +84,7 @@ cp personas/template.zh.md personas/luna.md
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
-   - 其他 provider：订阅账号（Claude Pro/Max、ChatGPT Plus/Pro、GitHub Copilot 等）用 `bun run jingmei login` 选 provider 走 OAuth 登录，凭据写进 `<dataDir>/pi-agent/auth.json`，bot 启动后直接使用并自动刷新 token；`bun run jingmei logout` 删除。服务器上没有浏览器时，在本机浏览器打开打印出的链接，再把最终跳转 URL 或授权码粘贴回终端。模型名可在 `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi` 里用 `/model` 确认。也可以把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
+   - 其他 provider：订阅账号（Claude Pro/Max、ChatGPT Plus/Pro、GitHub Copilot 等）用 `bun run jingmei login` 选 provider 走 OAuth 登录，凭据写进 `<dataDir>/pi-agent/auth.json`，bot 启动后直接使用并自动刷新 token；`bun run jingmei logout` 删除。服务器上没有浏览器时，在本机浏览器打开打印出的链接，再把最终跳转 URL 或授权码粘贴回终端。`bun run jingmei model` 列出所有已有凭据的模型。也可以把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
 5. 启动：
 
    ```bash
@@ -126,28 +126,29 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 删除本群记忆并停止记录 | `/forget` | `/forget` |
 | 上下文用量（管理员） | `/context` | `/context` |
 | 手动压缩上下文（管理员） | `/compact` | `/compact` |
-| 查看 / 切换模型（管理员） | `/model`、`/model model:<provider/model>`、`/model model:default` | `/model`、`/model <provider/model>`、`/model default` |
 
 - Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。
 - 管理员命令只对该角色 `adminUserIds` 里的用户开放，也只注册给配置了管理员的角色。
-- Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact`、`/model` 必须指定角色。
-- `/model` 不带参数时显示当前模型和所有已有凭据的 Pi 模型；带 `provider/model` 时切换该角色的模型，所有平台、所有频道的会话在下一条消息前换过去，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider，先在服务器上 `bun run jingmei login <provider>`（OAuth）或把 API key 放进服务进程环境，无需重启即可切换。切换会让 provider 前缀缓存失效一次。
+- Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。
 - `/forget` 只删除结构化的成员档案和关系，不删除平台上的原消息或已有的会话历史。
 
 ## 运维命令
 
-在项目目录、以运行 bot 的同一个用户执行。只读 `jingmei.config.json` 的 `dataDir`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
+在项目目录、以运行 bot 的同一个用户执行。只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
 
 | 命令 | 作用 |
 |---|---|
+| `bun run jingmei` | 交互菜单：状态、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
-| `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据 |
+| `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |
+| `bun run jingmei model [provider/model\|default] [--persona <id>]` | 查看并切换角色的聊天模型；不带模型时刷新模型列表后弹出选择 |
 | `bun run jingmei pause` / `resume` | 暂停 / 恢复 |
 | `bun run jingmei stats` | 运行状态与本次运行时长、累计运行时长与启动次数、回复数、消息 / 群 / 成员 / 话题 / 祝福总数 |
 
 - **暂停**：bot 保持在线并照常把消息存进数据库，但不回复、不点表情、不更新成员记忆和话题、不发祝福，也不调用任何模型。对正在运行的 bot 立即生效，不用重启；重启后仍保持暂停，直到 `resume`。暂停期间的消息不会进入角色的会话上下文；当天到期的祝福在恢复后补发。要真正停掉进程，用 `systemctl --user stop pi-discord-agent` 或 Ctrl+C。
 - **运行状态**：bot 每分钟写一次心跳，超过两分钟没有心跳即视为已停止（包括崩溃）。回复数从引入这个命令的版本开始统计；消息等数据统计全部历史。
+- **切换模型**：只能在服务器上用 CLI 切换，群里没有对应命令。选择存在数据库里，运行中的 bot 在每个频道下一次回复前换过去，不用重启，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider 先 `login`，或把 API key 放进服务进程环境。选中的模型 bot 找不到时（例如 provider 被删除），它会记 `model_override_unavailable` 警告并继续用配置模型。切换会让 provider 前缀缓存失效一次。
 
 ## 配置参考
 
@@ -185,7 +186,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `spaces` | 可选，把角色限定在部分群/服务器，如 `["discord:<guildId>", "telegram:<chatId>"]`；省略即全部 |
 | `sendReactionImages` | 是否能发内置表情图，默认 `true` |
 | `voiceEnabled` | 配置了 `voice` 时是否使用语音，默认 `true` |
-| `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact`、`/model` 的用户 ID |
+| `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact` 的用户 ID |
 
 ### `celebrations[]`
 

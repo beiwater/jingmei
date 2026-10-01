@@ -32,15 +32,21 @@ const model = (provider: string, id: string): Model<"openai-responses"> => ({
 	maxTokens: 4096,
 });
 
-test("/model switches live sessions, survives restart, rejects bad refs and resets to the configured model", async () => {
-	const models = [model("fixture", "alpha"), model("fixture", "beta"), model("locked", "gamma")];
-	const authed = (provider: string) => provider === "fixture";
+test("a model chosen by the CLI connection switches the running bot's open session, survives restart and resets", async () => {
+	const models = [model("fixture", "alpha"), model("fixture", "beta")];
+	// A provider whose catalog the CLI caches only after this process started (e.g. after `jingmei login`).
+	const late = model("live", "delta");
+	let refreshes = 0;
 	const runtime = {
 		getModel: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
-		hasConfiguredAuth: authed,
-		checkAuth: async (provider: string) => (authed(provider) ? { ok: true } : undefined),
-		getAvailable: async () => models.filter((m) => authed(m.provider)),
+		hasConfiguredAuth: () => true,
+		checkAuth: async () => ({ ok: true }),
 		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
+		refresh: async () => {
+			refreshes++;
+			if (!models.includes(late)) models.push(late);
+			return { aborted: false, errors: new Map() };
+		},
 	} as unknown as ModelRuntime;
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-model-"));
 	const db = new Database(join(dataDir, "test.db"));
@@ -130,33 +136,36 @@ test("/model switches live sessions, survives restart, rejects bad refs and rese
 	await send(core);
 	expect(used).toEqual(["fixture/alpha"]);
 
-	await expect(core.selectModel("luna", "discord", SPACE, "6", "fixture/beta")).rejects.toThrow("not_persona_admin");
-	await expect(core.selectModel("luna", "discord", SPACE, "5", "beta")).rejects.toThrow("invalid_model_ref");
-	await expect(core.selectModel("luna", "discord", SPACE, "5", "fixture/missing")).rejects.toThrow("unknown_model");
-	await expect(core.selectModel("luna", "discord", SPACE, "5", "locked/gamma")).rejects.toThrow(
-		"unauthenticated_provider",
-	);
-	expect(await core.selectModel("luna", "discord", SPACE, "5", "fixture/beta")).toEqual({
-		current: "fixture/beta",
-		configured: "fixture/alpha",
-		available: ["fixture/alpha", "fixture/beta"],
-	});
-	// The already-open session switches before its next turn.
+	// The operator CLI writes through its own connection; the bot needs no restart.
+	const cli = new Database(join(dataDir, "test.db"));
+	const operator = new BotState(cli);
+	operator.setModelOverride("luna", "fixture", "beta");
 	await send(core);
 	expect(used.at(-1)).toBe("fixture/beta");
 
+	operator.setModelOverride("luna", "live", "delta");
+	await send(core);
+	expect(used.at(-1)).toBe("live/delta");
+	expect(refreshes).toBe(1);
+
 	await core.close();
 	core = await start();
-	expect((await core.getModelStatus("luna", "discord", SPACE, "5")).current).toBe("fixture/beta");
+	await send(core);
+	expect(used.at(-1)).toBe("live/delta");
+
+	// An override the catalog cannot resolve falls back to the configured model, refreshing only once.
+	operator.setModelOverride("luna", "gone", "omega");
+	await send(core);
+	await send(core);
+	expect(used.slice(-2)).toEqual(["fixture/alpha", "fixture/alpha"]);
+	expect(refreshes).toBe(2);
+
+	operator.setModelOverride("luna", "fixture", "beta");
 	await send(core);
 	expect(used.at(-1)).toBe("fixture/beta");
-
-	expect((await core.selectModel("luna", "discord", SPACE, "5", null)).current).toBe("fixture/alpha");
+	operator.clearModelOverride("luna");
 	await send(core);
 	expect(used.at(-1)).toBe("fixture/alpha");
 	await core.close();
-	core = await start();
-	await send(core);
-	expect(used.at(-1)).toBe("fixture/alpha");
-	await core.close();
+	cli.close();
 });

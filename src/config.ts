@@ -124,13 +124,24 @@ export function piAgentDir(dataDir: string): string {
 	return join(dataDir, "pi-agent");
 }
 
-/** Resolve only the data dir, so operator commands work before bot tokens and secrets exist. */
-export function loadDataDir(rootDir = process.cwd()): string {
+export interface OperatorConfig {
+	dataDir: string;
+	/** Configured chat models by persona, in config order; entries without all three strings are skipped. */
+	personas: Array<{ id: string; provider: string; model: string }>;
+}
+
+/** Resolve only what operator commands need, so they work before bot tokens and secrets exist. */
+export function loadOperatorConfig(rootDir = process.cwd()): OperatorConfig {
 	const input = readConfigFile(rootDir);
 	if (!isObject(input)) throw new ConfigError([`${CONFIG_FILE} must be a JSON object`]);
 	const dataDir = resolveDataDir(input, rootDir);
 	if (!dataDir) throw new ConfigError(["dataDir must be a nonempty string"]);
-	return dataDir;
+	const personas = (Array.isArray(input.personas) ? input.personas : []).flatMap((entry) =>
+		isObject(entry) && nonEmptyString(entry.id) && nonEmptyString(entry.provider) && nonEmptyString(entry.model)
+			? [{ id: entry.id.trim(), provider: entry.provider.trim(), model: entry.model.trim() }]
+			: [],
+	);
+	return { dataDir, personas };
 }
 
 type Json = Record<string, unknown>;
