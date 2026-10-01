@@ -6,8 +6,9 @@ const MAX_LOG_FIELDS = 24;
 const MAX_LOG_STRING = 256;
 const MAX_LOG_LINE_BYTES = 4096;
 
+// `persona_id` is a config slug, not a secret: it stays visible so multi-persona logs stay attributable.
 const SENSITIVE_KEY =
-	/(?:^|_)(?:token|secret|password|authorization|cookie|api[_-]?key|prompt|content|body|response|query|url|path|stack|persona)(?:$|_)/i;
+	/(?:^|_)(?:token|secret|password|authorization|cookie|api[_-]?key|prompt|content|body|response|query|url|path|stack)(?:$|_)/i;
 const TELEGRAM_TOKEN = /\b\d{5,}:[A-Za-z0-9_-]{10,}\b/g;
 const PROVIDER_KEY = /\b(?:sk|tf)-[A-Za-z0-9_-]{8,}\b/gi;
 const URL = /\bhttps?:\/\/[^\s]+/gi;
