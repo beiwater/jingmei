@@ -1,0 +1,55 @@
+name: Bug report / 问题报告
+description: Something does not work as documented. / 行为与文档不符。
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, API keys, chat content and member IDs before posting. Security issues go to SECURITY.md, not here.
+        提交前删掉 token、API key、聊天内容和成员 ID。安全问题请按 SECURITY.md 私下报告。
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform / 平台
+      multiple: true
+      options:
+        - Discord
+        - Telegram
+        - Startup / config (启动或配置)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened / 发生了什么
+      description: Expected vs. actual behavior. / 期望行为与实际行为。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      placeholder: |
+        1. Configure …
+        2. Send … in the group
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines / 相关日志
+      description: JSONL events from stdout (already redacted by the logger). / stdout 中的 JSONL 事件（日志已自动脱敏）。
+      render: json
+  - type: input
+    id: commit
+    attributes:
+      label: Commit / 版本
+      placeholder: git rev-parse --short HEAD
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment / 环境
+      placeholder: "OS, bun --version, model provider/model"
