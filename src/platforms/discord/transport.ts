@@ -468,6 +468,7 @@ const DISCORD_PROMPT_LINES: readonly string[] = [
 /** Multiplexes one Discord client per persona behind the platform-neutral transport. Only trusted `mention` recipients are notified. */
 export class DiscordPlatformTransport implements PlatformTransport {
 	readonly platform = "discord" as const;
+	readonly echoesOwnMessages = true;
 	readonly displayName = "Discord";
 	readonly promptLines = DISCORD_PROMPT_LINES;
 

@@ -78,7 +78,9 @@ flowchart LR
 6. 图片写入 `data/media/`（文件名由 HMAC 派生，0600）；需要时调用 `visionModel` 生成描述。会话里只保存文件引用。
 7. 被路由的角色若消息明确要求查资料，先做一次 DeepSeek 搜索，结果作为不可信参考附在该角色的输入后。
 8. **每个在作用域内的角色都把这条消息追加进自己的会话**（`sendCustomMessage`，类型 `discord_context_v1`）；只有被路由的角色 `triggerTurn: true` 生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
+   - 触发的模型/工具轮次共用 180 秒总期限；Pi 最多自动重试一次（1 秒退避），provider 单次超时 60 秒且不叠加 provider 重试。期限到达调用 `session.abort()` 并退役会话，不等待忽略取消的 provider，下一条消息重开持久会话继续处理。最终 assistant `error` / `aborted` 记 `turn_failed`，总期限记 `turn_timeout`；只记录角色、平台和错误类别，不向群里发送失败提示，也不发送失败轮次的半截文字。
 9. 回复：工具已经发过图片/语音/表情就结束；否则发送最终文字（明确要求语音且配置了语音时改发 MP3），回复原消息。
+10. transport 的 `echoesOwnMessages = false` 时，文字、语音及发送型工具成功后补写 `messages`：bot 账号 ID/用户名、正文或媒体文字稿/说明、被回复消息 ID、发送时间，并继承原消息的 `event_id`。Discord 依旧等 Gateway 回声入库，让其他角色正常观察。每次逻辑发送只按 transport 返回的首条消息 ID 记录一行；超长回复的后续分段不单独入库。
 
 ### 话题（`src/core/events.ts`）
 
@@ -87,6 +89,7 @@ flowchart LR
 - `chooseEvent` 将短回复、追问、赞同和情绪反应视为通常延续近期话题，只有明确引入与所有候选无关的内容才选择 `new`。远程 System One 与本地 logprobs 的各选项概率共用校验：值必须有限且在 `[0,1]`，键必须来自候选；畸形概率表整体忽略，不影响合法 choice。选择 `new` 但 `P(new) < 0.6` 时，改选概率最高的现有候选；`P(new) ≥ 0.6` 或没有概率时保留原决策。远程失败回退到本地时概率表原样传递。
 - 活跃 = 最后一条消息距当前不超过 2 小时，查询时计算，无定时清理器。候选最多 5 个最近活跃事件、2 个同频道向量召回的已关闭事件和 `new`；向量召回使用 L2 距离，最大 `EVENT_RECALL_MAX_DISTANCE = 1.0`。
 - 消息数达到 3 时首次摘要，之后在 6、12、24……刷新。每个事件后台 single-flight：独立 Pi `summaryModel` 生成标题与描述，fastembed 把标题+描述嵌入 sqlite-vec，再由决策客户端 `scoreParticipation` 排序参与者；向量先写入，参与度打分失败不影响旧话题召回。后台刷新不在频道 lane 上，停机等待 `idle()`。
+- 摘要指令要求标题与描述只概括中性事实：玩笑和接梗仍按玩笑或梗描述，不评价成员“刷屏”“违规”等行为，不给助手安排任务或角色，也不收录理解话题不需要的成员隐私。输出仍为 `title` / `description` JSON，分别截断至 40 / 200 个 Unicode 字符。
 - `formatInboundMessage` 在消息编号/回复标记后加 `§E<id>`，所有观察会话都看到归属；仅触发回复的输入追加 `[当前事件 §E<id>「标题」：描述。主要参与者：A、B、C。只回应这个事件，不要混入其他事件的内容。]`，未命名时为「尚无标题」，缺失描述/参与者时省略相应部分。system prompt 只有稳定的 §E 协议行，动态事件信息不进入缓存前缀。
 
 ### 路由（`src/core/router.ts`）
@@ -106,7 +109,7 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 - 会话禁用 Pi 内置编码工具（`noTools: "builtin"`），不加载项目扩展、技能、提示模板和上下文文件；只挂一个隐藏扩展 `jingmei-context`。
 - Pi 自动压缩开启。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
 - 模型：`persona_models` 有记录（`jingmei model` 写入）时用该模型，否则用配置的 `provider`/`model`。`getSession()`（lane 内）每次读一次记录，因此 CLI 的切换不用重启；会话空闲且模型不同时 `setModel()` 并重设 `reasoningEffort`，新会话直接用当前模型创建。记录的模型不在目录里时，先离线 `refresh()` 该 provider（CLI 登录或选择模型时已把动态目录缓存到 `pi-agent/models-store.json`），仍找不到则用配置模型并记一次 `model_override_unavailable`，记录保留。
-- system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
+- system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；固定写入角色名字、别名和当前平台已验证账号（用户名、用户 ID、入站提及形式），明确路由已选中本轮回复角色，不让模型重新判断是否被叫到。媒体说明按能力分支描述直接图片输入、可选辅助描述和占位，以及视频少量抽帧；不绑定创建时的模型，因此运行时 `setModel()` 后仍正确。会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
 
 ### 上下文投影（`src/core/context.ts`）
 
@@ -116,6 +119,10 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 - **展开聊天消息**：`discord_context_v1` 自定义消息展开为文字 + 图片块，图片从 `data/media/` 读取；文件缺失就跳过该图。
 - **看不了图的模型**：有 `visionModel` 描述时替换为 `[图片：描述]` 文字；否则保留图片块，由 Pi 按模型能力替换为省略说明。
 - **已晋升的 soul 暂存笔记**：内容已并入正式 soul 的 `discord_pending_soul_v1` 消息被丢弃，避免重复。
+
+隐藏扩展也处理 `session_before_compact`：在调用方 `customInstructions` 后追加固定身份和群聊摘要规则，只保留确认事实、归因成员说法，不把助手猜测、过去拒绝或语气固化为约束/偏好；风格教训须由成员明确提出，并纠正旧摘要中冲突身份及猜测规则。Pi 0.84.1 不支持在此事件结果中返回指令，因此调用 Pi 导出的 `compact()`，保留其结果、截断点和用量；使用压缩时的当前模型、thinking、认证、streamFunction 与重试设置，失败/中止时取消，不回退到无规则摘要。
+
+Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附加规则覆盖历史摘要，不覆盖该单独的前缀摘要。
 
 `discord_context_v1`、`discord_pending_soul_v1` 这两个类型名已写进现有会话文件，不能改名。
 
@@ -202,6 +209,7 @@ flowchart TD
 | 接收 | 每个角色一个 Gateway 连接（GUILDS、GUILD_MESSAGES、MESSAGE_CONTENT） | 每个角色一个 `getUpdates` 长轮询 |
 | 去重 | 核心 `messages` 主键 | 先到的轮询在内存里认领 `chat:message`，再由核心主键兜底 |
 | 其他 bot 的消息 | 可见，作为 bot 消息进入各角色会话 | Bot API 不投递，彼此不可见 |
+| 自己发送的回声 | `echoesOwnMessages = true`，Gateway 回声负责入库与其他角色观察 | `echoesOwnMessages = false`，Bot API 不投递；核心成功发送后补存并继承原话题 |
 | 允许列表 | 服务器 + 频道；thread 按父频道 | 群 ID；首次见到未列入的群记 `chat_ignored` |
 | 发送 | Markdown，2000 字符分段，禁止一切 @ 通知 | Markdown→entities，4096 限制下分段；实体被拒时退回纯文本一次 |
 | 附件 | 图片/MP3 作为附件 | `sendPhoto` / `sendAudio` |

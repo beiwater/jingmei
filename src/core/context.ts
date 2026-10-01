@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { compact, type AgentSession, type InlineExtension, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { errorCategory, log } from "../observability/log.ts";
+import { identityFacts, type PromptIdentity } from "./prompt.ts";
+import type { PlatformTransport } from "./types.ts";
 
 /** Wire values predate the multi-platform core; they are persisted in existing session files. */
 export const CONTEXT_MESSAGE_TYPE = "discord_context_v1";
@@ -112,6 +115,10 @@ export function makeContextExtension(
 	mediaDir: string,
 	personaId: string,
 	getFormalSoul: () => string,
+	identity: PromptIdentity,
+	transport: Pick<PlatformTransport, "platform" | "displayName">,
+	modelRuntime: ModelRuntime,
+	getSession: () => AgentSession,
 ): InlineExtension {
 	return {
 		name: "jingmei-context",
@@ -125,6 +132,52 @@ export function makeContextExtension(
 					imageInput: ctx.model?.input.includes("image") ?? false,
 				}),
 			}));
+			pi.on("session_before_compact", async (event, ctx) => {
+				const instructions = [
+					event.customInstructions,
+					"群聊摘要规则：",
+					identityFacts(transport, identity),
+					"只记录已确认的事实；成员的说法必须归因到该成员，不要自动当作事实。助手自己的推测、猜测、过往拒绝或语气不得写成约束或偏好。只有成员明确要求的风格教训才可保留。修正旧摘要中与固定身份冲突或把助手猜测写成规则的内容。",
+				]
+					.filter(Boolean)
+					.join("\n\n");
+				// Pi 0.84.1 accepts instructions only on input, not in the hook result.
+				// Return Pi's native result so both manual and automatic compaction use these rules.
+				try {
+					if (event.signal.aborted || !ctx.model) return { cancel: true };
+					const auth = await modelRuntime.getAuth(ctx.model);
+					const model = auth?.auth.baseUrl ? { ...ctx.model, baseUrl: auth.auth.baseUrl } : ctx.model;
+					const headers = auth?.auth.headers
+						? Object.fromEntries(
+								Object.entries(auth.auth.headers).filter((entry): entry is [string, string] => entry[1] != null),
+							)
+						: undefined;
+					const session = getSession();
+					return {
+						compaction: await compact(
+							event.preparation,
+							model,
+							auth?.auth.apiKey,
+							headers,
+							instructions,
+							event.signal,
+							ctx.thinkingLevel,
+							session.agent.streamFunction,
+							auth?.env,
+							session.settingsManager.getRetrySettings(),
+						),
+					};
+				} catch (error) {
+					// The extension runner otherwise swallows errors and retries without our rules.
+					if (!event.signal.aborted) {
+						log.error("core", "context_compaction_failed", {
+							persona_id: personaId,
+							error_category: errorCategory(error),
+						});
+					}
+					return { cancel: true };
+				}
+			});
 		},
 	};
 }

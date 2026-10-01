@@ -32,6 +32,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
 | `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；暂停时消息入库但不跑模型、不发送，恢复后回复并计数；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级；Discord/Telegram 触发轮次注入作者/回复/提及人类记忆，排除 bot/opt-out，观察角色无记忆块、空结果省略 |
+| `conversation-turn.test.ts` | 真实 Pi 会话中永不完成且忽略取消的 provider 到总期限释放 lane，排队的同频道消息继续回复；最终 error/aborted 不发半截文字、日志不泄露 provider 文本，一次重试成功不误报失败；无回声平台的文字/表情图/工具语音/明确请求语音入库并继承话题，随后人类回复直接继承；有回声平台不预先入库且正常处理 bot 回声 |
 | `bot-state.test.ts` | CLI 连接写入的暂停对 bot 连接立即可见、重复暂停保留首次时间；累计运行时长：已结束运行求和、运行中算到当前、崩溃的运行止于最后心跳；本次与累计回复数 |
 | `model-select.test.ts` | CLI 连接写入的模型覆盖让运行中 bot 已打开的会话下一轮换模型；后启动的 provider 目录经一次离线刷新后可用；选择在重启后保留；找不到的模型退回配置模型且只刷新一次；清除后恢复配置模型 |
 | `quick-reactions.test.ts` | 普通消息需要强信号且按频道限频（限频期内不调用 Jev）；同频道并发决策共享一个名额；点名消息不受阈值和限频影响、由被点名角色点；bot 消息和表外表情永不点 |

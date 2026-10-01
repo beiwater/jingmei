@@ -183,6 +183,7 @@ async function withPlainFallback(
 
 export class TelegramPlatformTransport implements PlatformTransport {
 	readonly platform = "telegram" as const;
+	readonly echoesOwnMessages = false;
 	readonly displayName = "Telegram";
 	readonly promptLines = TELEGRAM_PROMPT_LINES;
 

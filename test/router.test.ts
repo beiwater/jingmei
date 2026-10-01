@@ -63,6 +63,7 @@ function transports(sendMessage: PlatformTransport["sendMessage"]): Map<Platform
 			"discord",
 			{
 				platform: "discord",
+				echoesOwnMessages: true,
 				displayName: "Discord",
 				promptLines: [],
 				quickReactions: {},
@@ -229,6 +230,7 @@ describe("conversation guards", () => {
 			spaceId: "discord:1",
 			channelId: "2",
 			getTurn: () => turn,
+			recordSentMessage: () => {},
 		});
 		const read = fs.readFileSync as (...args: unknown[]) => unknown;
 		const missing = spyOn(fs, "readFileSync").mockImplementation(((path: unknown, ...args: unknown[]) => {

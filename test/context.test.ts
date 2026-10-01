@@ -89,6 +89,7 @@ function fixture(options: { imageInput: boolean; vision?: boolean; observer?: bo
 	let sends = 0;
 	const transport: PlatformTransport = {
 		platform,
+		echoesOwnMessages: platform === "discord",
 		displayName: platform,
 		promptLines: [],
 		quickReactions: {},

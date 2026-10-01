@@ -73,6 +73,8 @@ export interface ConversationOptions {
 	events?: EventTracker;
 	/** Auxiliary image describer for personas whose model cannot see images. */
 	visionModel?: { provider: string; model: string };
+	/** Whole model/tool turn deadline; injectable for deterministic timeout regressions. */
+	turnTimeoutMs?: number;
 }
 
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
@@ -112,6 +114,7 @@ export class Conversation implements ConversationCore {
 	private readonly quickReactions?: QuickReactions;
 	private readonly scoreRelevance?: RelevanceScorer;
 	private readonly events?: EventTracker;
+	private readonly turnTimeoutMs: number;
 	private readonly sessions = new Map<string, Promise<AgentSession>>();
 	private readonly lanes = new Map<string, Promise<void>>();
 	private readonly soulRevisions = new Map<string, number>();
@@ -136,6 +139,7 @@ export class Conversation implements ConversationCore {
 		this.soulStore = options.soulStore;
 		this.visionModel = options.visionModel;
 		this.events = options.events;
+		this.turnTimeoutMs = options.turnTimeoutMs ?? 180_000;
 		const jev = options.jev;
 		if (jev?.quickReactions) this.quickReactions = new QuickReactions(jev, options.transports);
 		if (jev?.memoryScoring) this.scoreRelevance = (query, candidates) => jev.client.scoreRelevance(query, candidates);
@@ -322,6 +326,7 @@ export class Conversation implements ConversationCore {
 					: ""
 			}${triggered && eventBlock ? `\n\n${eventBlock}` : ""}${triggered && memoryBlock ? `\n\n${memoryBlock}` : ""}`;
 			let answer = "";
+			let finalFailure: "error" | "aborted" | undefined;
 			const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 			let pendingSoulAtCompaction: string | null = null;
 			const turnKey = sessionKey(persona.id, message.spaceId, message.channelId);
@@ -344,6 +349,10 @@ export class Conversation implements ConversationCore {
 					pendingSoulAtCompaction = pendingSoulSnapshot;
 				if (event.type === "message_end" && event.message.role === "assistant") {
 					answer = contentText(event.message.content).trim();
+					finalFailure =
+						event.message.stopReason === "error" || event.message.stopReason === "aborted"
+							? event.message.stopReason
+							: undefined;
 					if (triggered && event.message.usage) {
 						cacheUsage.calls++;
 						cacheUsage.inputTokens += event.message.usage.input ?? 0;
@@ -355,23 +364,52 @@ export class Conversation implements ConversationCore {
 			});
 			let sendFailed = false;
 			let sendFailure: unknown;
+			let timedOut = false;
+			let deadlineTimer: NodeJS.Timeout | undefined;
 			try {
-				if (triggered) {
-					try {
-						await transport.startTyping?.(persona.id, message.channelId);
-					} catch {
-						// Typing is cosmetic; a typing endpoint failure must not block a reply.
+				const run = async () => {
+					if (triggered) {
+						try {
+							await transport.startTyping?.(persona.id, message.channelId);
+						} catch {
+							// Typing is cosmetic; a typing endpoint failure must not block a reply.
+						}
 					}
+					if (timedOut) return;
+					const details: ContextDetails = { version: 1, providerText: input, images: imageRefs };
+					await session.sendCustomMessage(
+						{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
+						{ triggerTurn: triggered },
+					);
+				};
+				if (triggered) {
+					const deadline = new Promise<void>((resolve) => {
+						deadlineTimer = setTimeout(() => {
+							timedOut = true;
+							resolve();
+						}, this.turnTimeoutMs);
+					});
+					await Promise.race([run(), deadline]);
+					if (timedOut) {
+						// abort() waits for idle. Do not await a provider that ignores cancellation:
+						// retire its session so the next message cannot be steered into the stuck turn.
+						void session.abort().catch(() => {});
+						session.dispose();
+						this.sessions.delete(turnKey);
+						log.warn("core", "turn_timeout", {
+							persona_id: persona.id,
+							platform: message.platform,
+							error_category: "timeout",
+						});
+					}
+				} else {
+					await run();
 				}
-				const details: ContextDetails = { version: 1, providerText: input, images: imageRefs };
-				await session.sendCustomMessage(
-					{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
-					{ triggerTurn: triggered },
-				);
 			} catch (error) {
 				sendFailed = true;
 				sendFailure = error;
 			} finally {
+				clearTimeout(deadlineTimer);
 				unsubscribe();
 				if (turn) this.activeTurns.delete(turnKey);
 			}
@@ -383,11 +421,18 @@ export class Conversation implements ConversationCore {
 					{ personaId: persona.id, spaceId: message.spaceId, channelId: message.channelId },
 					pendingSoulAtCompaction,
 				);
-			if (sendFailed) throw sendFailure;
+			if (sendFailed || finalFailure) {
+				log.warn("core", "turn_failed", {
+					persona_id: persona.id,
+					platform: message.platform,
+					error_category: finalFailure ?? errorCategory(sendFailure),
+				});
+			}
 			if (turn?.reply.status === "sent") {
 				responseMessageId = turn.reply.messageId;
 				continue;
 			}
+			if (timedOut || sendFailed || finalFailure) continue;
 			if (!answer) continue;
 			if (this.voice && persona.voiceEnabled && explicitVoiceRequest(message.content)) {
 				try {
@@ -403,6 +448,14 @@ export class Conversation implements ConversationCore {
 						message.messageId,
 						speech,
 					);
+					this.recordSentMessage(
+						persona,
+						message.spaceId,
+						message.channelId,
+						responseMessageId,
+						`🎙️ ${speech}`,
+						message.messageId,
+					);
 					continue;
 				} catch {
 					// Fish Audio errors do not block a text response to the user.
@@ -415,9 +468,52 @@ export class Conversation implements ConversationCore {
 				replyToMessageId: message.messageId,
 			});
 			responseMessageId = sent.id;
+			this.recordSentMessage(persona, message.spaceId, message.channelId, sent.id, answer, message.messageId);
 		}
 		if (responseMessageId) this.botState.recordReply();
 		return { route, messageStored: true, ...(responseMessageId ? { responseMessageId } : {}) };
+	}
+
+	/** Discord must remain echo-driven so other personas can observe its bot replies. */
+	private recordSentMessage(
+		persona: Persona,
+		spaceId: SpaceId,
+		channelId: string,
+		messageId: string,
+		content: string,
+		replyToMessageId: string,
+	): void {
+		const platform = platformOf(spaceId);
+		if (this.transports.get(platform)!.echoesOwnMessages) return;
+		const account = persona.accounts[platform]!;
+		try {
+			this.db
+				.query(`INSERT OR IGNORE INTO messages
+					(space_id, channel_id, message_id, author_id, author_name, is_bot, content,
+					 reply_to_message_id, timestamp, event_id)
+					SELECT ?, ?, ?, ?, ?, 1, ?, ?, ?, event_id FROM messages
+					WHERE space_id = ? AND channel_id = ? AND message_id = ?`)
+				.run(
+					spaceId,
+					channelId,
+					messageId,
+					account.userId,
+					account.username,
+					content,
+					replyToMessageId,
+					Date.now(),
+					spaceId,
+					channelId,
+					replyToMessageId,
+				);
+		} catch (error) {
+			// A successfully delivered reply must never be resent due to a storage failure.
+			log.error("core", "sent_message_store_failed", {
+				persona_id: persona.id,
+				platform,
+				error_category: errorCategory(error),
+			});
+		}
 	}
 
 	private recentLines(message: InboundMessage): string[] {
@@ -568,19 +664,26 @@ export class Conversation implements ConversationCore {
 			spaceId,
 			channelId,
 			getTurn: () => this.activeTurns.get(key),
+			recordSentMessage: (messageId, content, replyToMessageId) =>
+				this.recordSentMessage(persona, spaceId, channelId, messageId, content, replyToMessageId),
 		};
 		const reactTool = !this.quickReactions && !!transport.addReaction;
 		const voice = persona.voiceEnabled ? this.voice : undefined;
 		const loader = new DefaultResourceLoader({
 			cwd: this.dataDir,
 			agentDir: join(this.dataDir, "pi-agent"),
-			systemPrompt: buildSystemPrompt(transport, readFileSync(persona.personaPath, "utf8"), {
-				react: reactTool,
-				reactionImage: persona.sendReactionImages,
-				search: !!this.webSearchApiKey,
-				voice: !!voice,
-				events: !!this.events,
-			}),
+			systemPrompt: buildSystemPrompt(
+				transport,
+				readFileSync(persona.personaPath, "utf8"),
+				{
+					react: reactTool,
+					reactionImage: persona.sendReactionImages,
+					search: !!this.webSearchApiKey,
+					voice: !!voice,
+					events: !!this.events,
+				},
+				{ name: persona.name, aliases: persona.aliases, account: persona.accounts[transport.platform] },
+			),
 			systemPromptOverride: (base) => {
 				const revision = this.soulRevisions.get(key) ?? 0;
 				try {
@@ -598,7 +701,15 @@ export class Conversation implements ConversationCore {
 			noPromptTemplates: true,
 			noContextFiles: true,
 			extensionFactories: [
-				makeContextExtension(join(this.dataDir, "media"), persona.id, () => this.sessionFormalSouls.get(key) ?? ""),
+				makeContextExtension(
+					join(this.dataDir, "media"),
+					persona.id,
+					() => this.sessionFormalSouls.get(key) ?? "",
+					{ name: persona.name, aliases: persona.aliases, account: persona.accounts[transport.platform] },
+					transport,
+					this.modelRuntime,
+					() => session,
+				),
 			],
 		});
 		await loader.reload();
@@ -608,7 +719,15 @@ export class Conversation implements ConversationCore {
 			thinkingLevel: persona.reasoningEffort,
 			modelRuntime: this.modelRuntime,
 			sessionManager,
-			settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+			settingsManager: SettingsManager.inMemory({
+				compaction: { enabled: true },
+				retry: {
+					enabled: true,
+					maxRetries: 1,
+					baseDelayMs: 1_000,
+					provider: { timeoutMs: 60_000, maxRetries: 0, maxRetryDelayMs: 1_000 },
+				},
+			}),
 			resourceLoader: loader,
 			noTools: "builtin",
 			customTools: [

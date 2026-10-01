@@ -42,6 +42,8 @@ export interface ToolScope {
 	spaceId: SpaceId;
 	channelId: string;
 	getTurn(): ActiveTurn | undefined;
+	/** Persist sends on transports without inbound bot echoes. */
+	recordSentMessage(messageId: string, content: string, replyToMessageId: string): void;
 }
 
 const REACTION_ASSETS = {
@@ -296,6 +298,7 @@ export function createVoiceTool(scope: ToolScope, voice: VoiceConfig) {
 					params.text,
 				);
 				turn.reply = { status: "sent", kind: "voice", messageId };
+				scope.recordSentMessage(messageId, `🎙️ ${params.text.trim()}`, turn.replyToMessageId);
 				return {
 					content: [{ type: "text" as const, text: "Voice reply sent." }],
 					details: { messageId },
@@ -345,6 +348,11 @@ export function createReactionImageTool(scope: ToolScope) {
 					attachments: [{ name: `${params.asset_id}.png`, data: readFileSync(asset.path), contentType: "image/png" }],
 				});
 				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
+				scope.recordSentMessage(
+					sent.id,
+					(params.caption?.trim() || asset.caption).slice(0, 200),
+					turn.replyToMessageId,
+				);
 			} catch (error) {
 				turn.reply = { status: "idle" };
 				throw error;

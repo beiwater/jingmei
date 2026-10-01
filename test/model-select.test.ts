@@ -72,6 +72,7 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	};
 	const transport: PlatformTransport = {
 		platform: "discord",
+		echoesOwnMessages: true,
 		displayName: "discord",
 		promptLines: [],
 		quickReactions: {},

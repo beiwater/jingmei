@@ -26,6 +26,7 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 ## What it does
 
 - **Chimes in by probability, always answers when addressed**: a message that @-mentions a character, replies to it, or contains its name or an alias always gets an answer from that character; other messages are sampled deterministically by `routingP` to decide whether anyone answers and who. Bot messages never trigger a character.
+- **Failures do not stall the channel**: model/tool turns have a 180-second deadline, then abort and release the channel. Failures are logged without sending an error notice to the group. Successful Telegram text/image/voice replies are also stored in history so replies to the bot can inherit the original topic; Discord remains echo-driven.
 - **Jev quick reactions** (optional): a Jev decision API (or an in-process LLM wrapper) puts an emoji on messages. Addressed messages get the selected emoji unless the decision is `none`; ordinary messages only when strongly emotional or genuinely funny, rate-limited per channel. It does not use the main model and never delays the real reply. See [Jev](#jev).
 - **Concurrent topics** (optional): `events` assigns channel messages to topics. `§E` IDs, titles, descriptions and leading participants tell the character which event it is answering, keeping simultaneous discussions separate and recalling older topics when they resume.
 - **Images and video frames**: up to 4 images per message, scaled to fit 1024×1024 and 200 KB, reach the model; videos are sampled into 1–3 frames with ffmpeg. When the main model has no image input, Pi replaces each image with an omission note; alternatively set `visionModel` to describe images in a sentence or two first. Voice, files and stickers become text placeholders such as `[语音]`, `[文件]`, `[贴纸 😀]`.
@@ -36,6 +37,7 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 - **Holiday and birthday greetings** (optional): sent to a chosen channel after 09:00 local time, covering birthdays and Chinese/Australian holidays; deliveries are recorded in the database, so restarts never resend.
 - **Reaction images**: characters can send one of 4 bundled PNGs (hello, laugh, think, hug); can be turned off per character.
 - **No thinking by default, fewer tokens**: `reasoningEffort` defaults to `off`; even when enabled, thinking from completed turns is not sent back to the model. The system prompt and tool definitions stay stable for provider prefix caching.
+- **Fixed identity and summary boundaries**: characters know their names, aliases, and verified platform accounts and accept turns selected by the router. Media instructions distinguish direct image input, optional auxiliary descriptions, and placeholders without inventing processing. History compaction instructions preserve fixed identity, retain confirmed facts, attribute member claims, and exclude assistant guesses or past refusals as permanent rules; style lessons require an explicit member request.
 
 ## Architecture at a glance
 
@@ -269,6 +271,8 @@ Emojis in a custom Telegram table that the Bot API does not allow are dropped wi
 ```
 
 A reply to a message that already has an event inherits that event without a decision call (bot replies too; bot messages that reply to nothing have no event). A human message with fewer than 2 letters/digits after removing bare media placeholders such as `[贴纸 …]`, `[视频 N帧]` and `[文件]` joins the most recently active topic from the last 10 minutes. Other human messages go through the decision client whenever topic candidates exist: short replies, follow-ups and emotional reactions lean towards the ongoing topic, and a “new” decision whose probability is below 0.6 is reassigned to the most probable existing topic. Topics with a message in the last 2 hours are active. Candidates are up to 5 recent active topics, 2 older topics recalled by vector similarity within the same space/channel, and “new”. At 3, 6, 12, 24… messages, a background single-flight refresh generates the title/description, scores participation and updates the embedding without blocking channel processing. Summaries use the independent `summaryModel`; dynamic event details are appended only to the triggering input, never the system prompt.
+
+Topic summaries are instructed to neutrally describe what is being discussed or played: a running joke stays a joke, without judging members' behavior, assigning moderation tasks to the character, or retaining private member details unrelated to the topic.
 
 ## Deployment
 

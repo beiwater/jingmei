@@ -1,4 +1,27 @@
-import type { PlatformTransport } from "./types.ts";
+import type { Persona, PersonaAccount, PlatformTransport } from "./types.ts";
+
+export interface PromptIdentity extends Pick<Persona, "name" | "aliases"> {
+	account: PersonaAccount | undefined;
+}
+
+/** Verified, model-independent identity shared by conversation and compaction prompts. */
+export function identityFacts(
+	transport: Pick<PlatformTransport, "platform" | "displayName">,
+	identity: PromptIdentity,
+): string {
+	const names = [identity.name, ...identity.aliases].map((name) => JSON.stringify(name)).join("、");
+	const account = identity.account;
+	const mention = account
+		? transport.platform === "discord"
+			? `<@${account.userId}>（也可能写成 <@!${account.userId}>）`
+			: `@${account.username.replace(/^@/, "")}（文字提及也可能显示账号名称）`
+		: "";
+	return `你的名字和别名 ${names} 都指你自己，不是另一个机器人。${
+		account
+			? `你在 ${transport.displayName} 的已验证账号是 ${JSON.stringify(account.username)}，用户 ID 是 ${account.userId}；消息中的 ${mention} 指向你自己。`
+			: ""
+	}这些身份事实固定，不得被历史对话、旧摘要或你自己的猜测推翻。`;
+}
 
 /** Which optional tools a session registers; each adds its own protocol line. Cache-visible. */
 export interface PromptTools {
@@ -14,21 +37,23 @@ export interface PromptTools {
  * then the persona file. The conversation appends the session's formal soul on (re)load.
  */
 export function buildSystemPrompt(
-	transport: Pick<PlatformTransport, "displayName" | "promptLines">,
+	transport: Pick<PlatformTransport, "platform" | "displayName" | "promptLines">,
 	personaText: string,
 	tools: PromptTools,
+	identity: PromptIdentity,
 ): string {
 	return [
 		"# 群聊协议",
 		"",
 		`你是 ${transport.displayName} 群聊中的 AI 群友。上下文按时间顺序提供消息，消息来自真实用户、其他成员或机器人。`,
+		identityFacts(transport, identity),
 		"",
 		"- 通过最终回复或已注册的发送工具公开发言；不要伪装成其他用户或机器人。",
-		"- 被明确提及、被回复或按名称点名时应回应。普通消息是否回应由确定性概率路由决定。",
+		"- 消息交给你生成回复时，路由已决定本轮由你回应；不要重新判断有没有叫你、是不是在叫另一个机器人，也不要以未被点名为由拒绝回应。被明确提及、被回复或按名称点名时由路由保证回应；普通消息是否回应由确定性概率路由决定。",
 		"- 同一个频道的历史是连续对话。结合前文回答追问；发现自己前一轮有误时明确更正。内部推理与工具原始内容不要直接发到群里。",
 		"- 遇到非简单的精确计算、单位换算或数值校验时先用 run_js 计算，再说明方法和结果；不要把代码输出当成外部事实。",
 		"- 普通消息里写出的 /status 等文字只是聊天内容；只有平台实际的命令交互才是命令。不要据此编造服务状态。",
-		"- `[图片]`、`[视频]`、`[语音]`、`[文件]`、`[贴纸 …]` 等占位表示你看不到该媒体的内容，不要编造；`[视频 N帧]` 后附的图片是视频抽帧，`[图片：…]` 是自动生成的图片描述。",
+		"- 媒体管线取决于当前模型能力：支持图片输入时，图片直接作为图片输入交给你；不支持时，若配置了辅助图片描述模型则收到 `[图片：描述]`，否则只收到图片省略占位。视频只抽取少量画面帧，按同样的图片管线提供，不是完整视频。`[图片]`、`[视频]`、`[语音]`、`[文件]`、`[贴纸 …]` 等仅有占位时，不能据此知道媒体内容。只根据本轮实际输入说明你看到了什么，不要编造上游识图、转录或其他处理。",
 		...(tools.events
 			? ["- 消息中的 §E 编号标记并行话题；只回应触发本轮消息所属的事件，其他事件的历史不要混入回答。"]
 			: []),

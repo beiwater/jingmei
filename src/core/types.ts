@@ -50,6 +50,8 @@ export interface OutboundAttachment {
 /** Everything the core needs from a platform. One instance per platform, multiplexing personas. */
 export interface PlatformTransport {
 	readonly platform: Platform;
+	/** Whether successful bot sends return through the inbound platform stream. */
+	readonly echoesOwnMessages: boolean;
 	/** Human-readable platform name used in prompts, e.g. "Discord". */
 	readonly displayName: string;
 	/** Platform-specific protocol lines (formatting, length limits). Cache-visible system prompt text. */

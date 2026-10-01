@@ -44,6 +44,7 @@ function harness(
 		});
 	const transport = (platform: Platform): PlatformTransport => ({
 		platform,
+		echoesOwnMessages: platform === "discord",
 		displayName: platform,
 		promptLines: [],
 		quickReactions: {},

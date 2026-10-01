@@ -37,6 +37,7 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 	};
 	const transport = {
 		platform: "telegram",
+		echoesOwnMessages: false,
 		displayName: "Telegram",
 		promptLines: [],
 		quickReactions: { "👍": "赞同", "🤣": "好笑" },

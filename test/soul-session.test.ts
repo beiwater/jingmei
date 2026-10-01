@@ -76,6 +76,7 @@ test("soul tool, compaction and restart retain the owning conversation without r
 	}));
 	const transport: PlatformTransport = {
 		platform: "discord",
+		echoesOwnMessages: true,
 		displayName: "Discord",
 		promptLines: [],
 		quickReactions: {},
