@@ -1,8 +1,8 @@
 // Sandboxed run_js: executes small pure-computation JS in an isolated child process.
 // Threat model: docs/architecture.md "run_js sandbox 威胁模型"（REQ-SEC-0001）。
 // Isolation layers:
-// - child process (spawned via process.execPath, --smol) gets an EMPTY environment
-//   (no secrets) and an isolated tmp cwd
+// - child process (spawned via process.execPath, --smol) gets an environment reduced to
+//   PATH only (no secrets) and an isolated tmp cwd
 // - code runs in a node:vm context built from Object.create(null) with
 //   codeGeneration disabled: no host-realm object/function ever enters the context,
 //   so the classic console.log.constructor / this.constructor.constructor escapes
