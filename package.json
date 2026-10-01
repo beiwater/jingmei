@@ -6,8 +6,6 @@
 	"description": "精魅: an AI group pet for Discord and Telegram groups, built on Pi",
 	"scripts": {
 		"start": "bun run src/main.ts",
-		"discord": "bun run src/discord/main.ts",
-		"discord:start": "bun run src/discord/main.ts",
 		"test": "bun test",
 		"check": "tsc --noEmit",
 		"lint": "biome check .",

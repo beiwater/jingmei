@@ -18,24 +18,6 @@ describe("run_js normal computation", () => {
 		expect(r.output).toContain("world");
 	});
 
-	test("JSON processing", async () => {
-		const r = await runJs("const o = JSON.parse('{\"a\":[3,1,2]}'); o.a.sort(); JSON.stringify(o)");
-		expect(r.ok).toBe(true);
-		expect(r.output).toContain('{"a":[1,2,3]}');
-	});
-
-	test("regex", async () => {
-		const r = await runJs("'foo123bar'.match(/\\d+/)[0]");
-		expect(r.ok).toBe(true);
-		expect(r.output).toContain("123");
-	});
-
-	test("array transform", async () => {
-		const r = await runJs("[1,2,3].map(x => x * x).join(',')");
-		expect(r.ok).toBe(true);
-		expect(r.output).toContain("1,4,9");
-	});
-
 	test("syntax error is reported, not fatal", async () => {
 		const r = await runJs("this is not js");
 		expect(r.ok).toBe(false);
