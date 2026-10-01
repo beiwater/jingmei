@@ -116,6 +116,15 @@ export interface Dispatch {
 	responseMessageId?: string;
 }
 
+/** A persona's chat model: `provider/model` refs. */
+export interface ModelStatus {
+	current: string;
+	/** The `jingmei.config.json` model, used when no override is stored. */
+	configured: string;
+	/** Models whose provider currently has credentials, sorted. */
+	available: readonly string[];
+}
+
 /** Public surface used by platform adapters (commands, /ask). */
 export interface ConversationCore {
 	handleMessage(message: InboundMessage): Promise<Dispatch>;
@@ -133,5 +142,14 @@ export interface ConversationCore {
 		channelId: string,
 		requesterId: string,
 	): Promise<{ tokensBefore: number; estimatedTokensAfter?: number }>;
+	getModelStatus(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string): Promise<ModelStatus>;
+	/** Persist a per-persona model override (`null` restores the configured model); sessions switch before their next turn. */
+	selectModel(
+		personaId: string,
+		platform: Platform,
+		spaceId: SpaceId,
+		requesterId: string,
+		ref: string | null,
+	): Promise<ModelStatus>;
 	close(): Promise<void>;
 }

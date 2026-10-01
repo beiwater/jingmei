@@ -5,8 +5,10 @@ import type { AppConfig } from "../../config.ts";
 import {
 	contextCommandError,
 	memoryCommandError,
+	modelCommandError,
 	parseBirthdayDate,
 	runContextCommand,
+	runModelCommand,
 } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import type { ConversationCore, Persona, SpaceId } from "../../core/types.ts";
@@ -23,6 +25,7 @@ export const TELEGRAM_COMMANDS = [
 export const TELEGRAM_ADMIN_COMMANDS = [
 	{ command: "context", description: "查看本群上下文用量（管理员）" },
 	{ command: "compact", description: "压缩本群上下文（管理员）" },
+	{ command: "model", description: "查看或切换模型（管理员，/model provider/model）" },
 ] as const;
 
 const KNOWN_COMMANDS: ReadonlySet<string> = new Set(
@@ -74,7 +77,7 @@ export async function runCommand(context: CommandContext): Promise<string> {
 	switch (command.name) {
 		case "help":
 			return isAdmin
-				? "命令：/ask /status /memory /birthday /forget /context /compact"
+				? "命令：/ask /status /memory /birthday /forget /context /compact /model"
 				: "命令：/ask /status /memory /birthday /forget";
 		case "status":
 			return `在线。角色：${context.chatPersonas.map((candidate) => `@${candidate.accounts.telegram!.username}`).join("、")}。`;
@@ -100,6 +103,7 @@ export async function runCommand(context: CommandContext): Promise<string> {
 			return runBirthday(context);
 		case "context":
 		case "compact":
+		case "model":
 			return runAdminCommand(context, isAdmin);
 		default:
 			throw new Error(`unhandled_command:${command.name}`);
@@ -138,6 +142,15 @@ async function runAdminCommand(context: CommandContext, isAdmin: boolean): Promi
 			.map((candidate) => `/${command.name}@${candidate.accounts.telegram!.username}`)
 			.join("  ");
 		return `本群有多个角色，请指定：${choices}`;
+	}
+	if (command.name === "model") {
+		try {
+			return await runModelCommand(context.getCore(), command.args, [persona.id, "telegram", spaceId, userId]);
+		} catch (error) {
+			const reply = modelCommandError(error);
+			if (reply) return reply;
+			throw error;
+		}
 	}
 	try {
 		return await runContextCommand(context.getCore(), command.name, [persona.id, "telegram", spaceId, chatId, userId], {

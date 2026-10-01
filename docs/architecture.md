@@ -105,6 +105,7 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 - 每个 `(角色, 空间, 频道)` 一个持久 Pi 会话，文件在 `data/sessions/<personaId>/`，映射存 `sessions` 表。Discord thread 有自己的频道 ID，因此自成会话。
 - 会话禁用 Pi 内置编码工具（`noTools: "builtin"`），不加载项目扩展、技能、提示模板和上下文文件；只挂一个隐藏扩展 `jingmei-context`。
 - Pi 自动压缩开启。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
+- 模型：`persona_models` 有记录（管理员 `/model`）时用该模型，否则用配置的 `provider`/`model`。启动时记录的模型不存在或 provider 无凭据则本次运行用配置模型并记 `model_override_unavailable`，记录保留。已打开的会话在 `getSession()`（lane 内、会话空闲）发现模型不同时 `setModel()` 并重设 `reasoningEffort`；新会话直接用当前模型创建。`/model` 校验与列表走 `ModelRuntime.checkAuth()` / `getAvailable()`，CLI 登录后无需重启。
 - system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
 
 ### 上下文投影（`src/core/context.ts`）
@@ -190,6 +191,7 @@ flowchart TD
 | `celebration_deliveries` | 祝福发送记录 |
 | `bot_runs` | `id` 自增；`started_at`、心跳 `last_seen_at`、可空 `stopped_at`、本次 `replies` |
 | `bot_pause` | 单行（`id = 1`）`paused_at`；存在即暂停 |
+| `persona_models` | `persona_id` 主键 → `/model` 选择的 `provider`、`model`、`updated_at`；无记录即用配置模型 |
 
 **旧库迁移**（`migrateLegacyTables`）：每张 `discord_*` 表改名为去掉前缀的名字（`discord_core_` 连同 `core_` 一起去掉），`guild_id` 列改名为 `space_id` 并加 `discord:` 前缀。整个迁移一个事务、可重复执行；目标表已存在则报错而不是覆盖。
 

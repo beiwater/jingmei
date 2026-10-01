@@ -126,10 +126,12 @@ Telegram replies convert Markdown into message entities and are split above 4096
 | Delete my memory here and stop collecting | `/forget` | `/forget` |
 | Context usage (admin) | `/context` | `/context` |
 | Compact context now (admin) | `/compact` | `/compact` |
+| Show / switch model (admin) | `/model`, `/model model:<provider/model>`, `/model model:default` | `/model`, `/model <provider/model>`, `/model default` |
 
 - Discord command responses are visible only to the caller; the answer to `/ask` is posted in the channel as usual.
 - Admin commands are open only to the character's `adminUserIds` and registered only for characters that have admins.
-- Telegram commands can target a character with `@botusername`; without it the first character to receive the command handles it. With several characters in a group, `/context` and `/compact` must name one.
+- Telegram commands can target a character with `@botusername`; without it the first character to receive the command handles it. With several characters in a group, `/context`, `/compact` and `/model` must name one.
+- `/model` without an argument shows the current model and every Pi model whose provider has credentials. With `provider/model` it switches that character's model: sessions on every platform and channel move over before their next message, and the choice survives restarts. `default` restores `provider`/`model` from `jingmei.config.json`. `reasoningEffort` is kept and Pi clamps it when the new model does not support it. To use another provider, first run `bun run jingmei login <provider>` (OAuth) on the server or put its API key in the service environment; switching then works without a restart. A switch invalidates the provider's prefix cache once.
 - Telegram has no caller-only replies, so command responses go to the group and `/memory` shows counts rather than the remembered details.
 - `/forget` deletes only the structured member profile and relationships, not the platform's messages or existing session history.
 
@@ -183,7 +185,7 @@ Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
 | `spaces` | Optional restriction to some groups/servers, e.g. `["discord:<guildId>", "telegram:<chatId>"]`; omit for all |
 | `sendReactionImages` | Whether the bundled reaction images may be sent, default `true` |
 | `voiceEnabled` | Whether to use `voice` when configured, default `true` |
-| `discord` / `telegram` | The character's account on that platform: `{ tokenEnv, adminUserIds? }`. At least one is required, and each platform used needs its top-level section. `adminUserIds` may use `/context` and `/compact` |
+| `discord` / `telegram` | The character's account on that platform: `{ tokenEnv, adminUserIds? }`. At least one is required, and each platform used needs its top-level section. `adminUserIds` may use `/context`, `/compact` and `/model` |
 
 ### `celebrations[]`
 

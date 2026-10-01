@@ -4,8 +4,10 @@ import type { AppConfig } from "../../config.ts";
 import {
 	contextCommandError,
 	memoryCommandError,
+	modelCommandError,
 	parseBirthdayDate,
 	runContextCommand,
+	runModelCommand,
 } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import {
@@ -79,6 +81,18 @@ const COMMANDS = [
 const ADMIN_COMMANDS = [
 	{ name: "context", description: "Show this channel's context usage (bot admin only)" },
 	{ name: "compact", description: "Compact this channel's context (bot admin only)" },
+	{
+		name: "model",
+		description: "Show or switch this bot's model (bot admin only)",
+		options: [
+			{
+				name: "model",
+				description: "provider/model, or default; leave empty to list models",
+				type: 3,
+				required: false,
+			},
+		],
+	},
 ];
 
 function attachmentPlaceholder(contentType: string | undefined): string {
@@ -332,10 +346,30 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			}
 			return;
 		}
+		if (name === "model") {
+			if (!author || !isAdmin(persona, author.id)) {
+				await reply("只有管理员可以使用这个命令。");
+				return;
+			}
+			await client.deferInteraction(interaction, true);
+			try {
+				const content = await runModelCommand(deps.getCore(), getOption(interaction, "model") ?? "", [
+					persona.id,
+					"discord",
+					space,
+					author.id,
+				]);
+				await client.followUpInteraction(interaction, content, true);
+			} catch (error) {
+				log.error("discord", "admin_command_failed", { persona_id: persona.id, error_category: errorCategory(error) });
+				await client.followUpInteraction(interaction, modelCommandError(error) ?? "切换模型失败，请稍后再试。", true);
+			}
+			return;
+		}
 		if (name === "help") {
 			await reply(
 				author && isAdmin(persona, author.id)
-					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`"
+					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`, `/model`"
 					: "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`",
 			);
 			return;

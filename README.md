@@ -126,10 +126,12 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 删除本群记忆并停止记录 | `/forget` | `/forget` |
 | 上下文用量（管理员） | `/context` | `/context` |
 | 手动压缩上下文（管理员） | `/compact` | `/compact` |
+| 查看 / 切换模型（管理员） | `/model`、`/model model:<provider/model>`、`/model model:default` | `/model`、`/model <provider/model>`、`/model default` |
 
 - Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。
 - 管理员命令只对该角色 `adminUserIds` 里的用户开放，也只注册给配置了管理员的角色。
-- Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
+- Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact`、`/model` 必须指定角色。
+- `/model` 不带参数时显示当前模型和所有已有凭据的 Pi 模型；带 `provider/model` 时切换该角色的模型，所有平台、所有频道的会话在下一条消息前换过去，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider，先在服务器上 `bun run jingmei login <provider>`（OAuth）或把 API key 放进服务进程环境，无需重启即可切换。切换会让 provider 前缀缓存失效一次。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。
 - `/forget` 只删除结构化的成员档案和关系，不删除平台上的原消息或已有的会话历史。
 
@@ -183,7 +185,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `spaces` | 可选，把角色限定在部分群/服务器，如 `["discord:<guildId>", "telegram:<chatId>"]`；省略即全部 |
 | `sendReactionImages` | 是否能发内置表情图，默认 `true` |
 | `voiceEnabled` | 配置了 `voice` 时是否使用语音，默认 `true` |
-| `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact` 的用户 ID |
+| `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact`、`/model` 的用户 ID |
 
 ### `celebrations[]`
 
