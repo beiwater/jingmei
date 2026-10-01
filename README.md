@@ -97,6 +97,8 @@ cp personas/template.zh.md personas/luna.md
 | `timeZone` | IANA 时区，如 `Australia/Sydney` |
 | `calendar` | `china`（元旦、春节、劳动节、端午、中秋、国庆）、`australia`（元旦、Australia Day、Good Friday、Easter Sunday、ANZAC Day、圣诞、Boxing Day）或 `both` |
 
+农历节日按目标时区的公历日期换算，不依赖操作系统的农历实现；闰月不重复祝福。
+
 生日只在配置了祝福目标的群/服务器里发送；2 月 29 日的生日在平年于 2 月 28 日祝福。
 
 ## Discord 设置
