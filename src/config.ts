@@ -100,7 +100,7 @@ function loadEnv(rootDir: string): Record<string, string> {
 	return env;
 }
 
-export function loadConfig(rootDir = process.cwd()): AppConfig {
+function readConfigFile(rootDir: string): unknown {
 	const configPath = join(rootDir, CONFIG_FILE);
 	if (!existsSync(configPath)) {
 		const legacy = existsSync(join(rootDir, "discord.config.json"))
@@ -108,13 +108,29 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
 			: "; copy jingmei.config.example.json";
 		throw new ConfigError([`Missing ${configPath}${legacy}`]);
 	}
-	let input: unknown;
 	try {
-		input = JSON.parse(readFileSync(configPath, "utf8"));
+		return JSON.parse(readFileSync(configPath, "utf8"));
 	} catch (error) {
 		throw new ConfigError([`${CONFIG_FILE} is not valid JSON: ${(error as Error).message}`]);
 	}
-	return validateConfig(input, rootDir, loadEnv(rootDir));
+}
+
+export function loadConfig(rootDir = process.cwd()): AppConfig {
+	return validateConfig(readConfigFile(rootDir), rootDir, loadEnv(rootDir));
+}
+
+/** Pi's agent directory (`models.json`, `auth.json`) under the data dir. */
+export function piAgentDir(dataDir: string): string {
+	return join(dataDir, "pi-agent");
+}
+
+/** Resolve only the data dir, so operator commands work before bot tokens and secrets exist. */
+export function loadDataDir(rootDir = process.cwd()): string {
+	const input = readConfigFile(rootDir);
+	if (!isObject(input)) throw new ConfigError([`${CONFIG_FILE} must be a JSON object`]);
+	const dataDir = resolveDataDir(input, rootDir);
+	if (!dataDir) throw new ConfigError(["dataDir must be a nonempty string"]);
+	return dataDir;
 }
 
 type Json = Record<string, unknown>;
@@ -131,6 +147,12 @@ function resolvePath(rootDir: string, path: string): string {
 	if (isAbsolute(path)) return resolve(path);
 	if (path.startsWith("~/")) return join(homedir(), path.slice(2));
 	return resolve(rootDir, path);
+}
+
+/** Undefined when `dataDir` is present but invalid. */
+function resolveDataDir(input: Json, rootDir: string): string | undefined {
+	if (input.dataDir === undefined) return resolve(rootDir, "data");
+	return nonEmptyString(input.dataDir) ? resolvePath(rootDir, input.dataDir) : undefined;
 }
 
 function parseSpace(value: unknown): { platform: Platform; rawId: string } | null {
@@ -162,8 +184,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		return value;
 	};
 
-	const dataDir = nonEmptyString(input.dataDir) ? resolvePath(rootDir, input.dataDir) : resolve(rootDir, "data");
-	if (input.dataDir !== undefined && !nonEmptyString(input.dataDir)) errors.push("dataDir must be a nonempty string");
+	const dataDir = resolveDataDir(input, rootDir) ?? "";
+	if (!dataDir) errors.push("dataDir must be a nonempty string");
 	const routingSecret = secret("routingSecretEnv", input.routingSecretEnv ?? DEFAULT_ROUTING_SECRET_ENV) ?? "";
 
 	const modelSelection = (field: string, value: unknown): { provider: string; model: string } | undefined => {

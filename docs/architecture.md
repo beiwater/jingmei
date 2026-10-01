@@ -31,8 +31,10 @@ flowchart LR
 
 | 路径 | 职责 |
 |---|---|
-| `src/main.ts` | 启动编排：配置 → DB → 平台 → 模型运行时 → 核心 → 祝福调度 → 开始接收；信号关闭 |
+| `src/main.ts` | `bun run start` 的入口，只调用 `startBot()` |
+| `src/bot.ts` | 启动编排：配置 → DB → 平台 → 模型运行时 → 核心 → 祝福调度 → 开始接收 → 记录运行与心跳；信号关闭 |
 | `src/discord/main.ts` | systemd 使用的入口，只有一行 `import "../main.ts"` |
+| `src/cli.ts` | 运维 CLI（citty + clack）：`start`、`login`/`logout`（Pi `ModelRuntime.login`）、`pause`/`resume`、`stats` |
 | `src/config.ts` | 读取并校验 `jingmei.config.json` + `.env`；生成 DeepSeek 模型目录 |
 | `src/core/types.ts` | 平台无关的类型契约 |
 | `src/core/conversation.ts` | 对话核心：存消息、路由、会话、图片落盘、搜索预取、发送 |
@@ -45,6 +47,7 @@ flowchart LR
 | `src/core/memory.ts` / `soul.ts` / `celebrations.ts` | 成员记忆、私人 soul、节日生日祝福 |
 | `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移、messages 幂等迁移与 sqlite-vec 加载 |
 | `src/core/model-runtime.ts` | 共享 Pi `ModelRuntime` 与启动期模型校验 |
+| `src/core/bot-state.ts` | 运行记录（心跳、回复数）、暂停标志与 `stats` 汇总；bot 与 CLI 通过同一个 SQLite 文件共享 |
 | `src/decision/jev.ts` / `local-jev.ts` | Jev wire 客户端、远程失败回退、进程内 notjev LLM 包装器 |
 | `src/platforms/discord/` | Gateway/REST 客户端、消息归一化、附件下载、斜杠命令 |
 | `src/platforms/telegram/` | Bot API 客户端、长轮询、归一化、Markdown→entities、文字命令 |
@@ -61,13 +64,14 @@ flowchart LR
 4. 按配置创建 Discord/Telegram 平台：每个 token 先验证身份（Discord `/users/@me`，Telegram `getMe`），填入 `persona.accounts`。
 5. `createInstalledPiModelRuntime()`：整个进程一个 Pi `ModelRuntime`，agent 目录是 `data/pi-agent`（`models.json`、`auth.json` 都在这里）。provider 扩展只从 agent 目录加载，项目 `.pi/` 扩展不被信任、不加载。每个角色的模型、reasoning 档位和认证逐一 `assertBotModelConfigured`；`visionModel` 另需支持图片输入。
 6. 开启话题时校验 `summaryModel`，在 `${dataDir}/models` 准备 fastembed 模型缓存（默认首次下载约 96 MB），创建共享决策客户端与 `EventTracker`。创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。关闭时先等待核心 lane，再等待 `events.idle()` 后关数据库。
+7. 平台全部启动后 `BotState.startRun()` 在 `bot_runs` 新增一次运行，每分钟心跳更新 `last_seen_at`；正常关闭时写 `stopped_at`。崩溃的运行停在最后一次心跳，`stats` 把超过两次心跳没有更新的运行视为已停止。
 
 ## 一条消息的路径
 
 适配器把平台消息归一化为 `InboundMessage`：允许列表之外的空间/频道直接丢弃；提及解析为用户 ID；图片经 `prepareImage`，视频抽帧，其余媒体换成文字占位。随后 `Conversation.handleMessage()`：
 
 1. 按 `(space, channel)` 串行（lane）。同一空间同一频道的消息严格按顺序处理；不同频道并发。
-2. `INSERT OR IGNORE` 到 `messages`。已存在则直接返回——多个角色的连接收到同一条消息、重启后重放，都在这里去重。
+2. `INSERT OR IGNORE` 到 `messages`。已存在则直接返回——多个角色的连接收到同一条消息、重启后重放，都在这里去重。`bot_pause` 有记录（`jingmei pause`）时到此为止：消息已入库，不观察记忆、不归话题、不路由、不点表情、不进会话。
 3. 人类消息交给 `MemberMemory.observe()` 更新档案；开启话题时再 `await events.assign(message)` 写入 `messages.event_id`，然后路由。
 4. `routeMessage()` 选出接话角色（或无人）。
 5. 配了 Jev 秒回表情时，不等待地发起 `QuickReactions.react()`。
@@ -164,11 +168,11 @@ flowchart TD
 - **记忆**：`memory_profiles` 记名字、活跃度、生日；`memory_facts` 只收白名单键（preference、interest、role、project、timezone、language、goal、note），拒绝敏感键和可疑内容；`memory_relationships` 来自提及、回复和明确的朋友/同学说法。`/forget` 删档案与关系并写入 `memory_opt_out`，之后不再收集，直到 `/memory enable`。
 - **自动参考**：仅触发回复的角色收到作者、被回复作者和提及成员的 `[成员记忆（仅供参考，不要在群里复述完整档案）：…]`；排除角色 bot 和 opt-out，空结果不追加。直接 `recall(spaceId, ids)`，不调用相关度决策；最多 20 人、总计 2,000 字符，每人最近 5 条事实与最强 4 条关系，没有详情时给出发言次数。其他观察角色只收到原消息。按需工具回想仍可调用相关度排序，不公开完整档案或生日，也不把推断当作事实。
 - **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。学到关于自身风格的稳定教训时用 `update_soul` 暂存，不写入成员资料；暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；压缩成功后事务性并入正式 soul，只重载该会话。
-- **祝福**：每分钟检查一次；目标时区当地 09:00 之后，每个成员生日、每个节日各发一次。发送前在 `celebration_deliveries` 占位，完成后标记；失败当天重试，超过 30 分钟仍在发送中的占位视为中断并重试。
+- **祝福**：每分钟检查一次；目标时区当地 09:00 之后，每个成员生日、每个节日各发一次。发送前在 `celebration_deliveries` 占位，完成后标记；失败当天重试，超过 30 分钟仍在发送中的占位视为中断并重试。暂停期间整次检查跳过，恢复后当天到期的照常发送。
 
 ## SQLite
 
-`data/jingmei.db`，bun:sqlite 直接 SQL，文件权限 0600。
+`data/jingmei.db`，bun:sqlite 直接 SQL，文件权限 0600。运维 CLI 会在 bot 运行时打开同一个文件，所以每个连接设 `busy_timeout = 5000`，短暂锁冲突时等待而不是报错。
 
 | 表 | 主键 / 用途 |
 |---|---|
@@ -184,6 +188,8 @@ flowchart TD
 | `memory_opt_out` | `/forget` 后停止收集的成员 |
 | `session_souls` | 私人 soul |
 | `celebration_deliveries` | 祝福发送记录 |
+| `bot_runs` | `id` 自增；`started_at`、心跳 `last_seen_at`、可空 `stopped_at`、本次 `replies` |
+| `bot_pause` | 单行（`id = 1`）`paused_at`；存在即暂停 |
 
 **旧库迁移**（`migrateLegacyTables`）：每张 `discord_*` 表改名为去掉前缀的名字（`discord_core_` 连同 `core_` 一起去掉），`guild_id` 列改名为 `space_id` 并加 `discord:` 前缀。整个迁移一个事务、可重复执行；目标表已存在则报错而不是覆盖。
 

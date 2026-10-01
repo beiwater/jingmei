@@ -11,9 +11,9 @@
 
 ## 2. 仓库地图
 
-- `src/main.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）
+- `src/main.ts` — 入口（只调 `startBot()`）；`src/bot.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）；`src/cli.ts` — 运维 CLI（`bun run jingmei start|login|logout|pause|resume|stats`，citty + clack）
 - `src/config.ts` — `jingmei.config.json` + `.env` 的唯一读取与校验
-- `src/core/` — 对话核心：`conversation.ts`（主流程）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`member-commands.ts`（两平台共用的生日解析与 context/compact 命令）、`soul.ts`、`celebrations.ts`、`db.ts`、`model-runtime.ts`、`types.ts`
+- `src/core/` — 对话核心：`conversation.ts`（主流程）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`member-commands.ts`（两平台共用的生日解析与 context/compact 命令）、`soul.ts`、`celebrations.ts`、`bot-state.ts`（运行记录、暂停、stats，CLI 与 bot 共享）、`db.ts`、`model-runtime.ts`、`types.ts`
 - `src/platforms/discord/`、`src/platforms/telegram/` — 平台适配器
 - `src/decision/jev.ts` — TypeSafe Jev 客户端
 - `src/media/` — 图片准备、视频抽帧；`src/tools/` — run_js、DeepSeek 搜索、Fish TTS；`src/net/` — 公网 URL 过滤、有界读取
@@ -69,8 +69,8 @@
 
 ## 8. 已知坑
 
-- `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv。它的值不会进入 `process.env`，唯一例外是 `src/main.ts` 导出的 `DEEPSEEK_API_KEY`；其他 provider 的 env key 必须在进程环境里。
-- Pi 的 agent 目录是 `data/pi-agent`（不是 `~/.pi/agent`）：`models.json`、`auth.json` 都在这里。用 Pi `/login` 需 `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi`。
+- `.env` 是 `key: value` 冒号格式，由 `src/config.ts` 自解析，不是 dotenv。它的值不会进入 `process.env`，唯一例外是 `src/bot.ts` 导出的 `DEEPSEEK_API_KEY`；其他 provider 的 env key 必须在进程环境里。
+- Pi 的 agent 目录是 `<dataDir>/pi-agent`（不是 `~/.pi/agent`）：`models.json`、`auth.json` 都在这里。OAuth 登录用 `bun run jingmei login`（走 `ModelRuntime.login`，与 bot 同一个 runtime），不要用 pi-ai 自带 CLI——它写当前目录的 `auth.json`，不加锁。
 - Telegram Bot API 不向 bot 投递其他 bot 的消息：同群多角色在 Telegram 上互相看不到。群消息还需要关闭 privacy mode。
 - Telegram 表情回应只能用 Bot API 枚举（没有 😂，用 🤣）；Discord 与 Telegram 的默认表情表因此不同。
 - 同一条消息会被每个角色的连接各收到一次：去重靠 `messages` 主键 `INSERT OR IGNORE`，不要在别处另做一套。

@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
@@ -87,6 +88,7 @@ test("soul tool, compaction and restart retain the owning conversation without r
 	const createCore = () =>
 		new Conversation({
 			db,
+			botState: new BotState(db),
 			dataDir,
 			routingSecret: "fixture",
 			personas,

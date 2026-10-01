@@ -27,16 +27,19 @@
 	},
 	"scripts": {
 		"start": "bun run src/main.ts",
+		"jingmei": "bun run src/cli.ts",
 		"test": "bun test",
 		"check": "tsc --noEmit",
 		"lint": "biome check .",
 		"format": "biome check --write ."
 	},
 	"dependencies": {
+		"@clack/prompts": "1.8.1",
 		"@earendil-works/pi-agent-core": "0.84.1",
 		"@earendil-works/pi-ai": "0.84.1",
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
+		"citty": "0.2.2",
 		"fastembed": "3.0.0",
 		"lunar-typescript": "1.8.6",
 		"notjev": "0.2.1",

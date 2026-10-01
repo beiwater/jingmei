@@ -36,6 +36,7 @@ function harness(
 	const db = new Database(":memory:");
 	const sends: Sent[] = [];
 	let listBirthdays = options.birthdays ?? (() => []);
+	let paused = false;
 	const send =
 		options.send ??
 		(async (sent: Sent) => {
@@ -63,8 +64,15 @@ function harness(
 			targets,
 			transports,
 			listBirthdays: (space, month, day) => listBirthdays(space, month, day),
+			isPaused: () => paused,
 		});
-	return { db, sends, create, setBirthdays: (fn: typeof listBirthdays) => (listBirthdays = fn) };
+	return {
+		db,
+		sends,
+		create,
+		setBirthdays: (fn: typeof listBirthdays) => (listBirthdays = fn),
+		setPaused: (value: boolean) => (paused = value),
+	};
 }
 
 describe("celebration scheduler", () => {
@@ -215,6 +223,19 @@ describe("celebration scheduler", () => {
 		await scheduler.tick(first);
 		expect(h.sends).toHaveLength(0);
 		await h.create().tick(new Date(first.getTime() + 31 * 60_000));
+		expect(h.sends).toHaveLength(1);
+		h.db.close();
+	});
+
+	test("a paused bot holds today's greetings and sends them after resume", async () => {
+		const h = harness([target()], { birthdays: () => [{ userId: userA, name: "小明" }] });
+		const scheduler = h.create();
+		const nineAm = new Date("2026-05-03T23:00:00Z");
+		h.setPaused(true);
+		await scheduler.tick(nineAm);
+		expect(h.sends).toHaveLength(0);
+		h.setPaused(false);
+		await scheduler.tick(new Date(nineAm.getTime() + 60_000));
 		expect(h.sends).toHaveLength(1);
 		h.db.close();
 	});

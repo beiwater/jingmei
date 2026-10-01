@@ -22,6 +22,8 @@ export interface CelebrationSchedulerOptions {
 	listBirthdays: (spaceId: SpaceId, month: number, day: number) => readonly BirthdayMember[];
 	/** Each target sends through the transport named by its space prefix. */
 	transports: ReadonlyMap<Platform, PlatformTransport>;
+	/** A paused bot sends nothing; greetings due today go out after resume. */
+	isPaused: () => boolean;
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 }
@@ -166,6 +168,7 @@ export class CelebrationScheduler {
 	}
 
 	private async deliverForDate(now: Date): Promise<void> {
+		if (this.options.isPaused()) return;
 		for (const target of this.options.targets) {
 			const local = dateTimeInZone(now, target.timeZone);
 			if (local.hour < 9) continue;

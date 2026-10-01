@@ -19,6 +19,7 @@ import {
 	makeContextExtension,
 	PENDING_SOUL_TYPE,
 } from "./context.ts";
+import type { BotState } from "./bot-state.ts";
 import { ensureMessagesTable } from "./db.ts";
 import type { EventTracker } from "./events.ts";
 import { isRawId, platformOf } from "./ids.ts";
@@ -56,6 +57,8 @@ import { runDeepSeekWebSearch } from "../tools/web-search.ts";
 
 export interface ConversationOptions {
 	db: Database;
+	/** Pause flag and reply counter shared with the operator CLI. */
+	botState: BotState;
 	dataDir: string;
 	routingSecret: string;
 	personas: readonly Persona[];
@@ -95,6 +98,7 @@ const SESSION_TABLE = `
  */
 export class Conversation implements ConversationCore {
 	private readonly db: Database;
+	private readonly botState: BotState;
 	private readonly dataDir: string;
 	private readonly secret: string;
 	private readonly personas: readonly Persona[];
@@ -118,6 +122,7 @@ export class Conversation implements ConversationCore {
 
 	constructor(options: ConversationOptions) {
 		this.db = options.db;
+		this.botState = options.botState;
 		this.dataDir = options.dataDir;
 		this.secret = options.routingSecret;
 		this.personas = options.personas;
@@ -229,6 +234,8 @@ export class Conversation implements ConversationCore {
 					message.timestamp ?? Date.now(),
 				).changes > 0;
 		if (!inserted) return { route: { personaId: null, reason: "nobody" }, messageStored: false };
+		// Paused: keep the message for history and stats, but no memory, topics, reactions, model turns or replies.
+		if (this.botState.pausedAt() !== null) return { route: { personaId: null, reason: "nobody" }, messageStored: true };
 		const botUserIds = new Set(this.personas.flatMap((persona) => persona.accounts[message.platform]?.userId ?? []));
 		if (!message.isBot) {
 			try {
@@ -383,6 +390,7 @@ export class Conversation implements ConversationCore {
 			});
 			responseMessageId = sent.id;
 		}
+		if (responseMessageId) this.botState.recordReply();
 		return { route, messageStored: true, ...(responseMessageId ? { responseMessageId } : {}) };
 	}
 

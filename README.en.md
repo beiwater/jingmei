@@ -15,7 +15,7 @@
 
 [中文](README.md) · **English**
 
-[Quick start](#quick-start) · [Commands](#commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Commands](#commands) · [Operator commands](#operator-commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -84,7 +84,7 @@ cp personas/template.en.md personas/luna.md
 3. Edit `.env`: bot tokens, `ROUTING_SECRET` (any long random string) and API keys. The format is `key: value`, not `KEY=value`.
 4. Provide model credentials, either way:
    - The example persona uses DeepSeek `deepseek-flash`; just set `DEEPSEEK_API_KEY` in `.env`. On startup a catalog entry for this model (without the key) is written to `data/pi-agent/models.json`.
-   - Other providers: log in with the project's own Pi directory — run `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi`, then `/login`, and use `/model` to confirm the model name; or put that provider's API key variable (for example `OPENAI_API_KEY`) in the process environment. `.env` is read only by this project and, apart from `DEEPSEEK_API_KEY`, is not passed to Pi.
+   - Other providers: for subscription accounts (Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, ...) run `bun run jingmei login` and pick a provider to sign in with OAuth. Credentials go to `<dataDir>/pi-agent/auth.json`; the bot uses them on startup and refreshes tokens automatically. `bun run jingmei logout` removes them. On a server without a browser, open the printed link on your own machine, then paste the final redirect URL or code back into the terminal. To confirm model names, use `/model` in `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi`. Alternatively put that provider's API key variable (for example `OPENAI_API_KEY`) in the process environment. `.env` is read only by this project and, apart from `DEEPSEEK_API_KEY`, is not passed to Pi.
 5. Start:
 
    ```bash
@@ -132,6 +132,20 @@ Telegram replies convert Markdown into message entities and are split above 4096
 - Telegram commands can target a character with `@botusername`; without it the first character to receive the command handles it. With several characters in a group, `/context` and `/compact` must name one.
 - Telegram has no caller-only replies, so command responses go to the group and `/memory` shows counts rather than the remembered details.
 - `/forget` deletes only the structured member profile and relationships, not the platform's messages or existing session history.
+
+## Operator commands
+
+Run them in the project directory as the same user that runs the bot. They read only `dataDir` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
+
+| Command | What it does |
+|---|---|
+| `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
+| `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential |
+| `bun run jingmei pause` / `resume` | Pause / resume |
+| `bun run jingmei stats` | Status and current uptime, total runtime and number of starts, replies, and message / group / member / topic / celebration totals |
+
+- **Pause**: the bot stays online and keeps storing messages, but does not reply, react, update member memory or topics, or send celebrations, and makes no model calls. It applies to a running bot immediately without a restart, and survives restarts until `resume`. Messages received while paused do not enter the characters' session context; greetings due that day go out after resuming. To actually stop the process, use `systemctl --user stop pi-discord-agent` or Ctrl+C.
+- **Status**: the bot writes a heartbeat every minute; with no heartbeat for two minutes it counts as stopped (including crashes). Replies are counted from the release that introduced this command; message and other totals cover all history.
 
 ## Configuration reference
 

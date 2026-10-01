@@ -1,6 +1,6 @@
 # 部署
 
-精魅是一个常驻前台进程：`bun run start`（本地）或 systemd 运行的 `bun run src/discord/main.ts`，两者进入同一个 `src/main.ts`。进程只向 stdout 写结构化 JSONL 日志，收到 SIGINT/SIGTERM 时停止各平台、等待进行中的对话及后台事件刷新后关闭数据库。
+精魅是一个常驻前台进程：`bun run start` 或 `bun run jingmei start`（本地），或 systemd 运行的 `bun run src/discord/main.ts`，三者进入同一个 `startBot()`。进程只向 stdout 写结构化 JSONL 日志，收到 SIGINT/SIGTERM 时停止各平台、等待进行中的对话及后台事件刷新后关闭数据库。
 
 ## 准备
 
@@ -26,6 +26,8 @@ UMask=0077
 
 服务名和启动命令沿用改名前的部署，保持不变；`src/discord/main.ts` 只有一行，导入 `src/main.ts`。如果代码目录或 Bun 路径不同，修改 `WorkingDirectory` 与 `ExecStart` 里的路径即可。`UMask=0077` 让新建的数据库、会话和媒体文件只有服务用户可读。
 
+服务运行时，在代码目录以服务用户执行 `bun run jingmei pause` / `resume` 暂停或恢复回复（立即生效、重启后保留），`bun run jingmei stats` 查看运行时长和数据汇总；详见 [README 运维命令](../README.md#运维命令)。暂停不会停止进程，停服务仍用 `systemctl --user stop pi-discord-agent`。
+
 ```bash
 cp deploy/pi-discord-agent.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -40,7 +42,7 @@ journalctl --user -u pi-discord-agent -f
 sudo loginctl enable-linger <linux-user>
 ```
 
-非 DeepSeek 的 provider 若通过环境变量认证，变量必须进入服务进程环境（例如 `systemctl --user edit pi-discord-agent` 添加 `Environment=` 或 `EnvironmentFile=`）；`.env` 除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。用 Pi `/login` 登录的凭据保存在 `data/pi-agent/auth.json`，不需要额外设置。
+非 DeepSeek 的 provider 若通过环境变量认证，变量必须进入服务进程环境（例如 `systemctl --user edit pi-discord-agent` 添加 `Environment=` 或 `EnvironmentFile=`）；`.env` 除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。用 `bun run jingmei login` 登录的 OAuth 凭据保存在 `data/pi-agent/auth.json`，不需要额外设置；服务器没有浏览器时，在本机打开打印的链接，再把跳转 URL 或授权码粘贴回终端。
 
 ## 更新
 
@@ -58,12 +60,12 @@ systemctl --user restart pi-discord-agent
 
 | 路径 | 内容 |
 |---|---|
-| `jingmei.db` | SQLite：消息、话题/参与者/向量、会话索引、成员记忆、soul、祝福发送记录（表结构见 [architecture.md](architecture.md#sqlite)） |
+| `jingmei.db` | SQLite：消息、话题/参与者/向量、会话索引、成员记忆、soul、祝福发送记录、运行记录与暂停状态（表结构见 [architecture.md](architecture.md#sqlite)） |
 | `sessions/<personaId>/` | Pi 会话文件，每个角色 × 空间 × 频道一个 |
 | `media/` | 进入上下文的图片与视频帧（`img-*.jpg` / `img-*.png`） |
 | `models/` | fastembed 模型下载缓存（仅开启 `events` 时使用，默认模型约 96 MB） |
 | `pi-agent/models.json` | 启动时生成的 DeepSeek 模型目录，不含密钥 |
-| `pi-agent/auth.json` | 以 `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi` 打开 Pi 后 `/login` 保存的凭据 |
+| `pi-agent/auth.json` | `bun run jingmei login` 保存的 OAuth 凭据（权限 0600，勿入库） |
 
 消息和媒体不会自动清理。需要腾空间时可以删除较早的 `media/img-*` 文件：上下文里缺失的图片会被跳过，不影响对话。备份时停止服务后复制整个 `data/`。
 

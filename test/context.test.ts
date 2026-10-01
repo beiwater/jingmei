@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
@@ -85,19 +86,22 @@ function fixture(options: { imageInput: boolean; vision?: boolean; observer?: bo
 		name: "sol",
 		accounts: { [platform]: { userId: "901", username: "sol" } },
 	};
+	let sends = 0;
 	const transport: PlatformTransport = {
 		platform,
 		displayName: platform,
 		promptLines: [],
 		quickReactions: {},
-		sendMessage: async () => ({ id: "1" }),
+		sendMessage: async () => ({ id: String(++sends) }),
 		formatMention: (user) => `@${user.username}`,
 		isValidReaction: () => true,
 	};
 	const db = new Database(":memory:");
 	const memory = new MemberMemory(db);
+	const botState = new BotState(db);
 	const core = new Conversation({
 		db,
+		botState,
 		memberMemory: memory,
 		soulStore: new SoulStore({ db, personaIds: [persona.id, observer.id] }),
 		dataDir,
@@ -149,7 +153,19 @@ function fixture(options: { imageInput: boolean; vision?: boolean; observer?: bo
 			...overrides,
 		});
 	};
-	return { send, contexts, observerContexts, memory, space, script, reply, visionCalls: () => visionCalls };
+	return {
+		send,
+		contexts,
+		observerContexts,
+		memory,
+		space,
+		script,
+		reply,
+		db,
+		botState,
+		sends: () => sends,
+		visionCalls: () => visionCalls,
+	};
 }
 
 const thinkingOf = (context: Context) =>
@@ -184,6 +200,20 @@ test("thinking of completed turns is dropped while the in-progress tool loop kee
 		(message) => message.role === "assistant" && message.content.some((part) => part.type === "text"),
 	);
 	expect(completed?.role === "assistant" && completed.content).toEqual([{ type: "text", text: "hello" }]);
+});
+
+test("a paused bot stores messages but runs no model turn and sends nothing until resumed", async () => {
+	const f = fixture({ imageInput: false });
+	f.botState.startRun();
+	f.botState.pause();
+	await f.send();
+	expect(f.contexts).toHaveLength(0);
+	expect(f.sends()).toBe(0);
+	f.botState.resume();
+	await f.send();
+	expect(f.contexts).toHaveLength(1);
+	expect(f.sends()).toBe(1);
+	expect(f.botState.summary()).toMatchObject({ messages: 2, replies: 1, current: { replies: 1 } });
 });
 
 test("images reach image-capable models as image blocks", async () => {

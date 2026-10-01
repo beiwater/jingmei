@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { BotState } from "../src/core/bot-state.ts";
 import {
 	Conversation,
 	explicitSearchQuery,
@@ -183,6 +184,7 @@ describe("conversation guards", () => {
 		const db = new Database(":memory:");
 		const core = new Conversation({
 			db,
+			botState: new BotState(db),
 			memberMemory: new MemberMemory(db),
 			soulStore: new SoulStore({ db, personaIds: ["mio"] }),
 			dataDir: "/unused",

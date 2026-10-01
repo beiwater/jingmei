@@ -15,7 +15,7 @@
 
 **中文** · [English](README.en.md)
 
-[快速开始](#快速开始) · [命令](#命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -84,7 +84,7 @@ cp personas/template.zh.md personas/luna.md
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
-   - 其他 provider：用项目自己的 Pi 目录登录，`PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi` 打开 Pi 后执行 `/login`，用 `/model` 确认模型名；或者把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
+   - 其他 provider：订阅账号（Claude Pro/Max、ChatGPT Plus/Pro、GitHub Copilot 等）用 `bun run jingmei login` 选 provider 走 OAuth 登录，凭据写进 `<dataDir>/pi-agent/auth.json`，bot 启动后直接使用并自动刷新 token；`bun run jingmei logout` 删除。服务器上没有浏览器时，在本机浏览器打开打印出的链接，再把最终跳转 URL 或授权码粘贴回终端。模型名可在 `PI_CODING_AGENT_DIR="$PWD/data/pi-agent" bunx pi` 里用 `/model` 确认。也可以把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
 5. 启动：
 
    ```bash
@@ -132,6 +132,20 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 - Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。
 - `/forget` 只删除结构化的成员档案和关系，不删除平台上的原消息或已有的会话历史。
+
+## 运维命令
+
+在项目目录、以运行 bot 的同一个用户执行。只读 `jingmei.config.json` 的 `dataDir`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
+
+| 命令 | 作用 |
+|---|---|
+| `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
+| `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据 |
+| `bun run jingmei pause` / `resume` | 暂停 / 恢复 |
+| `bun run jingmei stats` | 运行状态与本次运行时长、累计运行时长与启动次数、回复数、消息 / 群 / 成员 / 话题 / 祝福总数 |
+
+- **暂停**：bot 保持在线并照常把消息存进数据库，但不回复、不点表情、不更新成员记忆和话题、不发祝福，也不调用任何模型。对正在运行的 bot 立即生效，不用重启；重启后仍保持暂停，直到 `resume`。暂停期间的消息不会进入角色的会话上下文；当天到期的祝福在恢复后补发。要真正停掉进程，用 `systemctl --user stop pi-discord-agent` 或 Ctrl+C。
+- **运行状态**：bot 每分钟写一次心跳，超过两分钟没有心跳即视为已停止（包括崩溃）。回复数从引入这个命令的版本开始统计；消息等数据统计全部历史。
 
 ## 配置参考
 

@@ -67,6 +67,8 @@ export function openDatabase(dataDir: string): Database {
 	}
 	const db = new Database(path);
 	chmodSync(path, 0o600);
+	// The operator CLI opens the same file while the bot runs; wait out its brief locks instead of failing.
+	db.exec("PRAGMA busy_timeout = 5000");
 	migrateLegacyTables(db);
 	return db;
 }
