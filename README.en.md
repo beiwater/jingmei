@@ -97,6 +97,8 @@ Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
 | `timeZone` | IANA time zone, e.g. `Australia/Sydney` |
 | `calendar` | `china` (New Year's Day, Spring Festival, Labour Day, Dragon Boat, Mid-Autumn, National Day), `australia` (New Year's Day, Australia Day, Good Friday, Easter Sunday, ANZAC Day, Christmas, Boxing Day) or `both` |
 
+Lunar holidays are calculated from the Gregorian date in the target time zone, independently of the operating system; leap months do not repeat greetings.
+
 Birthdays are greeted only in groups/servers with a greeting target; February 29 birthdays are greeted on February 28 in common years.
 
 ## Discord setup

@@ -100,6 +100,42 @@ describe("celebration scheduler", () => {
 		jan1.db.close();
 	});
 
+	test("uses the target civil date for Lunar New Year and never sends on adjacent days", async () => {
+		const h = harness([target({ calendar: "china" })]);
+		const scheduler = h.create();
+		// HKO's 2027 conversion table puts Lunar New Year on February 6.
+		// At 09:00 Sydney time it is still February 5 in UTC.
+		await scheduler.tick(new Date("2027-02-04T22:00:00Z"));
+		expect(h.sends).toHaveLength(0);
+		await scheduler.tick(new Date("2027-02-05T22:00:00Z"));
+		expect(h.sends).toHaveLength(1);
+		expect(h.sends[0]?.content).toContain("春节");
+		await scheduler.tick(new Date("2027-02-06T22:00:00Z"));
+		expect(h.sends).toHaveLength(1);
+		h.db.close();
+	});
+
+	test("recognizes Dragon Boat and Mid-Autumn festivals and excludes leap months", async () => {
+		const h = harness([target({ calendar: "china" })]);
+		const scheduler = h.create();
+		for (const [date, holiday] of [
+			["2026-06-19", "端午节"],
+			["2026-09-25", "中秋节"],
+			["2027-06-09", "端午节"],
+			["2027-09-15", "中秋节"],
+			["2009-05-28", "端午节"],
+		] as const) {
+			const count = h.sends.length;
+			await scheduler.tick(new Date(`${date}T01:00:00Z`));
+			expect(h.sends).toHaveLength(count + 1);
+			expect(h.sends[count]?.content).toContain(holiday);
+		}
+		// June 27, 2009 is leap fifth month, day 5, not another Dragon Boat Festival.
+		await scheduler.tick(new Date("2009-06-27T01:00:00Z"));
+		expect(h.sends).toHaveLength(5);
+		h.db.close();
+	});
+
 	test("recognizes China Labour Day and Australian Boxing Day", async () => {
 		const h = harness([target()]);
 		const scheduler = h.create();

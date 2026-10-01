@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { Solar } from "lunar-typescript";
 import { platformOf } from "./ids.ts";
 import type { PersonaAccount, Platform, PlatformTransport, SpaceId } from "./types.ts";
 
@@ -48,18 +49,6 @@ function dateTimeInZone(date: Date, timeZone: string): LocalDateTime {
 	return { year: value("year"), month: value("month"), day: value("day"), hour: value("hour") };
 }
 
-function chineseCalendarDay(date: Date, timeZone: string): { month: string; day: number } {
-	const parts = new Intl.DateTimeFormat("en-u-ca-chinese", {
-		timeZone,
-		month: "long",
-		day: "numeric",
-	}).formatToParts(date);
-	return {
-		month: parts.find((part) => part.type === "month")?.value ?? "",
-		day: Number(parts.find((part) => part.type === "day")?.value),
-	};
-}
-
 /** Gregorian computus: returns the Western Easter Sunday date for the given year. */
 function easterSunday(year: number): { month: number; day: number } {
 	const a = year % 19;
@@ -78,22 +67,17 @@ function easterSunday(year: number): { month: number; day: number } {
 	return { month: Math.floor(value / 31), day: (value % 31) + 1 };
 }
 
-function holidayOn(
-	date: Date,
-	local: LocalDateTime,
-	timeZone: string,
-	calendar: CelebrationTarget["calendar"],
-): string[] {
+function holidayOn(local: LocalDateTime, calendar: CelebrationTarget["calendar"]): string[] {
 	const found: string[] = [];
 	if (calendar === "china" || calendar === "both") {
 		if (local.month === 1 && local.day === 1) found.push("元旦");
 		if (local.month === 5 && local.day === 1) found.push("劳动节");
-		const lunar = chineseCalendarDay(date, timeZone);
-		// Intl marks leap months with a distinct month name (for example "Fifth Monthbis").
-		// Exact month names deliberately exclude those leap months.
-		if (lunar.month === "First Month" && lunar.day === 1) found.push("春节");
-		if (lunar.month === "Fifth Month" && lunar.day === 5) found.push("端午节");
-		if (lunar.month === "Eighth Month" && lunar.day === 15) found.push("中秋节");
+		// Use the target's civil date and a deterministic calendar, independent of host ICU.
+		const lunar = Solar.fromYmd(local.year, local.month, local.day).getLunar();
+		// Leap months are negative, so these comparisons exclude them.
+		if (lunar.getMonth() === 1 && lunar.getDay() === 1) found.push("春节");
+		if (lunar.getMonth() === 5 && lunar.getDay() === 5) found.push("端午节");
+		if (lunar.getMonth() === 8 && lunar.getDay() === 15) found.push("中秋节");
 		if (local.month === 10 && local.day === 1) found.push("国庆节");
 	}
 	if (calendar === "australia" || calendar === "both") {
@@ -204,7 +188,7 @@ export class CelebrationScheduler {
 				const content = birthdayGreeting(transport.formatMention(account));
 				await this.sendOnce(target, localDate, `birthday:${member.userId}`, content, now, [account]);
 			}
-			for (const holiday of holidayOn(now, local, target.timeZone, target.calendar)) {
+			for (const holiday of holidayOn(local, target.calendar)) {
 				await this.sendOnce(
 					target,
 					localDate,
