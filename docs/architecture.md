@@ -130,7 +130,7 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 
 共享决策客户端：配置 `jev.apiKeyEnv` 时创建远程客户端（`jev.endpoint` 默认 TypeSafe）；存在 `localJev` 时创建进程内 `notjev` 包装器，调用支持 logprobs 的 OpenAI-compatible LLM。两者都有则 `withFallback`：任何远程方法错误记 `decision/jev_fallback`（方法、错误类别），再在本地重试一次。仅有其一就直接使用。`localJev` 未配置且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash`，显式配置完全覆盖默认，允许无鉴权本地服务。显式命名但缺失的 key 仍在配置期报错。秒回表情与记忆排序必须有显式 `jev` 段落；事件可单独使用包装器，没有任何决策来源却启用 `events` 是配置错误。
 
-本地包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`），要求 LLM 返回 logprobs；缺失 logprobs 记为 `invalid_response` 调用失败，模型弃答时取概率最大选项（argmax）。它不另起 HTTP 服务，通过 `notjev` 将 OpenAI-compatible LLM 输出转换为 System One wire 答案。
+本地包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`），要求 LLM 返回 logprobs；缺失 logprobs 记为 `invalid_response` 调用失败，模型弃答时取概率最大选项（argmax）。它不另起 HTTP 服务，也不伪造 System One HTTP 往返：远程与本地客户端共用同一套问题构造和答案校验（`parseAnswers`），只是传输层不同——远程走 HTTP，本地在进程内直接调用 `notjev`。
 
 ```mermaid
 flowchart TD

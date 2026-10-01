@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { JevError } from "../src/decision/jev.ts";
-import { createLocalJevClient, createLocalSystemOneFetch } from "../src/decision/local-jev.ts";
+import { createLocalJevClient } from "../src/decision/local-jev.ts";
 
 function completion(probabilities: readonly number[]) {
 	const letters = probabilities.map((probability, index) => ({
@@ -73,35 +73,23 @@ describe("local Jev over OpenAI chat-completions", () => {
 		}
 	});
 
-	test("supports versioned base URLs and turns abstention with observed probabilities into argmax", async () => {
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch(request) {
-				if (new URL(request.url).pathname !== "/v1/chat/completions") return new Response(null, { status: 404 });
-				return completion([0.45, 0.55]);
-			},
-		});
-		try {
-			const adapter = createLocalSystemOneFetch({ baseUrl: `${server.url}v1`, model: "local" });
-			const response = await adapter("http://localhost/v1/systemone", {
-				method: "POST",
-				body: JSON.stringify({
-					state: { message: "新话题" },
-					theta: 0.5,
-					questions: {
-						event: { type: "choice", instructions: "哪个话题？", criteria: { e1: "爬山", new: "新话题" } },
-					},
-				}),
+	test("supports versioned base URLs and chooses argmax with menu-order ties", async () => {
+		for (const [probabilities, choice] of [
+			[[0.45, 0.55], "new"],
+			[[0.5, 0.5], "e1"],
+		] as const) {
+			const upstream = (async (input: string | URL | Request) => {
+				if (String(input) !== "http://localhost:9999/v1/chat/completions") {
+					return new Response(null, { status: 404 });
+				}
+				return completion(probabilities);
+			}) as typeof fetch;
+			const client = createLocalJevClient({ baseUrl: "http://localhost:9999/v1/", model: "local" }, upstream);
+			const decision = await client.chooseEvent({
+				message: "新话题",
+				options: [{ id: "e1", description: "爬山" }],
 			});
-			expect(response.status).toBe(200);
-			const payload = (await response.json()) as {
-				answers: { event: { choice: string; notjev: { undecided: boolean } } };
-			};
-			expect(payload.answers.event.choice).toBe("new");
-			expect(payload.answers.event.notjev.undecided).toBe(true);
-		} finally {
-			await server.stop(true);
+			expect(decision.choice).toBe(choice);
 		}
 	});
 
@@ -127,18 +115,21 @@ describe("local Jev over OpenAI chat-completions", () => {
 		}
 	});
 
-	test("refuses invalid wire questions before contacting the upstream", async () => {
+	test("refuses an unsupported choice menu before contacting the upstream", async () => {
 		let calls = 0;
 		const upstream = (async () => {
 			calls++;
 			return completion([0.5, 0.5]);
 		}) as unknown as typeof fetch;
-		const adapter = createLocalSystemOneFetch({ baseUrl: "http://localhost:9999", model: "local" }, upstream);
-		const response = await adapter("http://localhost/v1/systemone", {
-			method: "POST",
-			body: JSON.stringify({ state: "q", questions: { bad: { type: "not-a-question", instructions: "q" } } }),
-		});
-		expect(response.status).toBe(422);
+		const client = createLocalJevClient({ baseUrl: "http://localhost:9999", model: "local" }, upstream);
+		const error = await client
+			.chooseEvent({
+				message: "q",
+				options: Array.from({ length: 26 }, (_, index) => ({ id: `e${index}`, description: "topic" })),
+			})
+			.catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(JevError);
+		expect((error as JevError).code).toBe("invalid_response");
 		expect(calls).toBe(0);
 	});
 

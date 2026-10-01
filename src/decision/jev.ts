@@ -140,10 +140,7 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 	const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	const model = config.model || "jev-latest";
 
-	async function evaluate(
-		state: unknown,
-		questions: Readonly<Record<string, Question>>,
-	): Promise<Record<string, Answer>> {
+	return createJevClientWithTransport(async (state, questions) => {
 		const signal = AbortSignal.timeout(timeoutMs);
 		let bytes: Uint8Array | null;
 		try {
@@ -173,7 +170,15 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 		} catch {
 			throw new JevError("invalid_response");
 		}
-		return parseAnswers(payload, questions);
+		return payload;
+	});
+}
+
+export function createJevClientWithTransport(
+	transport: (state: unknown, questions: Readonly<Record<string, Question>>) => Promise<unknown>,
+): JevClient {
+	async function evaluate(state: unknown, questions: Readonly<Record<string, Question>>) {
+		return parseAnswers(await transport(state, questions), questions);
 	}
 
 	return {
