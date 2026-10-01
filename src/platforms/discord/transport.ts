@@ -40,9 +40,6 @@ export interface DiscordCommand {
 export interface DiscordTransportOptions {
 	token: string;
 	applicationId: Snowflake;
-	intents?: number;
-	apiBase?: string;
-	apiVersion?: string;
 	gatewayUrl?: string;
 	allowedChannelIds?: Iterable<Snowflake>;
 	fetch?: typeof fetch;
@@ -59,7 +56,7 @@ const DEFAULT_ALLOWED_MENTIONS = { parse: [] as string[], replied_user: false };
 const GUILDS = 1 << 0;
 const GUILD_MESSAGES = 1 << 9;
 const MESSAGE_CONTENT = 1 << 15;
-export const DEFAULT_INTENTS = GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT;
+const DEFAULT_INTENTS = GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT;
 
 export function isSnowflake(value: unknown): value is Snowflake {
 	return typeof value === "string" && /^\d{17,20}$/.test(value);
@@ -93,8 +90,6 @@ export function splitDiscordMessage(content: string, maxLength = MAX_MESSAGE_LEN
 
 export class DiscordTransport {
 	private readonly fetchImpl: typeof fetch;
-	private readonly apiBase: string;
-	private readonly version: string;
 	private readonly wsFactory: (url: string) => WebSocket;
 	private socket?: WebSocket;
 	private sessionId?: string;
@@ -113,15 +108,10 @@ export class DiscordTransport {
 		if (!options.token) throw new Error("Discord bot token is required");
 		if (!isSnowflake(options.applicationId)) throw new Error("applicationId must be a Discord Snowflake string");
 		this.fetchImpl = options.fetch ?? fetch;
-		this.apiBase = (options.apiBase ?? API_BASE).replace(/\/$/, "");
-		this.version = options.apiVersion ?? API_VERSION;
 		this.wsFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
 		this.allowedChannels = options.allowedChannelIds ? new Set(options.allowedChannelIds) : undefined;
 	}
 
-	private get apiRoot() {
-		return `${this.apiBase}/v${this.version}`;
-	}
 	getParentChannelId(channelId: Snowflake): Snowflake | undefined {
 		return this.threadParents.get(channelId);
 	}
@@ -137,7 +127,7 @@ export class DiscordTransport {
 		headers.set("Authorization", `Bot ${this.options.token}`);
 		if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
 		for (let attempt = 0; ; attempt++) {
-			const response = await this.fetchImpl(`${this.apiRoot}${path}`, { ...init, headers });
+			const response = await this.fetchImpl(`${API_BASE}/v${API_VERSION}${path}`, { ...init, headers });
 			if (response.status === 429 && attempt < 4) {
 				const retryHeader = response.headers.get("Retry-After");
 				let retryAfter = retryHeader === null ? Number.NaN : Number(retryHeader);
@@ -163,7 +153,7 @@ export class DiscordTransport {
 		options: {
 			replyTo?: Snowflake;
 			allowedMentions?: { parse?: string[]; users?: Snowflake[]; roles?: Snowflake[]; replied_user?: boolean };
-			attachments?: Array<{ name: string; data: Blob | Uint8Array; contentType?: string }>;
+			attachments?: readonly OutboundAttachment[];
 		} = {},
 	): Promise<DiscordMessage[]> {
 		this.assertSnowflake(channelId, "channelId");
@@ -184,10 +174,7 @@ export class DiscordTransport {
 				const form = new FormData();
 				form.set("payload_json", JSON.stringify(body));
 				options.attachments.forEach((file, index) => {
-					const blob =
-						file.data instanceof Blob
-							? file.data
-							: new Blob([new Uint8Array(file.data).buffer as ArrayBuffer], { type: file.contentType });
+					const blob = new Blob([file.data as Uint8Array<ArrayBuffer>], { type: file.contentType });
 					form.append(`files[${index}]`, blob, file.name);
 				});
 				message = await this.request(`/channels/${channelId}/messages`, { method: "POST", body: form });
@@ -214,10 +201,9 @@ export class DiscordTransport {
 		await this.request(`/channels/${channelId}/typing`, { method: "POST" });
 	}
 
-	async registerCommands(commands: DiscordCommand[], guildId?: Snowflake): Promise<unknown[]> {
-		if (guildId) this.assertSnowflake(guildId, "guildId");
-		const scope = guildId ? `/guilds/${guildId}` : "";
-		return this.request(`/applications/${this.options.applicationId}${scope}/commands`, {
+	async registerCommands(commands: DiscordCommand[], guildId: Snowflake): Promise<unknown[]> {
+		this.assertSnowflake(guildId, "guildId");
+		return this.request(`/applications/${this.options.applicationId}/guilds/${guildId}/commands`, {
 			method: "PUT",
 			body: JSON.stringify(commands),
 		});
@@ -226,28 +212,25 @@ export class DiscordTransport {
 	async respondToInteraction(
 		interaction: DiscordInteraction,
 		content: string,
-		options: {
-			ephemeral?: boolean;
-			allowedMentions?: { parse?: string[]; users?: Snowflake[]; roles?: Snowflake[]; replied_user?: boolean };
-		} = {},
+		options: { ephemeral?: boolean } = {},
 	): Promise<void> {
 		const flags = options.ephemeral ? 64 : 0;
+		const [first = "", ...rest] = splitDiscordMessage(content);
 		await this.request(`/interactions/${interaction.id}/${interaction.token}/callback`, {
 			method: "POST",
 			body: JSON.stringify({
 				type: 4,
 				data: {
-					content: splitDiscordMessage(content)[0] ?? "",
+					content: first,
 					flags,
-					allowed_mentions: options.allowedMentions ?? DEFAULT_ALLOWED_MENTIONS,
+					allowed_mentions: DEFAULT_ALLOWED_MENTIONS,
 				},
 			}),
 		});
-		const rest = splitDiscordMessage(content).slice(1);
 		for (const part of rest) {
 			await this.request(`/webhooks/${interaction.application_id}/${interaction.token}`, {
 				method: "POST",
-				body: JSON.stringify({ content: part, allowed_mentions: options.allowedMentions ?? DEFAULT_ALLOWED_MENTIONS }),
+				body: JSON.stringify({ content: part, allowed_mentions: DEFAULT_ALLOWED_MENTIONS }),
 			});
 		}
 	}
@@ -299,7 +282,7 @@ export class DiscordTransport {
 				url = response.url;
 			}
 			const wsUrl = new URL(url);
-			wsUrl.searchParams.set("v", this.version);
+			wsUrl.searchParams.set("v", API_VERSION);
 			wsUrl.searchParams.set("encoding", "json");
 			const socket = this.wsFactory(wsUrl.toString());
 			this.socket = socket;
@@ -370,7 +353,7 @@ export class DiscordTransport {
 						? { token: this.options.token, session_id: this.sessionId, seq: this.sequence }
 						: {
 								token: this.options.token,
-								intents: this.options.intents ?? DEFAULT_INTENTS,
+								intents: DEFAULT_INTENTS,
 								properties: {
 									os: process.platform,
 									browser: "jingmei",
@@ -475,7 +458,7 @@ export const DISCORD_QUICK_REACTIONS: Readonly<Record<string, string>> = {
 	"🤔": "疑问、不确定",
 };
 
-export const DISCORD_PROMPT_LINES: readonly string[] = [
+const DISCORD_PROMPT_LINES: readonly string[] = [
 	"- Discord 消息正文支持 Markdown 子集：**粗体**、*斜体*、__下划线__、~~删除线~~、## 小标题、- 列表、> 引用、`行内代码`、三反引号代码块、[来源](https://example.com) 链接，以及 ||剧透||。按内容选择，普通聊天保持自然，不要每句都加格式。",
 	"- 题解或较长说明可用少量小标题、列表和粗体突出结构；引用网页时给可点击来源链接。标题、列表、引用符号后必须加空格；代码块要闭合。中英文混排需要斜体时优先用 *文字*。",
 	"- Discord 单条消息正文上限 2000 字符，格式符号也计入；长答用清楚的短段落组织，避免超长代码块跨消息拆开。",
@@ -507,11 +490,7 @@ export class DiscordPlatformTransport implements PlatformTransport {
 		const messages = await this.client(input.personaId).sendMessage(input.channelId, input.content, {
 			replyTo: input.replyToMessageId,
 			allowedMentions: users.length ? { ...DEFAULT_ALLOWED_MENTIONS, users } : DEFAULT_ALLOWED_MENTIONS,
-			attachments: input.attachments?.map((file) => ({
-				name: file.name,
-				data: file.data,
-				contentType: file.contentType,
-			})),
+			attachments: input.attachments,
 		});
 		const first = messages[0];
 		if (!first) throw new Error("Discord send produced no message");

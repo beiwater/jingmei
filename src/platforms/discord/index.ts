@@ -1,6 +1,12 @@
 /** Discord adapter: one Gateway client per persona token, normalized into the shared conversation core. */
 
 import type { AppConfig } from "../../config.ts";
+import {
+	contextCommandError,
+	memoryCommandError,
+	parseBirthdayDate,
+	runContextCommand,
+} from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import {
 	type ConversationCore,
@@ -83,7 +89,7 @@ function attachmentPlaceholder(contentType: string | undefined): string {
 }
 
 /** Normalize one Discord message; null when outside the allow-list. Images/video frames are capped per message. */
-export async function normalizeDiscordMessage(
+async function normalizeDiscordMessage(
 	message: DiscordMessage,
 	allowedGuilds: ReadonlyMap<string, ReadonlySet<string>>,
 	parentChannelId?: string,
@@ -108,7 +114,7 @@ export async function normalizeDiscordMessage(
 		if (type.startsWith("image/")) {
 			if (images.length >= MAX_IMAGES_PER_MESSAGE) continue;
 			const downloaded = await downloadDiscordImage(ref);
-			const prepared = downloaded.ok ? await prepareImage(downloaded.bytes, downloaded.mimeType) : null;
+			const prepared = downloaded ? await prepareImage(downloaded.bytes, downloaded.mimeType) : null;
 			if (prepared?.ok) images.push(prepared.image);
 			else placeholders.push("[图片]");
 			continue;
@@ -146,11 +152,10 @@ async function videoFrames(
 	limit: number,
 ): Promise<InboundImage[]> {
 	const downloaded = await downloadDiscordVideo(ref);
-	if (!downloaded.ok) return [];
+	if (!downloaded) return [];
 	const extension = /\.([A-Za-z0-9]{1,8})$/.exec(ref.filename ?? "")?.[1] ?? "mp4";
 	const extracted = await extractVideoFrames({
-		sourcePath: null,
-		sourceBytes: downloaded.bytes,
+		sourceBytes: downloaded,
 		sourceExtension: extension,
 	});
 	if (!extracted.ok) return [];
@@ -284,13 +289,12 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 					await reply("已清除生日提醒。");
 					return;
 				}
-				const match = /^(\d{1,2})-(\d{1,2})$/.exec(date);
-				if (!match) {
+				const birthday = parseBirthdayDate(date);
+				if (!birthday) {
 					await reply("请输入 MM-DD，例如 09-25；或输入 clear 清除。");
 					return;
 				}
-				const month = Number(match[1]);
-				const day = Number(match[2]);
+				const { month, day } = birthday;
 				memberMemory.setBirthday(space, author.id, month, day, channelId, interaction.id);
 				const celebrationChannel = config.celebrations.find((target) => target.spaceId === space)?.channelId;
 				await reply(
@@ -299,9 +303,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			} catch (error) {
 				log.error("discord", "memory_command_failed", { error_category: errorCategory(error) });
 				await reply(
-					error instanceof Error && error.message === "memory_opted_out"
-						? "你已关闭长期记忆。若要重新保存生日，请先使用 `/memory action:enable`。"
-						: "记忆操作失败；请检查日期是否有效，或稍后重试。",
+					memoryCommandError(error, "你已关闭长期记忆。若要重新保存生日，请先使用 `/memory action:enable`。"),
 				);
 			}
 			return;
@@ -313,33 +315,18 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			}
 			await client.deferInteraction(interaction, true);
 			try {
-				if (name === "context") {
-					const status = await deps.getCore().getContextStatus(persona.id, "discord", space, channelId, author.id);
-					await client.followUpInteraction(
-						interaction,
-						`当前频道上下文：${status.tokens === null ? "暂时无法估算" : `${status.tokens.toLocaleString()} tokens`} / ${status.contextWindow.toLocaleString()} tokens。自动压缩约在 ${status.compactionAtTokens.toLocaleString()} tokens 后触发；也可用 /compact 手动压缩。`,
-						true,
-					);
-				} else {
-					const result = await deps.getCore().compactContext(persona.id, "discord", space, channelId, author.id);
-					await client.followUpInteraction(
-						interaction,
-						`已压缩本频道上下文。压缩前约 ${result.tokensBefore.toLocaleString()} tokens。`,
-						true,
-					);
-				}
+				const content = await runContextCommand(
+					deps.getCore(),
+					name,
+					[persona.id, "discord", space, channelId, author.id],
+					{ context: "当前频道上下文", scope: "本频道" },
+				);
+				await client.followUpInteraction(interaction, content, true);
 			} catch (error) {
 				log.error("discord", "admin_command_failed", { persona_id: persona.id, error_category: errorCategory(error) });
-				const reason = error instanceof Error ? error.message : "";
 				await client.followUpInteraction(
 					interaction,
-					reason === "not_persona_admin"
-						? "只有管理员可以使用这个命令。"
-						: reason === "context_busy"
-							? "本频道正在处理消息，稍后再试。"
-							: reason === "Already compacted" || reason.startsWith("Nothing to compact")
-								? "本频道目前没有需要压缩的上下文。"
-								: "上下文管理失败，请稍后再试。",
+					contextCommandError(error, "本频道") ?? "上下文管理失败，请稍后再试。",
 					true,
 				);
 			}

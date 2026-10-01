@@ -2,6 +2,7 @@
 // redelivers the unconfirmed tail, and the core's `INSERT OR IGNORE` on message ids dedupes it.
 // Reconnects with backoff on network/API errors; honors retry_after.
 
+import { setTimeout } from "node:timers/promises";
 import { errorCategory, log } from "../../observability/log.ts";
 import { type BotApi, TelegramApiError } from "./api.ts";
 
@@ -80,16 +81,11 @@ export class Poller {
 	}
 
 	/** Backoff that aborts early on stop() so shutdown never waits out a sleep. */
-	private sleep(ms: number): Promise<void> {
-		if (this.abort.signal.aborted) return Promise.resolve();
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const finish = () => {
-			clearTimeout(timer);
-			this.abort.signal.removeEventListener("abort", finish);
-			resolve();
-		};
-		const timer = setTimeout(finish, ms);
-		this.abort.signal.addEventListener("abort", finish, { once: true });
-		return promise;
+	private async sleep(ms: number): Promise<void> {
+		try {
+			await setTimeout(ms, undefined, { signal: this.abort.signal });
+		} catch (error) {
+			if (!(this.abort.signal.aborted && error instanceof Error && error.name === "AbortError")) throw error;
+		}
 	}
 }

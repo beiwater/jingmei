@@ -14,7 +14,7 @@ describe("Discord image attachments", () => {
 		const result = await downloadDiscordImage(base, {
 			fetchImpl: async () => new Response(png, { headers: { "content-length": String(png.length) } }),
 		});
-		expect(result).toEqual({ ok: true, bytes: png, mimeType: "image/png" });
+		expect(result).toEqual({ bytes: png, mimeType: "image/png" });
 	});
 
 	test("prepares a real small PNG into Pi image content", async () => {
@@ -39,30 +39,27 @@ describe("Discord image attachments", () => {
 		};
 		expect(
 			await downloadDiscordImage({ ...base, url: "http://cdn.discordapp.com/a.png" }, { fetchImpl: fetchNever }),
-		).toMatchObject({ ok: false, reason: "download_failed" });
+		).toBeNull();
 		expect(
 			await downloadDiscordImage({ ...base, url: "https://example.org/a.png" }, { fetchImpl: fetchNever }),
-		).toMatchObject({ ok: false, reason: "download_failed" });
+		).toBeNull();
 		expect(
 			await downloadDiscordImage({ ...base, contentType: "application/pdf" }, { fetchImpl: fetchNever }),
-		).toMatchObject({ ok: false, reason: "unsupported_type" });
-		expect(await downloadDiscordImage({ ...base, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toMatchObject({
-			ok: false,
-			reason: "oversize",
-		});
+		).toBeNull();
+		expect(await downloadDiscordImage({ ...base, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toBeNull();
 		expect(
 			await downloadDiscordImage(base, {
 				maxBytes: 10,
 				fetchImpl: async () => new Response(new Uint8Array(11)),
 			}),
-		).toMatchObject({ ok: false, reason: "oversize" });
+		).toBeNull();
 	});
 
 	test("rejects HTML or malformed bytes even from the Discord CDN", async () => {
 		const result = await downloadDiscordImage(base, {
 			fetchImpl: async () => new Response("<html>not an image</html>", { headers: { "content-type": "image/png" } }),
 		});
-		expect(result).toEqual({ ok: false, reason: "invalid_image" });
+		expect(result).toBeNull();
 	});
 
 	test("rejects an oversize original when resizing fails", async () => {
@@ -81,15 +78,10 @@ describe("Discord image attachments", () => {
 		const video = { url: "https://cdn.discordapp.com/attachments/1/2/clip.mp4", contentType: "video/mp4" };
 		expect(
 			await downloadDiscordVideo({ ...video, url: "https://example.org/clip.mp4" }, { fetchImpl: fetchNever }),
-		).toMatchObject({ ok: false, reason: "download_failed" });
-		expect(await downloadDiscordVideo({ ...video, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toMatchObject(
-			{
-				ok: false,
-				reason: "oversize",
-			},
-		);
+		).toBeNull();
+		expect(await downloadDiscordVideo({ ...video, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toBeNull();
 		expect(
 			await downloadDiscordVideo(video, { maxBytes: 10, fetchImpl: async () => new Response(new Uint8Array(11)) }),
-		).toMatchObject({ ok: false, reason: "oversize" });
+		).toBeNull();
 	});
 });

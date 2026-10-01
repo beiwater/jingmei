@@ -2,13 +2,13 @@
 
 import { readBoundedBody } from "../../net/read-bounded-body.ts";
 
-export const DISCORD_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
-export const DISCORD_VIDEO_MAX_BYTES = 20 * 1024 * 1024;
-export const DISCORD_ATTACHMENT_HOSTS = new Set([
-	"cdn.discordapp.com",
-	"media.discordapp.net",
-	"attachments.discordapp.net",
-]);
+const DISCORD_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+const DISCORD_VIDEO_MAX_BYTES = 20 * 1024 * 1024;
+const DISCORD_ATTACHMENT_HOSTS: Readonly<Record<string, true>> = {
+	"cdn.discordapp.com": true,
+	"media.discordapp.net": true,
+	"attachments.discordapp.net": true,
+};
 
 export type DiscordImageMime = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
 
@@ -18,12 +18,6 @@ export interface DiscordAttachmentRef {
 	contentType?: string | null;
 	size?: number;
 }
-
-export type DownloadFailure = "unsupported_type" | "oversize" | "download_failed" | "invalid_image";
-
-export type DiscordImageDownloadResult =
-	| { ok: true; bytes: Uint8Array; mimeType: DiscordImageMime }
-	| { ok: false; reason: DownloadFailure };
 
 export interface DownloadDiscordOptions {
 	signal?: AbortSignal;
@@ -49,33 +43,31 @@ async function downloadFromCdn(
 	maxBytes: number,
 	accept: string,
 	options: DownloadDiscordOptions,
-): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; reason: DownloadFailure }> {
-	if ((attachment.size ?? 0) > maxBytes) return { ok: false, reason: "oversize" };
+): Promise<Uint8Array | null> {
+	if ((attachment.size ?? 0) > maxBytes) return null;
 	let url: URL;
 	try {
 		url = new URL(attachment.url);
 	} catch {
-		return { ok: false, reason: "download_failed" };
+		return null;
 	}
 	if (
 		url.protocol !== "https:" ||
-		!DISCORD_ATTACHMENT_HOSTS.has(url.hostname.toLowerCase()) ||
+		!Object.hasOwn(DISCORD_ATTACHMENT_HOSTS, url.hostname.toLowerCase()) ||
 		url.username ||
 		url.password
 	)
-		return { ok: false, reason: "download_failed" };
+		return null;
 	try {
 		const response = await (options.fetchImpl ?? fetch)(url, {
 			signal: options.signal,
 			redirect: "error",
 			headers: { accept },
 		});
-		if (!response.ok) return { ok: false, reason: "download_failed" };
-		const bytes = await readBoundedBody(response, maxBytes);
-		if (!bytes) return { ok: false, reason: "oversize" };
-		return { ok: true, bytes };
-	} catch (error) {
-		return { ok: false, reason: error instanceof RangeError ? "oversize" : "download_failed" };
+		if (!response.ok) return null;
+		return await readBoundedBody(response, maxBytes);
+	} catch {
+		return null;
 	}
 }
 
@@ -83,26 +75,24 @@ async function downloadFromCdn(
 export async function downloadDiscordImage(
 	attachment: DiscordAttachmentRef,
 	options: DownloadDiscordOptions = {},
-): Promise<DiscordImageDownloadResult> {
-	if (attachment.contentType && !attachment.contentType.toLowerCase().startsWith("image/"))
-		return { ok: false, reason: "unsupported_type" };
+): Promise<{ bytes: Uint8Array; mimeType: DiscordImageMime } | null> {
+	if (attachment.contentType && !attachment.contentType.toLowerCase().startsWith("image/")) return null;
 	const downloaded = await downloadFromCdn(
 		attachment,
 		options.maxBytes ?? DISCORD_IMAGE_MAX_BYTES,
 		"image/png,image/jpeg,image/webp,image/gif",
 		options,
 	);
-	if (!downloaded.ok) return downloaded;
-	const mimeType = detectImageMime(downloaded.bytes);
-	if (!mimeType) return { ok: false, reason: "invalid_image" };
-	return { ok: true, bytes: downloaded.bytes, mimeType };
+	if (!downloaded) return null;
+	const mimeType = detectImageMime(downloaded);
+	return mimeType ? { bytes: downloaded, mimeType } : null;
 }
 
 /** Download a Discord CDN video attachment (bytes are only handed to ffprobe/ffmpeg via argv, never a shell). */
 export async function downloadDiscordVideo(
 	attachment: DiscordAttachmentRef,
 	options: DownloadDiscordOptions = {},
-): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; reason: DownloadFailure }> {
-	if (!attachment.contentType?.toLowerCase().startsWith("video/")) return { ok: false, reason: "unsupported_type" };
+): Promise<Uint8Array | null> {
+	if (!attachment.contentType?.toLowerCase().startsWith("video/")) return null;
 	return downloadFromCdn(attachment, options.maxBytes ?? DISCORD_VIDEO_MAX_BYTES, "video/*", options);
 }

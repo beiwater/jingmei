@@ -8,7 +8,6 @@ import type { extractVideoFrames } from "../../media/video-frames.ts";
 
 /** Bot API `getFile` refuses files above 20 MB; do not even ask for larger ones. */
 export const MAX_TELEGRAM_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_IMAGES_PER_MESSAGE = 4;
 
 export interface TelegramEntity {
 	type: string;
@@ -63,7 +62,6 @@ export function isTelegramMessage(value: unknown): value is TelegramMessage {
 }
 
 export interface TelegramNormalizeDeps {
-	allowedChatIds: ReadonlySet<string>;
 	/** Lower-cased bot username (without `@`) → bot user id, for every persona with a Telegram account. */
 	botUserIdsByUsername: ReadonlyMap<string, string>;
 	/** Bounded download through the receiving bot's token (file ids are per bot); null when unavailable. */
@@ -78,7 +76,7 @@ function senderName(sender: TelegramSender): string {
 }
 
 /** Raw user ids addressed by `@username` mentions of known bots and by `text_mention` entities. */
-export function mentionedUserIds(
+function mentionedUserIds(
 	text: string,
 	entities: readonly TelegramEntity[],
 	botUserIdsByUsername: ReadonlyMap<string, string>,
@@ -116,7 +114,6 @@ async function videoFrames(deps: TelegramNormalizeDeps, file: TelegramFileRef): 
 	if (!downloaded) return [];
 	const extension = /\.([A-Za-z0-9]{1,8})$/.exec(downloaded.filePath)?.[1] ?? file.mime_type?.split("/")[1] ?? "mp4";
 	const result = await deps.extractVideoFrames({
-		sourcePath: null,
 		sourceBytes: downloaded.bytes,
 		sourceExtension: extension,
 	});
@@ -162,16 +159,15 @@ async function collectMedia(
 	} else if (message.document) {
 		markers.push("[文件]");
 	}
-	return { markers, images: images.slice(0, MAX_IMAGES_PER_MESSAGE) };
+	return { markers, images };
 }
 
-/** Null for chats outside the allow-list, sender-less service updates, and messages with nothing to say. */
+/** Null for sender-less service updates and messages with nothing to say. */
 export async function normalizeTelegramMessage(
 	message: TelegramMessage,
 	deps: TelegramNormalizeDeps,
 ): Promise<InboundMessage | null> {
 	const chatId = String(message.chat.id);
-	if (!deps.allowedChatIds.has(chatId)) return null;
 	// Anonymous admins and linked channels post as `sender_chat`; `from` is then a placeholder bot.
 	const sender = message.sender_chat ?? message.from;
 	if (!sender) return null;

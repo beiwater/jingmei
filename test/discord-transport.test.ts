@@ -165,11 +165,13 @@ describe("Discord transport primitives", () => {
 			}
 		}
 		const sockets: FakeSocket[] = [];
+		const socketUrls: string[] = [];
 		const transport = new DiscordTransport({
 			token: "test-only",
 			applicationId: "123456789012345678",
 			gatewayUrl: "wss://gateway.discord.gg",
-			webSocketFactory: () => {
+			webSocketFactory: (url) => {
+				socketUrls.push(url);
 				const socket = new FakeSocket();
 				sockets.push(socket);
 				return socket as unknown as WebSocket;
@@ -179,6 +181,7 @@ describe("Discord transport primitives", () => {
 		await transport.start();
 		sockets[0]?.open();
 		sockets[0]?.message({ op: 10, d: { heartbeat_interval: 1000 } });
+		expect(new URL(socketUrls[0]!).searchParams.get("v")).toBe("10");
 		expect(sockets[0]?.sent[0]).toMatchObject({ op: 2, d: { token: "test-only" } });
 		sockets[0]?.message({
 			op: 0,

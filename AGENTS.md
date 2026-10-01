@@ -13,7 +13,7 @@
 
 - `src/main.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）
 - `src/config.ts` — `jingmei.config.json` + `.env` 的唯一读取与校验
-- `src/core/` — 对话核心：`conversation.ts`（主流程）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`soul.ts`、`celebrations.ts`、`db.ts`、`model-runtime.ts`、`types.ts`
+- `src/core/` — 对话核心：`conversation.ts`（主流程）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`member-commands.ts`（两平台共用的生日解析与 context/compact 命令）、`soul.ts`、`celebrations.ts`、`db.ts`、`model-runtime.ts`、`types.ts`
 - `src/platforms/discord/`、`src/platforms/telegram/` — 平台适配器
 - `src/decision/jev.ts` — TypeSafe Jev 客户端
 - `src/media/` — 图片准备、视频抽帧；`src/tools/` — run_js、DeepSeek 搜索、Fish TTS；`src/net/` — 公网 URL 过滤、有界读取

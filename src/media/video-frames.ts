@@ -2,29 +2,19 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const VIDEO_FRAME_MAX = 3;
 const VIDEO_COMMAND_TIMEOUT_MS = 30_000;
 const VIDEO_FRAME_MAX_BYTES = 5 * 1024 * 1024;
 
-export type VideoFrameOutcome =
-	| "video_transcoder_unavailable"
-	| "video_probe_failed"
-	| "video_frame_extraction_failed"
-	| "video_no_frames";
+export type VideoFrameOutcome = "video_transcoder_unavailable" | "video_probe_failed" | "video_frame_extraction_failed";
 
 export interface VideoFrame {
 	bytes: Uint8Array;
 	mimeType: "image/jpeg";
-	/** Normalized position in the source duration, from 0 to 1. */
-	position: number;
 }
 
-export type VideoFrameResult =
-	| { ok: true; durationSeconds: number; frames: VideoFrame[] }
-	| { ok: false; outcome: VideoFrameOutcome };
+export type VideoFrameResult = { ok: true; frames: VideoFrame[] } | { ok: false; outcome: VideoFrameOutcome };
 
 export interface VideoFrameInput {
-	sourcePath: string | null;
 	sourceBytes: Uint8Array;
 	sourceExtension: string;
 }
@@ -66,20 +56,6 @@ export function inspectVideoTranscoder(runner: VideoCommandRunner = defaultRunne
 	return { ffmpeg: runner.which("ffmpeg") != null, ffprobe: runner.which("ffprobe") != null };
 }
 
-/** Fixed representative positions keep extraction deterministic and explainable. */
-export function sampleVideoFrameFractions(requested = VIDEO_FRAME_MAX): number[] {
-	const count = Math.min(VIDEO_FRAME_MAX, Math.max(0, Math.floor(requested)));
-	if (count === 1) return [0.5];
-	if (count === 2) return [1 / 3, 2 / 3];
-	return count === 3 ? [0.2, 0.5, 0.8] : [];
-}
-
-function frameCount(durationSeconds: number): number {
-	if (durationSeconds < 1) return 1;
-	if (durationSeconds < 3) return 2;
-	return VIDEO_FRAME_MAX;
-}
-
 function parseDuration(stdout: string): number | null {
 	try {
 		const value = JSON.parse(stdout) as {
@@ -114,11 +90,8 @@ export async function extractVideoFrames(
 
 	const directory = mkdtempSync(join(tmpdir(), "jingmei-video-")); // mkdtemp already creates 0700
 	try {
-		let sourcePath = input.sourcePath;
-		if (!sourcePath) {
-			sourcePath = join(directory, `source.${safeExtension(input.sourceExtension)}`);
-			writeFileSync(sourcePath, input.sourceBytes, { mode: 0o600 });
-		}
+		const sourcePath = join(directory, `source.${safeExtension(input.sourceExtension)}`);
+		writeFileSync(sourcePath, input.sourceBytes, { mode: 0o600 });
 		const probe = await runner.run([
 			ffprobe,
 			"-v",
@@ -135,7 +108,7 @@ export async function extractVideoFrames(
 		const durationSeconds = parseDuration(probe.stdout);
 		if (durationSeconds == null) return { ok: false, outcome: "video_probe_failed" };
 
-		const positions = sampleVideoFrameFractions(frameCount(durationSeconds));
+		const positions = durationSeconds < 1 ? [0.5] : durationSeconds < 3 ? [1 / 3, 2 / 3] : [0.2, 0.5, 0.8];
 		const frames: VideoFrame[] = [];
 		for (let index = 0; index < positions.length; index++) {
 			const position = positions[index]!;
@@ -167,12 +140,12 @@ export async function extractVideoFrames(
 				if (!stat.isFile() || stat.size <= 0 || stat.size > VIDEO_FRAME_MAX_BYTES) {
 					return { ok: false, outcome: "video_frame_extraction_failed" };
 				}
-				frames.push({ bytes: new Uint8Array(readFileSync(outputPath)), mimeType: "image/jpeg", position });
+				frames.push({ bytes: new Uint8Array(readFileSync(outputPath)), mimeType: "image/jpeg" });
 			} catch {
 				return { ok: false, outcome: "video_frame_extraction_failed" };
 			}
 		}
-		return frames.length > 0 ? { ok: true, durationSeconds, frames } : { ok: false, outcome: "video_no_frames" };
+		return { ok: true, frames };
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

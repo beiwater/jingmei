@@ -2,6 +2,7 @@
 // Docs: https://core.telegram.org/bots/api
 // The token is part of every URL: never log URLs, request bodies, or raw fetch errors.
 
+import { readBoundedBody } from "../../net/read-bounded-body.ts";
 import type { TelegramMessageEntity } from "./markdown.ts";
 
 const API_BASE = "https://api.telegram.org";
@@ -14,14 +15,12 @@ const LONG_POLL_GRACE_MS = 10_000;
 
 export class TelegramApiError extends Error {
 	code: number;
-	description: string;
 	retryAfter: number | null;
 	/** `api`: structured Bot API error body; `non_json`: an intermediary answered with HTML/text. */
 	kind: "api" | "non_json";
 	constructor(code: number, description: string, retryAfter: number | null = null, kind: "api" | "non_json" = "api") {
 		super(`telegram api error ${code}: ${description}`);
 		this.code = code;
-		this.description = description;
 		this.retryAfter = retryAfter;
 		this.kind = kind;
 	}
@@ -193,8 +192,8 @@ export class BotApi {
 			await res.body?.cancel();
 			throw new TelegramApiError(413, "file too large");
 		}
-		const bytes = new Uint8Array(await res.arrayBuffer());
-		if (bytes.byteLength > maxBytes) throw new TelegramApiError(413, "file too large");
+		const bytes = await readBoundedBody(res, maxBytes);
+		if (!bytes) throw new TelegramApiError(413, "file too large");
 		return bytes;
 	}
 }

@@ -131,7 +131,6 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 
 	function normalizeDeps(bot: TelegramBot): TelegramNormalizeDeps {
 		return {
-			allowedChatIds,
 			botUserIdsByUsername,
 			prepareImage,
 			extractVideoFrames,

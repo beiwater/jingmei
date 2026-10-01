@@ -2,6 +2,12 @@
 // slash commands, but Telegram has no ephemeral replies: answers go into the group as a brief reply.
 
 import type { AppConfig } from "../../config.ts";
+import {
+	contextCommandError,
+	memoryCommandError,
+	parseBirthdayDate,
+	runContextCommand,
+} from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import type { ConversationCore, Persona, SpaceId } from "../../core/types.ts";
 import type { TelegramEntity } from "./normalize.ts";
@@ -112,17 +118,14 @@ function runBirthday(context: CommandContext): string {
 			memberMemory.clearBirthday(spaceId, userId);
 			return "已清除生日提醒。";
 		}
-		const match = /^(\d{1,2})-(\d{1,2})$/.exec(date);
-		if (!match) return "请输入 MM-DD，例如 /birthday 09-25；或 /birthday clear 清除。";
-		const month = Number(match[1]);
-		const day = Number(match[2]);
+		const birthday = parseBirthdayDate(date);
+		if (!birthday) return "请输入 MM-DD，例如 /birthday 09-25；或 /birthday clear 清除。";
+		const { month, day } = birthday;
 		memberMemory.setBirthday(spaceId, userId, month, day, context.chatId, context.messageId);
 		const celebrates = context.config.celebrations.some((target) => target.spaceId === spaceId);
 		return `已在本群记录你的生日：${month}月${day}日。${celebrates ? "到时会在群里祝福。" : "本群尚未启用自动生日祝福。"}`;
 	} catch (error) {
-		return error instanceof Error && error.message === "memory_opted_out"
-			? "你已关闭长期记忆。若要保存生日，请先使用 /memory enable。"
-			: "记忆操作失败；请检查日期是否有效，或稍后重试。";
+		return memoryCommandError(error, "你已关闭长期记忆。若要保存生日，请先使用 /memory enable。");
 	}
 }
 
@@ -137,20 +140,13 @@ async function runAdminCommand(context: CommandContext, isAdmin: boolean): Promi
 		return `本群有多个角色，请指定：${choices}`;
 	}
 	try {
-		const core = context.getCore();
-		if (command.name === "context") {
-			const status = await core.getContextStatus(persona.id, "telegram", spaceId, chatId, userId);
-			const tokens = status.tokens === null ? "暂时无法估算" : `${status.tokens.toLocaleString()} tokens`;
-			return `当前上下文：${tokens} / ${status.contextWindow.toLocaleString()} tokens。自动压缩约在 ${status.compactionAtTokens.toLocaleString()} tokens 后触发；也可用 /compact 手动压缩。`;
-		}
-		const result = await core.compactContext(persona.id, "telegram", spaceId, chatId, userId);
-		return `已压缩本群上下文。压缩前约 ${result.tokensBefore.toLocaleString()} tokens。`;
+		return await runContextCommand(context.getCore(), command.name, [persona.id, "telegram", spaceId, chatId, userId], {
+			context: "当前上下文",
+			scope: "本群",
+		});
 	} catch (error) {
-		const reason = error instanceof Error ? error.message : "";
-		if (reason === "not_persona_admin") return "只有管理员可以使用这个命令。";
-		if (reason === "context_busy") return "本群正在处理消息，稍后再试。";
-		if (reason === "Already compacted" || reason.startsWith("Nothing to compact"))
-			return "本群目前没有需要压缩的上下文。";
+		const reply = contextCommandError(error, "本群");
+		if (reply) return reply;
 		throw error;
 	}
 }

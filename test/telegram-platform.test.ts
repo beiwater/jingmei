@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { AppConfig } from "../src/config.ts";
 import type { MemberMemory } from "../src/core/memory.ts";
-import type { ConversationCore, Persona } from "../src/core/types.ts";
-import { type BotApi, isReactionEmoji, TelegramApiError } from "../src/platforms/telegram/api.ts";
+import type { ConversationCore, InboundMessage, Persona } from "../src/core/types.ts";
+import { BotApi, isReactionEmoji, TelegramApiError } from "../src/platforms/telegram/api.ts";
 import { parseCommand, runCommand } from "../src/platforms/telegram/commands.ts";
+import { createTelegramPlatform, type PlatformHandle } from "../src/platforms/telegram/index.ts";
 import { formatTelegramMarkdown } from "../src/platforms/telegram/markdown.ts";
 import {
 	normalizeTelegramMessage,
@@ -20,14 +21,12 @@ const CHAT = -1001234567890;
 
 function normalizeDeps(overrides: Partial<TelegramNormalizeDeps> = {}): TelegramNormalizeDeps {
 	return {
-		allowedChatIds: new Set([String(CHAT)]),
 		botUserIdsByUsername: new Map([["mizore_bot", "111"]]),
 		downloadFile: async () => ({ bytes: new Uint8Array([1, 2, 3]), filePath: "videos/file_1.mp4" }),
 		prepareImage: async () => ({ ok: true, image: { mimeType: "image/jpeg", base64: "AAAA" } }),
 		extractVideoFrames: async () => ({
 			ok: true,
-			durationSeconds: 2,
-			frames: [0.33, 0.66].map((position) => ({ bytes: new Uint8Array([9]), mimeType: "image/jpeg", position })),
+			frames: Array.from({ length: 2 }, () => ({ bytes: new Uint8Array([9]), mimeType: "image/jpeg" })),
 		}),
 		...overrides,
 	};
@@ -91,8 +90,7 @@ describe("Telegram message normalization", () => {
 		expect(normalized?.replyToAuthorId).toBeNull();
 	});
 
-	test("chats outside the allow-list and empty service messages are dropped", async () => {
-		expect(await normalizeTelegramMessage(message({ text: "hi", chat: { id: -100999 } }), normalizeDeps())).toBeNull();
+	test("empty service messages are dropped", async () => {
 		expect(await normalizeTelegramMessage(message({}), normalizeDeps())).toBeNull();
 	});
 
@@ -174,6 +172,82 @@ describe("Telegram message normalization", () => {
 	});
 });
 
+describe("Telegram adapter", () => {
+	test("unlisted chats are rejected before commands, downloads and core dispatch", async () => {
+		const delivered = Promise.withResolvers<void>();
+		const received: InboundMessage[] = [];
+		const persona: Persona = {
+			id: "a",
+			name: "A",
+			personaPath: "",
+			provider: "p",
+			model: "m",
+			reasoningEffort: "off",
+			routingP: 0.5,
+			aliases: [],
+			adminUserIds: [],
+			sendReactionImages: true,
+			voiceEnabled: false,
+			accounts: {},
+		};
+		const getMe = spyOn(BotApi.prototype, "getMe").mockResolvedValue({
+			id: 111,
+			is_bot: true,
+			first_name: "A",
+			username: "a_bot",
+		});
+		const setCommands = spyOn(BotApi.prototype, "setMyCommands").mockResolvedValue(true);
+		const send = spyOn(BotApi.prototype, "sendMessage").mockResolvedValue({ message_id: 99 });
+		const getFile = spyOn(BotApi.prototype, "getFile").mockRejectedValue(new Error("unexpected download"));
+		let firstPoll = true;
+		const getUpdates = spyOn(BotApi.prototype, "getUpdates").mockImplementation(async (_offset, timeout, signal) => {
+			if (timeout === 0) return [];
+			if (firstPoll) {
+				firstPoll = false;
+				const ignoredChat = { id: -100999 };
+				return [
+					message({ chat: ignoredChat, text: "ignored" }),
+					message({ chat: ignoredChat, text: "/help", entities: [{ type: "bot_command", offset: 0, length: 5 }] }),
+					message({ chat: ignoredChat, photo: [{ file_id: "ignored" }] }),
+					message({ text: "accepted" }),
+				].map((message, index) => ({ update_id: index + 1, message }));
+			}
+			const { promise, reject } = Promise.withResolvers<unknown[]>();
+			signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+			return promise;
+		});
+		let platform: PlatformHandle | undefined;
+		try {
+			platform = await createTelegramPlatform({
+				config: {
+					telegram: { chatIds: [String(CHAT)] },
+					personas: [{ id: "a", tokens: { telegram: "test-token" } }],
+				} as AppConfig,
+				personas: [persona],
+				memberMemory: {} as MemberMemory,
+				getCore: () =>
+					({
+						handleMessage: async (message: InboundMessage) => {
+							received.push(message);
+							delivered.resolve();
+						},
+					}) as unknown as ConversationCore,
+			});
+			await platform.start();
+			await delivered.promise;
+			await platform.stop();
+			expect(received.map(({ channelId, content }) => ({ channelId, content }))).toEqual([
+				{ channelId: String(CHAT), content: "accepted" },
+			]);
+			expect(send).not.toHaveBeenCalled();
+			expect(getFile).not.toHaveBeenCalled();
+		} finally {
+			await platform?.stop();
+			for (const spy of [getMe, setCommands, send, getFile, getUpdates]) spy.mockRestore();
+		}
+	});
+});
+
 describe("Telegram text commands", () => {
 	test("parses a leading bot_command with optional lower-cased @target and arguments", () => {
 		expect(parseCommand("/birthday@Mizore_Bot 09-25", [{ type: "bot_command", offset: 0, length: 20 }])).toEqual({
@@ -247,6 +321,62 @@ describe("Telegram text commands", () => {
 });
 
 describe("Telegram Markdown entities", () => {
+	test.each([
+		{
+			name: "nested bold and italic inside links",
+			markdown: "[**bold *italic***](https://example.com)",
+			text: "bold italic",
+			types: ["text_link", "bold", "italic"],
+		},
+		{
+			name: "code inside styled text",
+			markdown: "**before `code` *after***",
+			text: "before code after",
+			types: ["bold", "code", "bold", "italic"],
+		},
+		{
+			name: "multi-line lists with styles",
+			markdown: "- **first\n  second**\n- *third*",
+			text: "• first\n  second\n• third",
+			types: ["bold", "bold", "italic"],
+		},
+		{
+			name: "astral emoji before and inside entities",
+			markdown: "😀 [**🚀 *🌙***](https://example.com) `🧪`",
+			text: "😀 🚀 🌙 🧪",
+			types: ["text_link", "bold", "italic", "code"],
+		},
+	])("produces valid entity ranges for $name", ({ markdown, text, types }) => {
+		const formatted = formatTelegramMarkdown(markdown);
+		expect(formatted.text).toBe(text);
+		expect(formatted.entities.map((entity) => entity.type)).toEqual([...types]);
+		const boundaries = new Set([0]);
+		let offset = 0;
+		for (const character of formatted.text) {
+			offset += character.length;
+			boundaries.add(offset);
+		}
+		for (const entity of formatted.entities) {
+			expect(Number.isSafeInteger(entity.offset)).toBe(true);
+			expect(Number.isSafeInteger(entity.length)).toBe(true);
+			expect(entity.length).toBeGreaterThan(0);
+			expect(boundaries.has(entity.offset)).toBe(true);
+			expect(boundaries.has(entity.offset + entity.length)).toBe(true);
+		}
+		for (const [index, left] of formatted.entities.entries()) {
+			for (const right of formatted.entities.slice(index + 1)) {
+				const leftEnd = left.offset + left.length;
+				const rightEnd = right.offset + right.length;
+				if (left.offset >= rightEnd || right.offset >= leftEnd) continue;
+				expect(["code", "pre"]).not.toContain(left.type);
+				expect(["code", "pre"]).not.toContain(right.type);
+				expect(
+					(left.offset <= right.offset && leftEnd >= rightEnd) || (right.offset <= left.offset && rightEnd >= leftEnd),
+				).toBe(true);
+			}
+		}
+	});
+
 	test("renders inline styles, code and public links as UTF-16 entities", () => {
 		const formatted = formatTelegramMarkdown("😀 **粗** *斜* `code` [链接](https://example.com)");
 		expect(formatted.text).toBe("😀 粗 斜 code 链接");

@@ -19,7 +19,7 @@ export const TELEGRAM_QUICK_REACTIONS: Readonly<Record<string, string>> = {
 	"🤔": "疑问、不确定",
 };
 
-export const TELEGRAM_PROMPT_LINES: readonly string[] = [
+const TELEGRAM_PROMPT_LINES: readonly string[] = [
 	"- Telegram 消息正文支持 Markdown 子集：**粗体**、*斜体*、~~删除线~~、> 引用、`行内代码`、三反引号代码块、[来源](https://example.com) 链接。标题会显示为粗体，列表和表格会显示为纯文本。按内容选择，普通聊天保持自然，不要每句都加格式。",
 	"- Telegram 单条消息正文上限 4096 字符；超长会被拆成多条，长答用清楚的短段落组织。",
 	"- Telegram 不渲染 LaTeX 数学公式；写数学时用清楚的纯文本或代码块，不要输出 $ 或 $$ 公式标记。",
@@ -58,7 +58,7 @@ function defuse(text: string): string {
  * offsets (UTF-16) for every inserted/removed character. Links and code are never rewritten, and
  * only ids in `mentionIds` become notifying `text_mention` entities.
  */
-export function finalizeOutgoing(
+function finalizeOutgoing(
 	formatted: TelegramFormattedMessage,
 	mentionIds: ReadonlySet<string>,
 ): TelegramFormattedMessage {

@@ -280,28 +280,9 @@ class TelegramMarkdownRenderer {
 	}
 }
 
-function isSurrogateBoundary(text: string, offset: number): boolean {
-	if (offset <= 0 || offset >= text.length) return true;
-	const previous = text.charCodeAt(offset - 1);
-	const next = text.charCodeAt(offset);
-	return !(previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff);
-}
-
-function normalizedEntities(text: string, entities: readonly TelegramMessageEntity[]): TelegramMessageEntity[] {
+function normalizedEntities(entities: readonly TelegramMessageEntity[]): TelegramMessageEntity[] {
 	const unique = new Map<string, TelegramMessageEntity>();
 	for (const entity of entities) {
-		const end = entity.offset + entity.length;
-		if (
-			!Number.isSafeInteger(entity.offset) ||
-			!Number.isSafeInteger(entity.length) ||
-			entity.offset < 0 ||
-			entity.length <= 0 ||
-			end > text.length ||
-			!isSurrogateBoundary(text, entity.offset) ||
-			!isSurrogateBoundary(text, end)
-		) {
-			throw new TelegramMarkdownError("invalid");
-		}
 		const extra = entity.type === "text_link" ? entity.url : entity.type === "pre" ? (entity.language ?? "") : "";
 		unique.set(`${entity.type}:${entity.offset}:${entity.length}:${extra}`, entity);
 	}
@@ -309,23 +290,6 @@ function normalizedEntities(text: string, entities: readonly TelegramMessageEnti
 		(a, b) => a.offset - b.offset || b.length - a.length || ENTITY_TYPE_ORDER[a.type] - ENTITY_TYPE_ORDER[b.type],
 	);
 	if (sorted.length > MAX_ENTITIES) throw new TelegramMarkdownError("too_complex");
-	for (let leftIndex = 0; leftIndex < sorted.length; leftIndex++) {
-		const left = sorted[leftIndex]!;
-		const leftEnd = left.offset + left.length;
-		for (let rightIndex = leftIndex + 1; rightIndex < sorted.length; rightIndex++) {
-			const right = sorted[rightIndex]!;
-			if (right.offset >= leftEnd) break;
-			const rightEnd = right.offset + right.length;
-			if (rightEnd > leftEnd) throw new TelegramMarkdownError("invalid");
-			if (
-				(CODE_TYPES.has(left.type) || CODE_TYPES.has(right.type)) &&
-				left.offset < rightEnd &&
-				right.offset < leftEnd
-			) {
-				throw new TelegramMarkdownError("invalid");
-			}
-		}
-	}
 	return sorted;
 }
 
@@ -338,7 +302,7 @@ export function formatTelegramMarkdown(markdown: string): TelegramFormattedMessa
 		const rendered = new TelegramMarkdownRenderer().render(tokens);
 		if (!rendered.text.trim()) throw new TelegramMarkdownError("empty");
 		if ([...rendered.text].length > MAX_CODE_POINTS) throw new TelegramMarkdownError("too_long");
-		return { text: rendered.text, entities: normalizedEntities(rendered.text, rendered.entities) };
+		return { text: rendered.text, entities: normalizedEntities(rendered.entities) };
 	} catch (error) {
 		if (error instanceof TelegramMarkdownError) throw error;
 		throw new TelegramMarkdownError("invalid");
