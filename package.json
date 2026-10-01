@@ -4,6 +4,27 @@
 	"version": "0.1.0",
 	"type": "module",
 	"description": "精魅: an AI group pet for Discord and Telegram groups, built on Pi",
+	"license": "BSD-2-Clause",
+	"homepage": "https://github.com/beiwater/jingmei#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/beiwater/jingmei.git"
+	},
+	"bugs": {
+		"url": "https://github.com/beiwater/jingmei/issues"
+	},
+	"keywords": [
+		"discord-bot",
+		"telegram-bot",
+		"ai-agent",
+		"chatbot",
+		"llm",
+		"pi",
+		"bun"
+	],
+	"engines": {
+		"bun": ">=1.3"
+	},
 	"scripts": {
 		"start": "bun run src/main.ts",
 		"test": "bun test",
