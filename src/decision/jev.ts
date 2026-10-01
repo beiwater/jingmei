@@ -31,6 +31,12 @@ export interface EventOption {
 	description: string;
 }
 
+export interface EventDecision {
+	choice: string;
+	confidence: number;
+	probabilities?: Record<string, number>;
+}
+
 export interface JevClient {
 	decideQuickReaction(input: {
 		text: string;
@@ -43,7 +49,7 @@ export interface JevClient {
 		message: string;
 		recent?: readonly string[];
 		options: readonly EventOption[];
-	}): Promise<{ choice: string; confidence: number }>;
+	}): Promise<EventDecision>;
 	/** Participation in this event, in [0,1], in the same order as members. */
 	scoreParticipation(input: {
 		event: string;
@@ -75,6 +81,7 @@ interface ChoiceAnswer {
 	type: "choice";
 	choice: string;
 	confidence: number;
+	probabilities?: Record<string, number>;
 }
 type Answer = NoulAnswer | ChoiceAnswer;
 
@@ -102,6 +109,7 @@ interface RawAnswer {
 	noul?: unknown;
 	choice?: unknown;
 	confidence?: unknown;
+	probabilities?: unknown;
 }
 
 function parseAnswers(payload: unknown, questions: Readonly<Record<string, Question>>): Record<string, Answer> {
@@ -124,7 +132,18 @@ function parseAnswers(payload: unknown, questions: Readonly<Record<string, Quest
 				throw new JevError("invalid_response");
 			}
 			if (!isUnit(raw.confidence)) throw new JevError("invalid_response");
-			answers[id] = { type: "choice", choice: raw.choice, confidence: raw.confidence };
+			const parsed: ChoiceAnswer = { type: "choice", choice: raw.choice, confidence: raw.confidence };
+			if (
+				typeof raw.probabilities === "object" &&
+				raw.probabilities !== null &&
+				!Array.isArray(raw.probabilities) &&
+				Object.entries(raw.probabilities).every(
+					([key, value]) => Object.hasOwn(question.criteria, key) && isUnit(value),
+				)
+			) {
+				parsed.probabilities = raw.probabilities as Record<string, number>;
+			}
+			answers[id] = parsed;
 		}
 	}
 	return answers;
@@ -243,13 +262,18 @@ export function createJevClientWithTransport(
 				event: {
 					type: "choice",
 					instructions:
-						"判断 `message` 延续了哪个事件（话题）。`recent` 仅供理解上下文，选择最符合消息本身的事件；与所有事件无关时选择 `new`。",
+						"判断 `message` 延续了哪个事件（话题）。短回复、追问、赞同和情绪反应通常延续 `recent` 中正在进行的话题；只有 `message` 明确引入与所有事件都无关的内容时才选择 `new`。",
 					criteria,
 				},
 			});
 			const answer = answers.event;
 			if (answer?.type !== "choice") throw new JevError("invalid_response");
-			return { choice: answer.choice, confidence: answer.confidence };
+			const result: EventDecision = {
+				choice: answer.choice,
+				confidence: answer.confidence,
+			};
+			if (answer.probabilities) result.probabilities = answer.probabilities;
+			return result;
 		},
 
 		async scoreParticipation({ event, transcript, members }) {

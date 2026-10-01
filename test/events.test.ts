@@ -1,7 +1,7 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import type { JevClient } from "../src/decision/jev.ts";
+import type { EventDecision, JevClient } from "../src/decision/jev.ts";
 import { ensureMessagesTable } from "../src/core/db.ts";
 import type { Embedder } from "../src/core/embedding.ts";
 import { createPiEventSummarizer, EventTracker, type EventSummarizer } from "../src/core/events.ts";
@@ -20,6 +20,7 @@ function setup() {
 	let time = 1_000_000_000;
 	let serial = 0;
 	let choice = "first";
+	let probabilities: EventDecision["probabilities"];
 	let failDecision = false;
 	let failEmbedding = false;
 	let failParticipation = false;
@@ -37,7 +38,7 @@ function setup() {
 		async chooseEvent(input) {
 			choices.push(input);
 			if (failDecision) throw new Error("offline");
-			return { choice: choice === "first" ? input.options[0]!.id : choice, confidence: 0.9 };
+			return { choice: choice === "first" ? input.options[0]!.id : choice, confidence: 0.9, probabilities };
 		},
 		async scoreParticipation(input) {
 			participations.push(input);
@@ -75,8 +76,9 @@ function setup() {
 		advance(ms: number) {
 			time += ms;
 		},
-		choose(value: string) {
+		choose(value: string, distribution?: EventDecision["probabilities"]) {
 			choice = value;
+			probabilities = distribution;
 		},
 		failDecision() {
 			failDecision = true;
@@ -149,6 +151,102 @@ test("first human creates a topic; subsequent humans choose from contextual opti
 	});
 });
 
+test("human and bot replies inherit even an expired topic without calling the decision model", async () => {
+	for (const isBot of [false, true]) {
+		const h = setup();
+		const first = await h.send();
+		h.advance(2 * 60 * 60 * 1000 + 1);
+		h.choose("new");
+		await h.send();
+		const calls = h.choices.length;
+		const reply = await h.send({ isBot, replyToMessageId: first.message.messageId, content: "[贴纸 💖]" });
+		expect(reply.eventId).toBe(first.eventId);
+		expect(h.choices.length).toBe(calls);
+		expect(h.db.query("SELECT message_count FROM events WHERE id = ?").get(first.eventId!)).toEqual({
+			message_count: 2,
+		});
+	}
+});
+
+test("bare media, emoji and single-character messages join the latest topic without a decision", async () => {
+	for (const content of [
+		"",
+		" \n ",
+		"💖！",
+		"好",
+		"𠮷",
+		"[贴纸]",
+		"[贴纸 💖]",
+		"[贴纸 1️⃣]",
+		"[视频]",
+		"[视频 2帧]",
+		"[图片]",
+		"[语音]",
+		"[文件]",
+		"[图片] [视频 2帧] [语音] [文件] 💖",
+	]) {
+		const h = setup();
+		const first = await h.send();
+		h.choose("new");
+		const latest = await h.send();
+		await h.send({ spaceId: "discord:elsewhere" });
+		await h.send({ channelId: "elsewhere" });
+		const calls = h.choices.length;
+		const media = await h.send({ content });
+		expect(media.eventId).toBe(latest.eventId);
+		expect(media.eventId).not.toBe(first.eventId);
+		expect(h.choices.length).toBe(calls);
+	}
+});
+
+test("low-content continuity includes ten minutes exactly but expires immediately afterward", async () => {
+	for (const age of [10 * 60 * 1000, 10 * 60 * 1000 + 1]) {
+		const h = setup();
+		const first = await h.send();
+		h.choose("new");
+		h.advance(age - 1);
+		const media = await h.send({ content: "[文件]" });
+		if (age === 10 * 60 * 1000) {
+			expect(media.eventId).toBe(first.eventId);
+			expect(h.choices).toEqual([]);
+		} else {
+			expect(media.eventId).not.toBe(first.eventId);
+			expect(h.choices[0]?.message).toBe("[文件]");
+		}
+	}
+});
+
+test("media captions, vision descriptions and two Unicode letters or numbers still use the decision", async () => {
+	for (const content of ["[图片：猫咪]", "[图片:cat]", "[视频 2帧：猫咪]", "[文件] 12", "𠮷𠮷", "a\nb"]) {
+		const h = setup();
+		const first = await h.send();
+		h.choose("new");
+		expect((await h.send({ content })).eventId).not.toBe(first.eventId);
+		expect(h.choices[0]?.message).toBe(content);
+	}
+});
+
+test("a weak new-topic probability continues the best existing candidate rather than the latest", async () => {
+	const h = setup();
+	const first = await h.send();
+	h.choose("new");
+	const latest = await h.send();
+	h.choose("new", { [`e${first.eventId}`]: 0.35, [`e${latest.eventId}`]: 0.2, new: 0.45 });
+	expect((await h.send({ content: "居然这么小吗" })).eventId).toBe(first.eventId);
+});
+
+test("new-topic probability at or above 0.6, or absent, preserves the new-topic decision", async () => {
+	for (const probability of [0.6, 0.9, undefined]) {
+		const h = setup();
+		const first = await h.send();
+		h.choose(
+			"new",
+			probability === undefined ? undefined : { [`e${first.eventId}`]: 1 - probability, new: probability },
+		);
+		expect((await h.send({ content: "今晚吃什么" })).eventId).not.toBe(first.eventId);
+	}
+});
+
 test("bots inherit only their reply's event and never call a decision model", async () => {
 	const h = setup();
 	const first = await h.send();
@@ -158,19 +256,18 @@ test("bots inherit only their reply's event and never call a decision model", as
 	const reply = await h.send({ isBot: true, replyToMessageId: first.message.messageId });
 	expect(reply.eventId).toBe(first.eventId);
 	expect((await h.send({ isBot: true })).eventId).toBeNull();
-	expect((await h.send({ isBot: true, replyToMessageId: "missing" })).eventId).toBeNull();
+	expect((await h.send({ isBot: true, content: "[文件]", replyToMessageId: "missing" })).eventId).toBeNull();
 	expect(h.choices.length).toBe(calls);
 });
 
-test("failed decisions prefer reply topic, then latest active, then a new topic", async () => {
+test("failed decisions prefer the latest active topic, then a new topic when all have expired", async () => {
 	const h = setup();
 	const first = await h.send();
 	h.choose("new");
 	const latest = await h.send();
 	h.failDecision();
-	expect((await h.send({ replyToMessageId: first.message.messageId })).eventId).toBe(first.eventId);
+	expect((await h.send()).eventId).toBe(latest.eventId);
 	await h.tracker.idle();
-	expect((await h.send()).eventId).toBe(first.eventId);
 	h.advance(2 * 60 * 60 * 1000 + 1);
 	h.failEmbedding();
 	const fresh = await h.send();

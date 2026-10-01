@@ -65,6 +65,9 @@ describe("local Jev over OpenAI chat-completions", () => {
 			});
 			expect(decision.choice).toBe("e2");
 			expect(decision.confidence).toBeCloseTo(1 - (-0.8 * Math.log(0.8) - 0.2 * Math.log(0.1)) / Math.log(3));
+			expect(decision.probabilities?.e1).toBeCloseTo(0.1);
+			expect(decision.probabilities?.e2).toBeCloseTo(0.8);
+			expect(decision.probabilities?.new).toBeCloseTo(0.1);
 			const scores = await client.scoreRelevance("猫吃什么", ["猫粮", "爬山"]);
 			expect(scores[0]).toBeCloseTo(0.75);
 			expect(scores[1]).toBeCloseTo(0.2);
@@ -90,6 +93,8 @@ describe("local Jev over OpenAI chat-completions", () => {
 				options: [{ id: "e1", description: "爬山" }],
 			});
 			expect(decision.choice).toBe(choice);
+			expect(decision.probabilities?.e1).toBeCloseTo(probabilities[0]);
+			expect(decision.probabilities?.new).toBeCloseTo(probabilities[1]);
 		}
 	});
 

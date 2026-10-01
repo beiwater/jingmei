@@ -27,13 +27,13 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `network-isolation.test.ts` | 有真实凭据时仍拒绝 Discord / Telegram（含 Discord 子域名） |
 | `log.test.ts` | `persona_id` 原样保留以区分多角色；token/key/prompt/content/url/path 字段仍脱敏；字符串中的 Telegram token、`sk-` key、URL、绝对路径被替换 |
 | `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥 |
-| `events.test.ts` | 人类消息话题归属、bot 回复继承、空间/频道隔离；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
-| `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
+| `events.test.ts` | 人类消息话题归属、人与 bot 回复直接继承且不决策、空间/频道隔离；裸媒体/低内容继承及十分钟边界、视觉描述/Unicode 正文保留决策；`new` 概率低于 0.6 选最佳旧话题、达到阈值或无概率保留新话题；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
+| `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、按消息所在平台匹配账号、名字/别名只在角色作用域内生效、bot 消息不触发、HMAC 抽样稳定；搜索预取与语音请求的识别；只有平台限定的角色管理员能看/压缩上下文；表情图读取失败后可以重试发送 |
 | `context.test.ts` | 丢弃已完成轮次的 thinking、保留进行中工具循环的 thinking；能看图的模型收到图片块；看不了图的模型收到 `visionModel` 描述；没有 `visionModel` 时保留图片块交给 Pi 降级 |
 | `quick-reactions.test.ts` | 普通消息需要强信号且按频道限频（限频期内不调用 Jev）；同频道并发决策共享一个名额；点名消息不受阈值和限频影响、由被点名角色点；bot 消息和表外表情永不点 |
-| `jev.test.ts` | Jev 请求结构与答案映射、`none` → 无表情、拒绝缺失/类型错误/越界/非选项答案、HTTP/网络/超时映射为固定错误码、错误信息不含密钥和正文；相关度打分一次请求、按序返回；`shouldQuickReact` 规则；远程失败回退到本地一次 |
+| `jev.test.ts` | Jev 请求结构与答案映射、`none` → 无表情、拒绝缺失/类型错误/越界/非选项答案、HTTP/网络/超时映射为固定错误码、错误信息不含密钥和正文；System One 话题概率解析、畸形概率表忽略；相关度打分一次请求、按序返回；`shouldQuickReact` 规则；远程失败回退到本地一次并保留话题概率 |
 | `memory.test.ts` | 成员档案按空间隔离；只抽取本人明确的生日与稳定陈述、更正覆盖旧值；提及/回复关系去重并排除 bot；生日设置/清除/列出、`/forget` 停止收集与重新启用；拒绝不安全事实；重放不重复计数；打分回想保留最相关项、打分失败退回时间顺序 |
 | `soul.test.ts` | soul 在角色、空间、平台、频道、thread 之间隔离；关闭重开数据库后恢复；暂存去重、压缩快照之后新增的笔记不被消费；容量或数据库失败时回滚并保留暂存；字节上限、身份与内容安全检查 |
 | `soul-session.test.ts` | 真实 Pi 会话中 soul 工具、压缩与重启只影响所属会话，不重载其他会话 |

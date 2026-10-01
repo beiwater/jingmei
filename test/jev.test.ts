@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	createJevClient,
+	createJevClientWithTransport,
 	JEV_ENDPOINT,
 	JevError,
 	type JevErrorCode,
@@ -211,6 +212,42 @@ describe("Jev event decisions", () => {
 		}
 	});
 
+	test("returns System One option probabilities and ignores malformed distributions without rejecting the choice", async () => {
+		const distributions = [
+			{ e12: 0.3, e13: 0.25, new: 0.45 },
+			{ e12: 0, e13: 0, new: 1 },
+		];
+		for (const probabilities of distributions) {
+			const { impl } = fakeFetch(() =>
+				Response.json({ answers: { event: { type: "choice", choice: "new", confidence: 0.2, probabilities } } }),
+			);
+			expect(await createJevClient(config, impl).chooseEvent({ message: "好难受", options })).toEqual({
+				choice: "new",
+				confidence: 0.2,
+				probabilities,
+			});
+		}
+		for (const probabilities of [
+			null,
+			[],
+			"bad",
+			{ new: 0.45, e99: 0.55 },
+			{ new: 0.45, e12: -0.1 },
+			{ new: 0.45, e12: 1.1 },
+			{ new: 0.45, e12: "0.55" },
+			{ new: Number.NaN, e12: 0.55 },
+			{ new: Number.POSITIVE_INFINITY, e12: 0.55 },
+		]) {
+			const client = createJevClientWithTransport(async () => ({
+				answers: { event: { type: "choice", choice: "new", confidence: 0.2, probabilities } },
+			}));
+			expect(await client.chooseEvent({ message: "好难受", options })).toEqual({
+				choice: "new",
+				confidence: 0.2,
+			});
+		}
+	});
+
 	test("scores participation in member order and rejects incomplete batches", async () => {
 		const { impl, calls } = fakeFetch(() =>
 			Response.json({ answers: { m1: { type: "noul", noul: 0.2 }, m0: { type: "noul", noul: 0.9 } } }),
@@ -246,7 +283,12 @@ describe("Jev fallback", () => {
 				Object.entries(body.questions).map(([id, question]) => [
 					id,
 					question.type === "choice"
-						? { type: "choice", choice: id === "event" ? "e1" : "👍", confidence: 0.8 }
+						? {
+								type: "choice",
+								choice: id === "event" ? "e1" : "👍",
+								confidence: 0.8,
+								...(id === "event" ? { probabilities: { e1: 0.8, new: 0.2 } } : {}),
+							}
 						: { type: "noul", noul: 0.6 },
 				]),
 			);
@@ -256,6 +298,7 @@ describe("Jev fallback", () => {
 		expect(await client.chooseEvent({ message: "q", options: [{ id: "e1", description: "d" }] })).toEqual({
 			choice: "e1",
 			confidence: 0.8,
+			probabilities: { e1: 0.8, new: 0.2 },
 		});
 		expect(await client.scoreRelevance("q", ["a"])).toEqual([0.6]);
 		expect(await client.scoreParticipation({ event: "d", transcript: [], members: ["a"] })).toEqual([0.6]);

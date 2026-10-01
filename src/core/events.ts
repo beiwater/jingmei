@@ -7,10 +7,18 @@ import type { Embedder } from "./embedding.ts";
 import type { InboundMessage } from "./types.ts";
 
 const ACTIVE_WINDOW_MS = 2 * 60 * 60 * 1000;
+const LOW_CONTENT_WINDOW_MS = 10 * 60 * 1000;
+const NEW_EVENT_MIN_PROBABILITY = 0.6;
 // fast-bge-small-zh-v1.5 的归一化向量：相关话题约 0.78–0.92，无关约 1.22。
 const EVENT_RECALL_MAX_DISTANCE = 1.0;
 const TRANSCRIPT_LIMIT = 40;
 const PARTICIPANT_LIMIT = 20;
+
+function hasSubstantiveText(content: string): boolean {
+	// 只移除平台的裸媒体标记，保留 [图片：描述] 等带文字的视觉描述。
+	const text = content.replace(/\[(?:图片|语音|文件|视频(?: \d+帧)?|贴纸(?: [^\]\r\n：:]+)?)\]/gu, "");
+	return /[\p{L}\p{N}].*[\p{L}\p{N}]/su.test(text);
+}
 
 export type EventSummarizer = (transcript: readonly string[]) => Promise<{ title: string; description: string }>;
 
@@ -142,7 +150,7 @@ export class EventTracker {
 		`);
 	}
 
-	/** 消息已入库；决策不可用时沿用回复事件、最近活跃事件或创建新事件。 */
+	/** 消息已入库；回复直接继承，决策不可用时沿用最近活跃事件或创建新事件。 */
 	async assign(message: InboundMessage): Promise<number | null> {
 		try {
 			const stored = this.db
@@ -159,47 +167,69 @@ export class EventTracker {
 						.get(message.spaceId, message.channelId, message.replyToMessageId) as { event_id: number | null } | null)
 				: null;
 			let eventId = reply?.event_id ?? null;
-			if (!message.isBot) {
+			if (eventId === null && !message.isBot) {
 				const active = this.db
 					.query(
 						"SELECT * FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at >= ? ORDER BY last_message_at DESC, id DESC LIMIT 5",
 					)
 					.all(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS) as EventRow[];
-				try {
-					const recalled = await this.recall(message);
-					const candidates = [...active, ...recalled];
-					if (candidates.length) {
-						const options: EventOption[] = candidates.map((event) => ({
-							id: `e${event.id}`,
-							description: event.title
-								? `${event.title}：${event.description ?? ""}`
-								: this.transcript(event.id, 3)
-										.map((row) => `${row.author_name}: ${row.content}`)
-										.join("\n"),
-						}));
-						options.push({ id: NEW_EVENT_OPTION, description: "新的话题" });
-						const recent = this.db
-							.query(
-								"SELECT author_name, content FROM messages WHERE space_id = ? AND channel_id = ? AND message_id != ? ORDER BY timestamp DESC, rowid DESC LIMIT 5",
-							)
-							.all(message.spaceId, message.channelId, message.messageId) as Array<{
-							author_name: string;
-							content: string;
-						}>;
-						const decision = await this.decision.chooseEvent({
-							message: message.content,
-							recent: recent.reverse().map((row) => `${row.author_name}: ${row.content}`),
-							options,
-						});
-						const chosen = candidates.find((event) => `e${event.id}` === decision.choice);
-						if (!chosen && decision.choice !== NEW_EVENT_OPTION) throw new Error("事件决策返回未知选项");
-						eventId = chosen?.id ?? null;
-					} else {
-						eventId = null;
+				const latest = active[0];
+				if (
+					latest &&
+					latest.last_message_at >= this.now() - LOW_CONTENT_WINDOW_MS &&
+					!hasSubstantiveText(message.content)
+				) {
+					eventId = latest.id;
+				} else {
+					try {
+						const recalled = await this.recall(message);
+						const candidates = [...active, ...recalled];
+						if (candidates.length) {
+							const options: EventOption[] = candidates.map((event) => ({
+								id: `e${event.id}`,
+								description: event.title
+									? `${event.title}：${event.description ?? ""}`
+									: this.transcript(event.id, 3)
+											.map((row) => `${row.author_name}: ${row.content}`)
+											.join("\n"),
+							}));
+							options.push({ id: NEW_EVENT_OPTION, description: "新的话题" });
+							const recent = this.db
+								.query(
+									"SELECT author_name, content FROM messages WHERE space_id = ? AND channel_id = ? AND message_id != ? ORDER BY timestamp DESC, rowid DESC LIMIT 5",
+								)
+								.all(message.spaceId, message.channelId, message.messageId) as Array<{
+								author_name: string;
+								content: string;
+							}>;
+							const decision = await this.decision.chooseEvent({
+								message: message.content,
+								recent: recent.reverse().map((row) => `${row.author_name}: ${row.content}`),
+								options,
+							});
+							let chosen = candidates.find((event) => `e${event.id}` === decision.choice);
+							if (!chosen && decision.choice !== NEW_EVENT_OPTION) throw new Error("事件决策返回未知选项");
+							const newProbability = decision.probabilities?.[NEW_EVENT_OPTION];
+							if (
+								decision.choice === NEW_EVENT_OPTION &&
+								newProbability !== undefined &&
+								newProbability < NEW_EVENT_MIN_PROBABILITY
+							) {
+								let bestProbability = -1;
+								for (const candidate of candidates) {
+									const probability = decision.probabilities?.[`e${candidate.id}`];
+									if (probability !== undefined && probability > bestProbability) {
+										chosen = candidate;
+										bestProbability = probability;
+									}
+								}
+							}
+							eventId = chosen?.id ?? null;
+						}
+					} catch (error) {
+						log.warn("events", "decision_failed", { error_category: errorCategory(error) });
+						eventId = active[0]?.id ?? null;
 					}
-				} catch (error) {
-					log.warn("events", "decision_failed", { error_category: errorCategory(error) });
-					eventId = reply?.event_id ?? active[0]?.id ?? null;
 				}
 			}
 			if (message.isBot && eventId === null) return null;
