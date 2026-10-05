@@ -32,6 +32,12 @@ function setup() {
 		async decideQuickReaction() {
 			return { emoji: null, confidence: 0, strongEmotion: 0, funny: 0 };
 		},
+		async decideParticipation() {
+			return { directedPersonaId: null };
+		},
+		async auditNatural() {
+			return 1;
+		},
 		async scoreRelevance(_query, candidates) {
 			return candidates.map(() => 0);
 		},

@@ -196,7 +196,10 @@ export class EventTracker {
 							options.push({ id: NEW_EVENT_OPTION, description: "新的话题" });
 							const recent = this.db
 								.query(
-									"SELECT author_name, content FROM messages WHERE space_id = ? AND channel_id = ? AND message_id != ? ORDER BY timestamp DESC, rowid DESC LIMIT 5",
+									`SELECT author_name, content FROM messages WHERE space_id = ? AND channel_id = ? AND message_id != ?
+									AND NOT EXISTS (SELECT 1 FROM inbound_pending p
+										WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id)
+									ORDER BY timestamp DESC, rowid DESC LIMIT 5`,
 								)
 								.all(message.spaceId, message.channelId, message.messageId) as Array<{
 								author_name: string;

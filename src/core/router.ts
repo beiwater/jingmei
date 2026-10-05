@@ -35,3 +35,36 @@ export function routeMessage(message: InboundMessage, personas: readonly Persona
 	}
 	return { personaId: null, reason: "nobody" };
 }
+
+export interface ParticipationMessage {
+	authorId: string;
+	timestamp: number;
+}
+
+/** Chat-in limits only: directed and explicitly addressed turns are never gated. */
+export function participationGated(
+	accountId: string,
+	recent: readonly ParticipationMessage[],
+	lastMessageAt: number | null,
+	now: number,
+): boolean {
+	if (lastMessageAt !== null && now - lastMessageAt < 30_000) return true;
+	const window = recent.filter((message) => message.timestamp >= now - 600_000).slice(0, 30);
+	const own = window.filter((message) => message.authorId === accountId).length;
+	const others = new Set(window.filter((message) => message.authorId !== accountId).map((message) => message.authorId));
+	return own >= 3 && others.size > 1 && own / window.length >= 0.25;
+}
+
+export function participationRoute(
+	sampled: Route,
+	gated: boolean,
+	directed: string | null,
+	chatIn: number | undefined,
+	threshold: number,
+	decisionEnabled: boolean,
+): Route {
+	if (directed) return { personaId: directed, reason: "directed" };
+	if (sampled.personaId && !gated && (!decisionEnabled || (chatIn !== undefined && chatIn >= threshold)))
+		return sampled;
+	return { personaId: null, reason: "nobody" };
+}

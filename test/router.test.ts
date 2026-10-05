@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BotState } from "../src/core/bot-state.ts";
+import { ensureMessagesTable } from "../src/core/db.ts";
 import {
 	Conversation,
 	explicitSearchQuery,
@@ -11,7 +12,7 @@ import {
 } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
-import { routeMessage } from "../src/core/router.ts";
+import { participationGated, participationRoute, routeMessage } from "../src/core/router.ts";
 import { type ActiveTurn, createReactionImageTool } from "../src/core/tools.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport } from "../src/core/types.ts";
 
@@ -140,6 +141,56 @@ describe("routing", () => {
 	});
 });
 
+describe("participation gates", () => {
+	const now = 1_000_000;
+	const rows = (own: number, total: number, otherAuthors = 2, timestamp = now - 60_000) =>
+		Array.from({ length: total }, (_, index) => ({
+			authorId: index < own ? "bot" : `human-${(index - own) % otherAuthors}`,
+			timestamp,
+		}));
+
+	test("the cooldown closes below thirty seconds and opens exactly at the boundary", () => {
+		expect(participationGated("bot", [], now - 29_999, now)).toBe(true);
+		expect(participationGated("bot", [], now - 30_000, now)).toBe(false);
+		expect(participationGated("bot", [], null, now)).toBe(false);
+	});
+
+	test("share gating requires three own messages, two other authors, and at least twenty-five percent", () => {
+		expect(participationGated("bot", rows(2, 8), null, now)).toBe(false);
+		expect(participationGated("bot", rows(3, 12, 1), null, now)).toBe(false);
+		expect(participationGated("bot", rows(3, 13), null, now)).toBe(false);
+		expect(participationGated("bot", rows(3, 12), null, now)).toBe(true);
+		expect(participationGated("bot", rows(3, 11), null, now)).toBe(true);
+	});
+
+	test("the ten-minute boundary is inclusive and only the thirty newest rows count", () => {
+		expect(participationGated("bot", rows(3, 12, 2, now - 600_000), null, now)).toBe(true);
+		expect(participationGated("bot", rows(3, 12, 2, now - 600_001), null, now)).toBe(false);
+		expect(participationGated("bot", [...rows(0, 30), ...rows(3, 3)], null, now)).toBe(false);
+		expect(participationGated("bot", [...rows(8, 30), ...rows(0, 30)], null, now)).toBe(true);
+	});
+
+	test("directed decisions beat the gate and HMAC candidate; chat-in cannot bypass either", () => {
+		const sampled = { personaId: "luna", reason: "probability" } as const;
+		const nobody = { personaId: null, reason: "nobody" } as const;
+		expect(participationRoute(sampled, true, "mio", undefined, 0.7, true)).toEqual({
+			personaId: "mio",
+			reason: "directed",
+		});
+		expect(participationRoute(nobody, true, "mio", undefined, 0.7, true)).toEqual({
+			personaId: "mio",
+			reason: "directed",
+		});
+		expect(participationRoute(sampled, true, null, 1, 0.7, true)).toEqual(nobody);
+		expect(participationRoute(nobody, false, null, 1, 0.7, true)).toEqual(nobody);
+		expect(participationRoute(sampled, false, null, 0.699, 0.7, true)).toEqual(nobody);
+		expect(participationRoute(sampled, false, null, undefined, 0.7, true)).toEqual(nobody);
+		expect(participationRoute(sampled, false, null, 0.7, 0.7, true)).toEqual(sampled);
+		expect(participationRoute(sampled, false, null, undefined, 0.7, false)).toEqual(sampled);
+		expect(participationRoute(sampled, true, null, undefined, 0.7, false)).toEqual(nobody);
+	});
+});
+
 describe("search and voice triggers", () => {
 	test("prefetches an explicit lookup while ignoring a search availability question", () => {
 		expect(explicitSearchQuery("<@1552581470013362197> 你查一下 HSC EAL/D Module D 是什么")).toBe(
@@ -155,6 +206,7 @@ describe("search and voice triggers", () => {
 		db.exec(`CREATE TABLE messages (
 			space_id TEXT, channel_id TEXT, message_id TEXT, author_id TEXT, is_bot INTEGER, content TEXT, timestamp INTEGER
 		)`);
+		ensureMessagesTable(db);
 		const insert = db.query(
 			"INSERT INTO messages (space_id, channel_id, message_id, author_id, is_bot, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		);

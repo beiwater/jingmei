@@ -74,6 +74,8 @@ export interface PlatformTransport {
 	/** Platform syntax for a notifying mention of `user`; only effective when `user` is passed in `mention`. */
 	formatMention(user: PersonaAccount): string;
 	startTyping?(personaId: string, channelId: string): Promise<void> | void;
+	/** How long one startTyping call stays visible on the platform; the core re-sends it within this period. */
+	readonly typingRefreshMs?: number;
 	addReaction?(personaId: string, channelId: string, messageId: string, emoji: string): Promise<void>;
 	isValidReaction(emoji: string): boolean;
 }
@@ -121,7 +123,7 @@ export interface Persona {
 	accounts: Partial<Record<Platform, PersonaAccount>>;
 }
 
-export type RouteReason = "explicit" | "reply" | "name" | "probability" | "nobody";
+export type RouteReason = "explicit" | "reply" | "name" | "directed" | "probability" | "nobody";
 
 export interface Route {
 	personaId: string | null;
@@ -143,7 +145,13 @@ export interface ConversationCore {
 		spaceId: SpaceId,
 		channelId: string,
 		requesterId: string,
-	): Promise<{ tokens: number | null; contextWindow: number; compactionAtTokens: number }>;
+	): Promise<{
+		tokens: number | null;
+		contextWindow: number;
+		compactionAtTokens: number;
+		compactionQuietMs: number;
+		safetyCompactionAtTokens: number;
+	}>;
 	compactContext(
 		personaId: string,
 		platform: Platform,

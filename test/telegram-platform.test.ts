@@ -290,7 +290,13 @@ describe("Telegram text commands", () => {
 		const core = {
 			getContextStatus: async () => {
 				coreCalls++;
-				return { tokens: 10, contextWindow: 100, compactionAtTokens: 80 };
+				return {
+					tokens: 10,
+					contextWindow: 1_000_000,
+					compactionAtTokens: 200_000,
+					compactionQuietMs: 600_000,
+					safetyCompactionAtTokens: 983_616,
+				};
 			},
 		} as unknown as ConversationCore;
 		const context = {

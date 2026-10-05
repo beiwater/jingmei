@@ -10,6 +10,7 @@ import type { PlatformTransport } from "./types.ts";
 /** Wire values predate the multi-platform core; they are persisted in existing session files. */
 export const CONTEXT_MESSAGE_TYPE = "discord_context_v1";
 export const PENDING_SOUL_TYPE = "discord_pending_soul_v1";
+export const WITHHELD_MESSAGE_TYPE = "jingmei_withheld_v1";
 
 export interface ContextImageRef {
 	/** File name inside the private media dir; never a path. */
@@ -61,6 +62,7 @@ export interface ProjectionOptions {
 /**
  * Provider-context projection (rebuilt per request, never persisted):
  * - pending-soul notes already promoted into the formal soul are dropped;
+ * - withheld-turn markers and the assistant messages after their preceding input are dropped;
  * - thinking blocks of completed turns (assistant messages before the last user/custom message)
  *   are dropped, keeping those of the in-progress tool loop;
  * - chat messages expand to text + image blocks; for text-only models an image with a vision
@@ -69,15 +71,23 @@ export interface ProjectionOptions {
  */
 function projectContext(messages: readonly AgentMessage[], options: ProjectionOptions): AgentMessage[] {
 	let lastInput = -1;
+	let withheld = false;
+	const withheldAssistants = new Set<number>();
 	for (let index = messages.length - 1; index >= 0; index--) {
-		const role = messages[index]!.role;
-		if (role === "user" || role === "custom") {
-			lastInput = index;
-			break;
+		const message = messages[index]!;
+		if (message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE) {
+			withheld = true;
+		} else if (message.role === "user" || message.role === "custom") {
+			if (lastInput === -1) lastInput = index;
+			withheld = false;
+		} else if (withheld && message.role === "assistant") {
+			withheldAssistants.add(index);
 		}
 	}
 	const projected: AgentMessage[] = [];
 	messages.forEach((message, index) => {
+		if (message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE) return;
+		if (withheldAssistants.has(index)) return;
 		if (isPromotedSoulNote(message, options.personaId, options.formalSoul)) return;
 		if (message.role === "assistant") {
 			projected.push(

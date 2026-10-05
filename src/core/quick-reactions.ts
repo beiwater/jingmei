@@ -5,6 +5,9 @@ export interface JevIntegration {
 	client: JevClient;
 	quickReactions: boolean;
 	memoryScoring: boolean;
+	replyDecision: boolean;
+	/** Minimum reply-worthiness probability for an ungated HMAC-sampled candidate. */
+	replyThreshold: number;
 	/** Minimum max(strongEmotion, funny) for reacting to an unaddressed message. */
 	threshold: number;
 	/** Minimum gap between unaddressed quick reactions in one channel. */
@@ -36,7 +39,8 @@ export class QuickReactions {
 		if (message.isBot || !message.content.trim()) return;
 		const transport = this.transports.get(message.platform);
 		if (!transport?.addReaction) return;
-		const addressed = route.reason === "explicit" || route.reason === "reply" || route.reason === "name";
+		const addressed =
+			route.reason === "explicit" || route.reason === "reply" || route.reason === "name" || route.reason === "directed";
 		const reactor = addressed ? scopedPersonas.find((persona) => persona.id === route.personaId) : scopedPersonas[0];
 		if (!reactor) return;
 		const channelKey = `${message.spaceId}\0${message.channelId}`;

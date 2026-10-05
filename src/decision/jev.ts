@@ -37,12 +37,26 @@ export interface EventDecision {
 	probabilities?: Record<string, number>;
 }
 
+export interface ParticipationDecision {
+	directedPersonaId: string | null;
+	/** Present only when chat-in scoring was requested. */
+	chatIn?: number;
+}
+
 export interface JevClient {
 	decideQuickReaction(input: {
 		text: string;
 		recent?: readonly string[];
 		emojis: Readonly<Record<string, string>>;
 	}): Promise<QuickReactionDecision>;
+	decideParticipation(input: {
+		message: string;
+		recent?: readonly string[];
+		personas: readonly { id: string; name: string; aliases: readonly string[] }[];
+		chatIn: boolean;
+	}): Promise<ParticipationDecision>;
+	/** Probability that the reply is natural chat text ready to post, not internal planning. */
+	auditNatural(input: { reply: string; message: string; recent?: readonly string[] }): Promise<number>;
 	/** Relevance of each candidate to the query in [0,1], same order; throws on failure. */
 	scoreRelevance(query: string, candidates: readonly string[]): Promise<number[]>;
 	chooseEvent(input: {
@@ -99,6 +113,24 @@ const FUNNY_INSTRUCTIONS =
 	"Is `message` itself clearly funny, a joke, or deliberately humorous? " +
 	"`recent` (if present) is earlier context only; judge `message`.";
 
+const DIRECTED_INSTRUCTIONS =
+	"判断 `message` 实际在对哪个机器人角色说话。选项描述给出角色名字和别名。" +
+	"即使没有 @、回复引用或名字，延续 `recent` 中机器人的发言、语境中的「你」指向机器人、" +
+	"要求它继续或反驳它，都算在对该角色说话。只是在谈论机器人，或群友彼此交流，选择 `none`。";
+
+const CHAT_IN_INSTRUCTIONS =
+	"作为普通群友，此时自然插一句是否合适？判断 `message`，用 `recent` 理解语境。" +
+	"开放邀请、玩笑或梗可以接、被调侃、向全群提出有实质内容的问题、确有东西可补充时给高分；" +
+	"群友彼此对话、纯「草」或贴纸等无内容回应、问题已被回答且没有新东西可说时给低分。" +
+	"不要因为消息里有问题或话题就默认应该插话。";
+
+const NATURAL_INSTRUCTIONS =
+	"判断 `reply` 是否是可以原样发到群里的自然聊天正文，而不是机器人的内部思考或写作计划。" +
+	"内部计划、元叙述、重述事件或触发消息（如「当前事件」「触发消息」标签）、对自己的指令、" +
+	"分析应采用的风格或长度、讨论接下来要说什么，均不是自然正文。" +
+	"自然的简短回答、接梗、情绪表达或追问都可以。是否需要接话已由路由决定，不重新判断；" +
+	"只检查正文是否泄漏规划，不审核安全、事实准确性或是否有新信息。";
+
 function isUnit(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
@@ -112,7 +144,11 @@ interface RawAnswer {
 	probabilities?: unknown;
 }
 
-function parseAnswers(payload: unknown, questions: Readonly<Record<string, Question>>): Record<string, Answer> {
+function parseAnswers(
+	payload: unknown,
+	questions: Readonly<Record<string, Question>>,
+	strictProbabilities = false,
+): Record<string, Answer> {
 	const rawAnswers =
 		typeof payload === "object" && payload !== null && "answers" in payload ? payload.answers : undefined;
 	if (typeof rawAnswers !== "object" || rawAnswers === null || Array.isArray(rawAnswers)) {
@@ -142,6 +178,8 @@ function parseAnswers(payload: unknown, questions: Readonly<Record<string, Quest
 				)
 			) {
 				parsed.probabilities = raw.probabilities as Record<string, number>;
+			} else if (strictProbabilities && Object.hasOwn(raw, "probabilities")) {
+				throw new JevError("invalid_response");
 			}
 			answers[id] = parsed;
 		}
@@ -238,6 +276,47 @@ export function createJevClientWithTransport(
 			};
 		},
 
+		async decideParticipation({ message, recent, personas, chatIn }) {
+			const criteria: Record<string, string> = Object.fromEntries(
+				personas.map((persona) => [persona.id, `${persona.name}（别名：${persona.aliases.join("、")}）`]),
+			);
+			criteria[NONE_OPTION] = "没有在对任何机器人角色说话";
+			const state: { message: string; recent?: string[] } = { message };
+			if (recent && recent.length > 0) state.recent = recent.slice(-MAX_RECENT_LINES);
+			const questions: Record<string, Question> = {
+				directed: { type: "choice", instructions: DIRECTED_INSTRUCTIONS, criteria },
+			};
+			if (chatIn) questions.chat_in = { type: "noul", instructions: CHAT_IN_INSTRUCTIONS };
+			const answers = parseAnswers(await transport(state, questions), questions, true);
+			const directed = answers.directed;
+			if (directed?.type !== "choice") throw new JevError("invalid_response");
+			let winner = directed.choice;
+			let probability = directed.confidence;
+			if (directed.probabilities) {
+				probability = 0;
+				for (const [id, value] of Object.entries(directed.probabilities)) {
+					if (value > probability) {
+						winner = id;
+						probability = value;
+					}
+				}
+			}
+			const result: ParticipationDecision = {
+				directedPersonaId: winner !== NONE_OPTION && probability >= 0.5 ? winner : null,
+			};
+			if (chatIn) result.chatIn = noulOf(answers, "chat_in");
+			return result;
+		},
+
+		async auditNatural({ reply, message, recent }) {
+			const state: { reply: string; message: string; recent?: string[] } = { reply, message };
+			if (recent && recent.length > 0) state.recent = recent.slice(-MAX_RECENT_LINES);
+			const answers = await evaluate(state, {
+				natural: { type: "noul", instructions: NATURAL_INSTRUCTIONS },
+			});
+			return noulOf(answers, "natural");
+		},
+
 		async scoreRelevance(query, candidates) {
 			if (candidates.length === 0) return [];
 			const questions: Record<string, Question> = {};
@@ -314,6 +393,18 @@ export function withFallback(primary: JevClient, fallback: JevClient): JevClient
 				"decideQuickReaction",
 				() => primary.decideQuickReaction(input),
 				() => fallback.decideQuickReaction(input),
+			),
+		decideParticipation: (input) =>
+			attempt(
+				"decideParticipation",
+				() => primary.decideParticipation(input),
+				() => fallback.decideParticipation(input),
+			),
+		auditNatural: (input) =>
+			attempt(
+				"auditNatural",
+				() => primary.auditNatural(input),
+				() => fallback.auditNatural(input),
 			),
 		scoreRelevance: (query, candidates) =>
 			attempt(

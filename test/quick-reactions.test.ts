@@ -35,6 +35,12 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 			throw new Error("unused");
 		},
 		scoreParticipation: async () => [],
+		decideParticipation: async () => {
+			throw new Error("unused");
+		},
+		auditNatural: async () => {
+			throw new Error("unused");
+		},
 	};
 	const transport = {
 		platform: "telegram",
@@ -50,7 +56,15 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 		},
 	} satisfies PlatformTransport;
 	const quick = new QuickReactions(
-		{ client, quickReactions: true, memoryScoring: false, threshold: 0.8, minIntervalMs: 60_000 },
+		{
+			client,
+			quickReactions: true,
+			memoryScoring: false,
+			replyDecision: false,
+			replyThreshold: 0.7,
+			threshold: 0.8,
+			minIntervalMs: 60_000,
+		},
 		new Map<Platform, PlatformTransport>([["telegram", transport]]),
 		() => now,
 	);
@@ -118,4 +132,16 @@ test("bot messages and emojis outside the platform table never react", async () 
 	const invented = harness({ emoji: "😂", strongEmotion: 1, funny: 1 });
 	await invented.quick.react(invented.message(), { personaId: "luna", reason: "explicit" }, personas, []);
 	expect(invented.reactions).toEqual([]);
+});
+
+test("directed messages react from the directed persona even without a strong signal or a free slot", async () => {
+	const decision = { emoji: "👍", strongEmotion: 1, funny: 0 };
+	const h = harness(decision);
+	await h.quick.react(h.message(), nobody, personas, []);
+	decision.strongEmotion = 0;
+	await h.quick.react(h.message(), { personaId: "mio", reason: "directed" }, personas, []);
+	expect(h.reactions.map((reaction) => [reaction.personaId, reaction.emoji])).toEqual([
+		["luna", "👍"],
+		["mio", "👍"],
+	]);
 });

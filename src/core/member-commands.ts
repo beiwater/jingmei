@@ -21,7 +21,7 @@ export async function runContextCommand(
 	if (command === "context") {
 		const status = await core.getContextStatus(...target);
 		const tokens = status.tokens === null ? "暂时无法估算" : `${status.tokens.toLocaleString()} tokens`;
-		return `${labels.context}：${tokens} / ${status.contextWindow.toLocaleString()} tokens。自动压缩约在 ${status.compactionAtTokens.toLocaleString()} tokens 后触发；也可用 /compact 手动压缩。`;
+		return `${labels.context}：${tokens} / ${status.contextWindow.toLocaleString()} tokens。超过 ${status.compactionAtTokens.toLocaleString()} tokens 后，频道连续安静 ${status.compactionQuietMs / 60_000} 分钟才压缩；接近窗口上限（约 ${status.safetyCompactionAtTokens.toLocaleString()} tokens）仍有自动压缩与溢出恢复保护。也可用 /compact 手动压缩。`;
 	}
 	const result = await core.compactContext(...target);
 	return `已压缩${labels.scope}上下文。压缩前约 ${result.tokensBefore.toLocaleString()} tokens。`;

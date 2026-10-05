@@ -471,6 +471,8 @@ export class DiscordPlatformTransport implements PlatformTransport {
 	readonly echoesOwnMessages = true;
 	readonly displayName = "Discord";
 	readonly promptLines = DISCORD_PROMPT_LINES;
+	/** A typing trigger lasts about ten seconds. */
+	readonly typingRefreshMs = 8_000;
 
 	constructor(
 		private readonly clients: ReadonlyMap<string, DiscordTransport>,

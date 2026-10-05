@@ -33,7 +33,7 @@ const model = (provider: string, id: string): Model<"openai-responses"> => ({
 });
 
 test("a model chosen by the CLI connection switches the running bot's open session, survives restart and resets", async () => {
-	// beta advertises a 1M window; the bot still compacts as if it had 64K.
+	// beta advertises a 1M window; the session uses the whole model window.
 	const models = [model("fixture", "alpha"), { ...model("fixture", "beta"), contextWindow: 1_048_576 }];
 	// A provider whose catalog the CLI caches only after this process started (e.g. after `jingmei login`).
 	const late = model("live", "delta");
@@ -145,7 +145,11 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	operator.setModelOverride("luna", "fixture", "beta");
 	await send(core);
 	expect(used.at(-1)).toBe("fixture/beta");
-	expect((await core.getContextStatus("luna", "discord", SPACE, "222", "5")).contextWindow).toBe(65_536);
+	const status = await core.getContextStatus("luna", "discord", SPACE, "222", "5");
+	expect(status.contextWindow).toBe(1_048_576);
+	expect(status.compactionAtTokens).toBe(200_000);
+	expect(status.compactionQuietMs).toBe(600_000);
+	expect(status.safetyCompactionAtTokens).toBe(1_048_576 - 16_384);
 
 	operator.setModelOverride("luna", "live", "delta");
 	await send(core);

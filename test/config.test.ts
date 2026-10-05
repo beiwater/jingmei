@@ -71,6 +71,8 @@ describe("config", () => {
 			model: "jev-latest",
 			quickReactions: true,
 			memoryScoring: true,
+			replyDecision: true,
+			replyThreshold: 0.7,
 			threshold: 0.8,
 			minIntervalMs: 60_000,
 		});
@@ -85,6 +87,29 @@ describe("config", () => {
 			tokens: { discord: "discord-fixture", telegram: "telegram-fixture" },
 		});
 		expect(config.personas[0]?.spaces).toBeUndefined();
+	});
+
+	test("accepts reply-decision opt-out and threshold boundaries", () => {
+		for (const replyThreshold of [0.0001, 0.7, 1]) {
+			const config = validateConfig(
+				base({ jev: { apiKeyEnv: "TYPESAFE_API_KEY", replyDecision: false, replyThreshold } }),
+				root,
+				env,
+			);
+			expect(config.jev?.replyDecision).toBe(false);
+			expect(config.jev?.replyThreshold).toBe(replyThreshold);
+		}
+	});
+
+	test("rejects invalid reply-decision settings even without a decision source", () => {
+		for (const replyThreshold of [null, 0, -0.1, 1.01, Number.NaN, Infinity, "0.7", true])
+			expect(errorsOf(() => validateConfig(base({ jev: { replyThreshold } }), root, env))).toContainEqual(
+				"jev.replyThreshold must be in (0, 1]",
+			);
+		for (const replyDecision of [null, 0, "false", {}])
+			expect(errorsOf(() => validateConfig(base({ jev: { replyDecision } }), root, env))).toContainEqual(
+				"jev.replyDecision must be a boolean",
+			);
 	});
 
 	test("accepts max reasoning and rejects unknown levels", () => {

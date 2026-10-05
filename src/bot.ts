@@ -113,15 +113,17 @@ async function main(): Promise<void> {
 		...(config.voice ? { voice: config.voice } : {}),
 		...(imageGenerator ? { imageGenerator } : {}),
 		...(config.visionModel ? { visionModel: config.visionModel } : {}),
-		...(jev && decision
+		...(decision
 			? {
 					jev: {
 						client: decision,
-						quickReactions: jev.quickReactions,
-						memoryScoring: jev.memoryScoring,
-						threshold: jev.threshold,
-						minIntervalMs: jev.minIntervalMs,
-						...(jev.emojis ? { emojis: jev.emojis } : {}),
+						quickReactions: jev?.quickReactions ?? false,
+						memoryScoring: jev?.memoryScoring ?? false,
+						replyDecision: jev?.replyDecision ?? true,
+						replyThreshold: jev?.replyThreshold ?? 0.7,
+						threshold: jev?.threshold ?? 0.8,
+						minIntervalMs: jev?.minIntervalMs ?? 60_000,
+						...(jev?.emojis ? { emojis: jev.emojis } : {}),
 					},
 				}
 			: {}),
@@ -153,6 +155,10 @@ async function main(): Promise<void> {
 	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
 
 	for (const platform of platforms) await platform.start();
+	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.
+	void core
+		?.recoverPending()
+		.catch((error: unknown) => log.error("core", "inbound_recovery_failed", { error_category: errorCategory(error) }));
 	scheduler.start();
 	botState.startRun();
 	heartbeat = setInterval(() => botState.heartbeat(), HEARTBEAT_MS);
@@ -168,6 +174,7 @@ async function main(): Promise<void> {
 		vision_enabled: !!config.visionModel,
 		jev_quick_reactions: !!jev?.quickReactions,
 		jev_memory_scoring: !!jev?.memoryScoring,
+		jev_reply_decision: (jev?.replyDecision ?? true) && !!decision,
 		events_enabled: !!events,
 		events_local_fallback: !!events && !!remoteDecision && !!localDecision,
 		celebration_targets: config.celebrations.length,

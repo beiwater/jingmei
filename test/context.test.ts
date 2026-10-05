@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
+import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
@@ -172,6 +173,8 @@ function fixture(options: {
 	};
 	return {
 		send,
+		core,
+		persona,
 		contexts,
 		observerContexts,
 		memory,
@@ -294,4 +297,43 @@ test("member memory is not attached automatically; the model recalls it on deman
 	});
 	await f.send();
 	expect(JSON.stringify(f.contexts[0]!.messages)).not.toContain("author-music");
+});
+
+test("withheld markers persist but projection removes only their turn's assistants", async () => {
+	const f = fixture({ imageInput: false, events: true });
+	f.script.push(f.reply([{ type: "text", text: "visible-before" }]));
+	await f.send({ content: "input-before" });
+	f.script.push(
+		f.reply([{ type: "toolCall", id: "withheld-calc", name: "run_js", arguments: { code: "1 + 1" } }], "toolUse"),
+		f.reply([{ type: "text", text: "withheld-answer §E7" }]),
+	);
+	await f.send({ content: "input-withheld" });
+	expect(f.sends()).toBe(1);
+	const session = await (f.core as unknown as SessionSeam).getSession(f.persona, f.space, "222");
+	const marker = session.messages.find(
+		(message) => message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE,
+	);
+	expect(marker).toMatchObject({ role: "custom", customType: WITHHELD_MESSAGE_TYPE, content: "", display: false });
+	expect(
+		session.messages.some(
+			(message) =>
+				message.role === "assistant" &&
+				message.content.some((part) => part.type === "text" && part.text === "withheld-answer §E7"),
+		),
+	).toBe(true);
+
+	f.script.push(f.reply([{ type: "text", text: "visible-after" }]));
+	await f.send({ content: "input-after" });
+	await f.send({ content: "input-final" });
+	const projected = f.contexts.at(-1)!.messages;
+	const assistants = projected.filter((message) => message.role === "assistant");
+	expect(assistants.flatMap((message) => message.content.filter((part) => part.type === "text"))).toEqual([
+		{ type: "text", text: "visible-before" },
+		{ type: "text", text: "visible-after" },
+	]);
+	expect(assistants.flatMap((message) => message.content.filter((part) => part.type === "toolCall"))).toEqual([]);
+	expect(JSON.stringify(projected)).not.toContain(WITHHELD_MESSAGE_TYPE);
+	for (const text of ["input-before", "input-withheld", "input-after", "input-final"])
+		expect(JSON.stringify(projected)).toContain(text);
+	expect(projected.filter((message) => JSON.stringify(message.content).includes("[当前事件"))).toHaveLength(1);
 });

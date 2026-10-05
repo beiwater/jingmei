@@ -43,6 +43,8 @@ export interface JevSettings {
 	model: string;
 	quickReactions: boolean;
 	memoryScoring: boolean;
+	replyDecision: boolean;
+	replyThreshold: number;
 	threshold: number;
 	minIntervalMs: number;
 	/** Overrides of the platform default quick-reaction tables (emoji → meaning). */
@@ -618,11 +620,14 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			const endpoint = httpUrl("jev.endpoint", value.endpoint === undefined ? JEV_ENDPOINT : value.endpoint);
 			const model = value.model ?? DEFAULT_JEV_MODEL;
 			if (!nonEmptyString(model)) errors.push("jev.model must be a nonempty string");
-			for (const key of ["quickReactions", "memoryScoring"] as const)
+			for (const key of ["quickReactions", "memoryScoring", "replyDecision"] as const)
 				if (value[key] !== undefined && typeof value[key] !== "boolean") errors.push(`jev.${key} must be a boolean`);
 			const threshold = value.threshold ?? DEFAULT_JEV_THRESHOLD;
 			if (typeof threshold !== "number" || !(threshold > 0 && threshold <= 1))
 				errors.push("jev.threshold must be in (0, 1]");
+			const replyThreshold = value.replyThreshold === undefined ? 0.7 : value.replyThreshold;
+			if (typeof replyThreshold !== "number" || !(replyThreshold > 0 && replyThreshold <= 1))
+				errors.push("jev.replyThreshold must be in (0, 1]");
 			const minIntervalMs = value.minIntervalMs ?? DEFAULT_JEV_MIN_INTERVAL_MS;
 			if (typeof minIntervalMs !== "number" || !Number.isFinite(minIntervalMs) || minIntervalMs < 0)
 				errors.push("jev.minIntervalMs must be a number >= 0");
@@ -656,6 +661,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 					model: String(model).trim(),
 					quickReactions: value.quickReactions !== false,
 					memoryScoring: value.memoryScoring !== false,
+					replyDecision: value.replyDecision !== false,
+					replyThreshold: replyThreshold as number,
 					threshold: threshold as number,
 					minIntervalMs: minIntervalMs as number,
 					...(emojis ? { emojis } : {}),

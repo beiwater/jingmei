@@ -27,6 +27,8 @@
 		"model": "jev-latest",
 		"quickReactions": true,
 		"memoryScoring": true,
+		"replyDecision": true,
+		"replyThreshold": 0.7,
 		"threshold": 0.8,
 		"minIntervalMs": 60000
 	},

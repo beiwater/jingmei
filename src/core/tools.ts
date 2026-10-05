@@ -119,10 +119,12 @@ export function createReactionTool(scope: ToolScope, db: Database) {
 				WHERE space_id = ? AND channel_id = ? AND message_id = ?
 				AND message_id IN (
 					SELECT message_id FROM messages WHERE space_id = ? AND channel_id = ?
+					AND (message_id = ? OR NOT EXISTS (SELECT 1 FROM inbound_pending p
+						WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id))
 					ORDER BY timestamp DESC, message_id DESC LIMIT 30
 				)
 			`)
-				.get(spaceId, channelId, target, spaceId, channelId) as { is_bot: number } | null;
+				.get(spaceId, channelId, target, spaceId, channelId, turn.sourceMessageId) as { is_bot: number } | null;
 			if (!row || row.is_bot !== 0)
 				return failure("Target must be a stored human message in this channel.", "message_not_reactable");
 			if (turn.reply.status !== "idle")

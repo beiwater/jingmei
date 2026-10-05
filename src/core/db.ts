@@ -44,6 +44,14 @@ export function ensureMessagesTable(db: Database): void {
 			event_id INTEGER,
 			PRIMARY KEY (space_id, channel_id, message_id)
 		);
+		CREATE TABLE IF NOT EXISTS inbound_pending (
+			space_id TEXT NOT NULL,
+			channel_id TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			received_at INTEGER NOT NULL,
+			PRIMARY KEY (space_id, channel_id, message_id)
+		);
 	`);
 	const columns = db.query("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
 	if (!columns.some((column) => column.name === "event_id")) {

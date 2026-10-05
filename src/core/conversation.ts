@@ -18,6 +18,7 @@ import {
 	type ContextImageRef,
 	makeContextExtension,
 	PENDING_SOUL_TYPE,
+	WITHHELD_MESSAGE_TYPE,
 } from "./context.ts";
 import type { BotState } from "./bot-state.ts";
 import { ensureMessagesTable } from "./db.ts";
@@ -26,7 +27,7 @@ import { isRawId, platformOf } from "./ids.ts";
 import type { MemberMemory, RelevanceScorer } from "./memory.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { type JevIntegration, QuickReactions } from "./quick-reactions.ts";
-import { personaInScope, routeMessage } from "./router.ts";
+import { participationGated, participationRoute, personaInScope, routeMessage } from "./router.ts";
 import { parsePendingSoul, type SoulScope, type SoulStore } from "./soul.ts";
 import {
 	type ActiveTurn,
@@ -57,6 +58,12 @@ import type {
 } from "./types.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
 
+export interface IdleCompactionClock {
+	now(): number;
+	setTimeout(callback: () => void, delayMs: number): NodeJS.Timeout;
+	clearTimeout(timer: NodeJS.Timeout | undefined): void;
+}
+
 export interface ConversationOptions {
 	db: Database;
 	/** Pause flag and reply counter shared with the operator CLI. */
@@ -79,13 +86,23 @@ export interface ConversationOptions {
 	visionModel?: { provider: string; model: string };
 	/** Whole model/tool turn deadline; injectable for deterministic timeout regressions. */
 	turnTimeoutMs?: number;
+	/** Upper bound for one turn's "typing…" indicator; injectable for deterministic regressions. */
+	typingMaxMs?: number;
+	/** Quiet-period duration; injectable for deterministic idle-compaction regressions. */
+	idleCompactionQuietMs?: number;
+	idleCompactionClock?: IdleCompactionClock;
 }
 
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
 const MAX_IMAGES = 4;
 const RECENT_LINES_FOR_JEV = 5;
-/** Group chat needs recent context only: compaction runs at the same size whatever window the model offers. */
-const MAX_CONTEXT_WINDOW = 65_536;
+const IDLE_COMPACTION_TOKENS = 200_000;
+const IDLE_COMPACTION_QUIET_MS = 600_000;
+const PENDING_RECOVERY_MAX_AGE_MS = 600_000;
+const STALE_CHIME_IN_MS = 120_000;
+const COMPACTION_RESERVE_TOKENS = 16_384;
+/** Stop showing "typing…" after a minute even if the model is still working. */
+const TYPING_MAX_MS = 60_000;
 /**
  * Pi sizes the kept tail with a chars/4 estimate, which undercounts Chinese chat roughly fivefold.
  * Its 20k default kept almost the whole history, so every compaction left the session over the
@@ -93,6 +110,17 @@ const MAX_CONTEXT_WINDOW = 65_536;
  * estimated tokens keeps roughly 15–20k real tokens of recent chat.
  */
 const KEEP_RECENT_ESTIMATED_TOKENS = 3_000;
+
+interface RouteDecision {
+	route: Route;
+	/** HMAC-sampled chat-in candidate, before gating and the content decision. */
+	candidate: string | null;
+	gated: boolean;
+	/** `none`: no reply-decision request was made (addressed, bot, disabled, no client). */
+	decision: "none" | "ok" | "failed";
+	chatIn?: number;
+}
+
 const VISION_PROMPT = "用一两句中文客观描述这张图片的内容，包括可读文字。";
 const MENTION_TOKEN = /<@!?\d+>|(?<![\w.])@[A-Za-z]\w{3,31}/g;
 const SESSION_TABLE = `
@@ -126,9 +154,14 @@ export class Conversation implements ConversationCore {
 	private readonly soulStore: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
 	private readonly quickReactions?: QuickReactions;
+	private readonly jev?: JevIntegration;
 	private readonly scoreRelevance?: RelevanceScorer;
 	private readonly events?: EventTracker;
 	private readonly turnTimeoutMs: number;
+	private readonly typingMaxMs: number;
+	private readonly idleCompactionQuietMs: number;
+	private readonly idleCompactionClock: IdleCompactionClock;
+	private readonly channelActivity = new Map<string, { lastMessageAt: number; timer?: NodeJS.Timeout }>();
 	private readonly sessions = new Map<string, Promise<AgentSession>>();
 	private readonly lanes = new Map<string, Promise<void>>();
 	private readonly soulRevisions = new Map<string, number>();
@@ -137,6 +170,8 @@ export class Conversation implements ConversationCore {
 	private readonly activeTurns = new Map<string, ActiveTurn>();
 	/** `persona\0provider/model` overrides already found missing, so a bad choice is retried once, not per message. */
 	private readonly unavailableOverrides = new Set<string>();
+	/** Startup snapshot excludes new deliveries accepted while platforms are starting. */
+	private readonly recoveryRows: Array<{ payload: string; received_at: number }>;
 	private closed = false;
 
 	constructor(options: ConversationOptions) {
@@ -155,11 +190,18 @@ export class Conversation implements ConversationCore {
 		this.visionModel = options.visionModel;
 		this.events = options.events;
 		this.turnTimeoutMs = options.turnTimeoutMs ?? 180_000;
+		this.typingMaxMs = options.typingMaxMs ?? TYPING_MAX_MS;
+		this.idleCompactionQuietMs = options.idleCompactionQuietMs ?? IDLE_COMPACTION_QUIET_MS;
+		this.idleCompactionClock = options.idleCompactionClock ?? { now: Date.now, setTimeout, clearTimeout };
 		const jev = options.jev;
+		this.jev = jev;
 		if (jev?.quickReactions) this.quickReactions = new QuickReactions(jev, options.transports);
 		if (jev?.memoryScoring) this.scoreRelevance = (query, candidates) => jev.client.scoreRelevance(query, candidates);
 		this.db.exec(SESSION_TABLE);
 		ensureMessagesTable(this.db);
+		this.recoveryRows = this.db
+			.query("SELECT payload, received_at FROM inbound_pending ORDER BY received_at, rowid")
+			.all() as Array<{ payload: string; received_at: number }>;
 	}
 
 	async handleMessage(message: InboundMessage): Promise<Dispatch> {
@@ -168,11 +210,86 @@ export class Conversation implements ConversationCore {
 			throw new Error("message platform is not served");
 		for (const field of ["channelId", "messageId", "authorId"] as const)
 			if (!isRawId(message[field])) throw new Error(`invalid ${field}`);
-		return this.runInLane(`${message.spaceId}\0${message.channelId}`, async () => this.processMessage(message));
+		const receivedAt = Date.now();
+		const accepted = { ...message, timestamp: message.timestamp ?? receivedAt };
+		const inserted = this.db.transaction(() => {
+			const result = this.db
+				.query(`INSERT OR IGNORE INTO messages
+					(space_id, channel_id, message_id, author_id, author_name, is_bot, content, reply_to_message_id, timestamp)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+				.run(
+					message.spaceId,
+					message.channelId,
+					message.messageId,
+					message.authorId,
+					message.authorName,
+					message.isBot ? 1 : 0,
+					message.content,
+					message.replyToMessageId ?? null,
+					accepted.timestamp,
+				);
+			if (!result.changes) return false;
+			// Image bytes are bounded by the media adapter, but need not inflate SQLite/WAL.
+			const { images, ...payload } = accepted;
+			if (images?.length) payload.content += "\n[图片在崩溃恢复后不可用；无法查看图片内容]";
+			this.db
+				.query("INSERT INTO inbound_pending VALUES (?, ?, ?, ?, ?)")
+				.run(message.spaceId, message.channelId, message.messageId, JSON.stringify(payload), receivedAt);
+			return true;
+		})();
+		if (!inserted) return { route: { personaId: null, reason: "nobody" }, messageStored: false };
+		return this.enqueuePending(accepted, receivedAt);
+	}
+
+	/** Replay only unfinished startup records; normal failures are never retried. */
+	async recoverPending(): Promise<void> {
+		if (this.closed) throw new Error("conversation core is closed");
+		let recovered = 0;
+		let expired = 0;
+		const turns: Promise<Dispatch>[] = [];
+		for (const row of this.recoveryRows.splice(0)) {
+			const message = JSON.parse(row.payload) as InboundMessage;
+			if (Date.now() - (message.timestamp ?? row.received_at) > PENDING_RECOVERY_MAX_AGE_MS) {
+				this.removePending(message);
+				expired++;
+			} else {
+				turns.push(this.enqueuePending(message, row.received_at));
+				recovered++;
+			}
+		}
+		if (recovered || expired) log.info("core", "inbound_recovered", { recovered, expired });
+		await Promise.allSettled(turns);
+	}
+
+	private removePending(message: InboundMessage): void {
+		this.db
+			.query("DELETE FROM inbound_pending WHERE space_id = ? AND channel_id = ? AND message_id = ?")
+			.run(message.spaceId, message.channelId, message.messageId);
+	}
+
+	private enqueuePending(message: InboundMessage, receivedAt: number): Promise<Dispatch> {
+		const channelKey = `${message.spaceId}\0${message.channelId}`;
+		const previous = this.channelActivity.get(channelKey);
+		this.idleCompactionClock.clearTimeout(previous?.timer);
+		this.channelActivity.set(channelKey, { lastMessageAt: this.idleCompactionClock.now() });
+		return this.runInLane(channelKey, async () => {
+			try {
+				return await this.processMessage(message, receivedAt);
+			} finally {
+				this.removePending(message);
+				try {
+					await this.scheduleIdleCompaction(message.spaceId, message.channelId);
+				} catch (error) {
+					log.error("core", "idle_compaction_failed", { error_category: errorCategory(error) });
+				}
+			}
+		});
 	}
 
 	async close(): Promise<void> {
 		this.closed = true;
+		for (const activity of this.channelActivity.values()) this.idleCompactionClock.clearTimeout(activity.timer);
+		this.channelActivity.clear();
 		await Promise.allSettled([...this.lanes.values()]);
 		this.sessions.clear();
 	}
@@ -189,7 +306,13 @@ export class Conversation implements ConversationCore {
 			const session = await this.getSession(persona, spaceId, channelId);
 			const usage = session.getContextUsage();
 			const contextWindow = usage?.contextWindow ?? session.model?.contextWindow ?? 0;
-			return { tokens: usage?.tokens ?? null, contextWindow, compactionAtTokens: contextWindow - 16_384 };
+			return {
+				tokens: usage?.tokens ?? null,
+				contextWindow,
+				compactionAtTokens: IDLE_COMPACTION_TOKENS,
+				compactionQuietMs: this.idleCompactionQuietMs,
+				safetyCompactionAtTokens: contextWindow - COMPACTION_RESERVE_TOKENS,
+			};
 		});
 	}
 
@@ -202,25 +325,78 @@ export class Conversation implements ConversationCore {
 	) {
 		const persona = this.requireAdminPersona(personaId, platform, spaceId, requesterId);
 		return this.runInLane(`${spaceId}\0${channelId}`, async () => {
-			const scope: SoulScope = { personaId: persona.id, spaceId, channelId };
 			const session = await this.getSession(persona, spaceId, channelId);
 			if (!session.isIdle || session.isCompacting) throw new Error("context_busy");
-			let pendingBefore: string | null = null;
-			try {
-				pendingBefore = this.soulStore.readPending(scope);
-			} catch (error) {
-				log.error("core", "soul_pending_read_failed", {
-					persona_id: persona.id,
-					error_category: errorCategory(error),
-				});
-			}
-			const result = await session.compact();
-			if (pendingBefore !== null) await this.promotePendingSoulAfterCompaction(scope, pendingBefore);
-			return { tokensBefore: result.tokensBefore, estimatedTokensAfter: result.estimatedTokensAfter };
+			return this.compactSession(session, { personaId: persona.id, spaceId, channelId });
 		});
 	}
 
-	/** The operator-selected model (set by the CLI, read per call), else the configured model; window capped. */
+	private async compactSession(session: AgentSession, scope: SoulScope) {
+		let pendingBefore: string | null = null;
+		try {
+			pendingBefore = this.soulStore.readPending(scope);
+		} catch (error) {
+			log.error("core", "soul_pending_read_failed", {
+				persona_id: scope.personaId,
+				error_category: errorCategory(error),
+			});
+		}
+		const result = await session.compact();
+		if (pendingBefore !== null) await this.promotePendingSoulAfterCompaction(scope, pendingBefore);
+		return { tokensBefore: result.tokensBefore, estimatedTokensAfter: result.estimatedTokensAfter };
+	}
+
+	private async scheduleIdleCompaction(spaceId: SpaceId, channelId: string): Promise<void> {
+		const channelKey = `${spaceId}\0${channelId}`;
+		const activity = this.channelActivity.get(channelKey);
+		if (this.closed || !activity || activity.timer) return;
+		const personas = this.personas.filter((persona) => this.sessions.has(sessionKey(persona.id, spaceId, channelId)));
+		const sessions = await Promise.all(
+			personas.map(async (persona) => ({
+				persona,
+				session: await this.sessions.get(sessionKey(persona.id, spaceId, channelId)),
+			})),
+		);
+		if (this.closed || this.channelActivity.get(channelKey) !== activity) return;
+		if (!sessions.some(({ session }) => (session?.getContextUsage()?.tokens ?? 0) > IDLE_COMPACTION_TOKENS)) {
+			this.channelActivity.delete(channelKey);
+			return;
+		}
+		activity.timer = this.idleCompactionClock.setTimeout(
+			() => {
+				void this.runInLane(channelKey, async () => {
+					for (const { persona, session } of sessions) {
+						if (this.closed || this.channelActivity.get(channelKey) !== activity) return;
+						if (
+							!session ||
+							(await this.sessions.get(sessionKey(persona.id, spaceId, channelId))) !== session ||
+							!session.isIdle ||
+							session.isCompacting ||
+							(session.getContextUsage()?.tokens ?? 0) <= IDLE_COMPACTION_TOKENS
+						)
+							continue;
+						if (this.closed || this.channelActivity.get(channelKey) !== activity) return;
+						try {
+							const result = await this.compactSession(session, { personaId: persona.id, spaceId, channelId });
+							log.info("core", "idle_compaction", { persona_id: persona.id, tokensBefore: result.tokensBefore });
+						} catch (error) {
+							log.error("core", "idle_compaction_failed", { error_category: errorCategory(error) });
+						}
+					}
+				})
+					.catch((error) => {
+						log.error("core", "idle_compaction_failed", { error_category: errorCategory(error) });
+					})
+					.finally(() => {
+						if (this.channelActivity.get(channelKey) === activity) this.channelActivity.delete(channelKey);
+					});
+			},
+			Math.max(0, activity.lastMessageAt + this.idleCompactionQuietMs - this.idleCompactionClock.now()),
+		);
+		activity.timer.unref();
+	}
+
+	/** The operator-selected model (set by the CLI, read per call), else the configured model. */
 	private async modelFor(persona: Persona): Promise<Model<Api> | undefined> {
 		const override = this.botState.modelOverride(persona.id);
 		let model: Model<Api> | undefined;
@@ -242,7 +418,7 @@ export class Conversation implements ConversationCore {
 			}
 		}
 		model ??= this.modelRuntime.getModel(persona.provider, persona.model);
-		return model && model.contextWindow > MAX_CONTEXT_WINDOW ? { ...model, contextWindow: MAX_CONTEXT_WINDOW } : model;
+		return model;
 	}
 
 	private requireAdminPersona(personaId: string, platform: Platform, spaceId: SpaceId, requesterId: string): Persona {
@@ -258,30 +434,16 @@ export class Conversation implements ConversationCore {
 		return persona;
 	}
 
-	private async processMessage(message: InboundMessage): Promise<Dispatch> {
+	private async processMessage(message: InboundMessage, receivedAt: number): Promise<Dispatch> {
+		const stale = Date.now() - (message.timestamp ?? receivedAt) > STALE_CHIME_IN_MS;
 		const transport = this.transports.get(message.platform)!;
 		const activePersonas = this.personas.filter((persona) => personaInScope(persona, message));
-		const inserted =
-			this.db
-				.query(`
-			INSERT OR IGNORE INTO messages
-			(space_id, channel_id, message_id, author_id, author_name, is_bot, content, reply_to_message_id, timestamp)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`)
-				.run(
-					message.spaceId,
-					message.channelId,
-					message.messageId,
-					message.authorId,
-					message.authorName,
-					message.isBot ? 1 : 0,
-					message.content,
-					message.replyToMessageId ?? null,
-					message.timestamp ?? Date.now(),
-				).changes > 0;
-		if (!inserted) return { route: { personaId: null, reason: "nobody" }, messageStored: false };
 		// Paused: keep the message for history and stats, but no memory, topics, reactions, model turns or replies.
-		if (this.botState.pausedAt() !== null) return { route: { personaId: null, reason: "nobody" }, messageStored: true };
+		if (this.botState.pausedAt() !== null) {
+			if (!message.isBot)
+				log.info("core", "route", { platform: message.platform, reason: "paused", ...(stale ? { stale: true } : {}) });
+			return { route: { personaId: null, reason: "nobody" }, messageStored: true };
+		}
 		const botUserIds = new Set(this.personas.flatMap((persona) => persona.accounts[message.platform]?.userId ?? []));
 		if (!message.isBot) {
 			try {
@@ -291,18 +453,34 @@ export class Conversation implements ConversationCore {
 			}
 		}
 
-		const eventId = (await this.events?.assign(message)) ?? null;
+		const recent = this.recentLines(message);
+		const [eventId, decided] = await Promise.all([
+			this.events?.assign(message) ?? Promise.resolve(null),
+			this.decideRoute(message, activePersonas, recent, stale),
+		]);
+		const route = decided.route;
+		// One line per human message so "why did / didn't it reply" is answerable without message text.
+		if (!message.isBot)
+			log.info("core", "route", {
+				platform: message.platform,
+				reason: route.reason,
+				persona_id: route.personaId,
+				candidate: decided.candidate,
+				gated: decided.gated,
+				decision: decided.decision,
+				...(decided.chatIn !== undefined ? { chat_in: Math.round(decided.chatIn * 100) / 100 } : {}),
+				...(stale ? { stale: true } : {}),
+			});
 		const event = eventId !== null ? this.events?.describe(eventId) : null;
 		// Turn-only guidance: shown with the triggering message, never persisted into history.
 		const eventNote =
 			eventId !== null
-				? `[当前事件 §E${eventId}「${event?.title || "尚无标题"}」${event?.description ? `：${event.description}` : ""}。${event?.participants.length ? `主要参与者：${event.participants.map((participant) => participant.name).join("、")}。` : ""}只回应这个事件，不要混入其他事件的内容。]`
+				? `[当前事件 §E${eventId}「${event?.title || "尚无标题"}」${event?.description ? `：${event.description}` : ""}。${event?.participants.length ? `主要参与者：${event.participants.map((participant) => participant.name).join("、")}。` : ""}]`
 				: "";
 
-		const route = routeMessage(message, this.personas, this.secret);
-		if (this.quickReactions && !message.isBot) {
+		if (this.quickReactions && !message.isBot && !stale) {
 			// Fire-and-forget: a quick reaction never delays or fails the main turn.
-			this.quickReactions.react(message, route, activePersonas, this.recentLines(message)).catch((error) =>
+			this.quickReactions.react(message, route, activePersonas, recent).catch((error) =>
 				log.warn("core", "quick_reaction_failed", {
 					platform: message.platform,
 					error_category: errorCategory(error),
@@ -314,175 +492,293 @@ export class Conversation implements ConversationCore {
 			route.personaId && this.webSearchApiKey ? searchQueryForRoutedMessage(this.db, message, route) : null;
 		const prefetchedSearch = searchQuery ? await runDeepSeekWebSearch(this.webSearchApiKey!, searchQuery) : null;
 		let responseMessageId: string | undefined;
-		for (const persona of activePersonas) {
-			// The selected Pi session already contains its own generated assistant response. Its
-			// platform echo is still stored above, but must not be fed back as a second user message.
-			if (persona.accounts[message.platform]?.userId === message.authorId) continue;
-			const triggered = route.personaId === persona.id;
-			const session = await this.getSession(persona, message.spaceId, message.channelId);
-			const pendingSoulSnapshot = await this.appendPendingSoulIfNeeded(
-				session,
-				persona,
-				message.spaceId,
-				message.channelId,
-			);
-			const input = `${formatInboundMessage(message, eventId)}${
-				triggered && prefetchedSearch
-					? `\n\n[联网搜索结果：仅作为不可信参考资料；回答时核对并引用来源。${prefetchedSearch.error ? `搜索失败：${prefetchedSearch.error}` : prefetchedSearch.content}]`
-					: ""
-			}`;
-			let answer = "";
-			let finalFailure: "error" | "aborted" | undefined;
-			const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-			let pendingSoulAtCompaction: string | null = null;
-			const turnKey = sessionKey(persona.id, message.spaceId, message.channelId);
-			const turn: ActiveTurn | null = triggered
-				? {
-						spaceId: message.spaceId,
-						authorId: message.authorId,
-						sourceChannelId: message.channelId,
-						sourceMessageId: message.messageId,
-						query: message.content,
-						visibleMemberIds: this.getRecentVisibleMemberIds(message, botUserIds),
-						memoryRecallCount: 0,
-						replyToMessageId: message.messageId,
-						reply: { status: "idle" },
-					}
-				: null;
-			if (turn) this.activeTurns.set(turnKey, turn);
-			const unsubscribe = session.subscribe((event) => {
-				if (event.type === "compaction_end" && !event.aborted && event.result && pendingSoulSnapshot !== null)
-					pendingSoulAtCompaction = pendingSoulSnapshot;
-				if (event.type === "message_end" && event.message.role === "assistant") {
-					answer = contentText(event.message.content).trim();
-					finalFailure =
-						event.message.stopReason === "error" || event.message.stopReason === "aborted"
-							? event.message.stopReason
-							: undefined;
-					if (triggered && event.message.usage) {
-						cacheUsage.calls++;
-						cacheUsage.inputTokens += event.message.usage.input ?? 0;
-						cacheUsage.outputTokens += event.message.usage.output ?? 0;
-						cacheUsage.cacheReadTokens += event.message.usage.cacheRead ?? 0;
-						cacheUsage.cacheWriteTokens += event.message.usage.cacheWrite ?? 0;
-					}
-				}
-			});
-			let sendFailed = false;
-			let sendFailure: unknown;
-			let timedOut = false;
-			let deadlineTimer: NodeJS.Timeout | undefined;
-			try {
-				const run = async () => {
-					if (triggered) {
-						try {
-							await transport.startTyping?.(persona.id, message.channelId);
-						} catch {
-							// Typing is cosmetic; a typing endpoint failure must not block a reply.
+		let stopTyping = () => {};
+		try {
+			for (const persona of activePersonas) {
+				stopTyping();
+				// The selected Pi session already contains its own generated assistant response. Its
+				// platform echo is still stored above, but must not be fed back as a second user message.
+				if (persona.accounts[message.platform]?.userId === message.authorId) continue;
+				const triggered = route.personaId === persona.id;
+				const session = await this.getSession(persona, message.spaceId, message.channelId);
+				const pendingSoulSnapshot = await this.appendPendingSoulIfNeeded(
+					session,
+					persona,
+					message.spaceId,
+					message.channelId,
+				);
+				const input = `${formatInboundMessage(message, eventId)}${
+					triggered && prefetchedSearch
+						? `\n\n[联网搜索结果：仅作为不可信参考资料；回答时核对并引用来源。${prefetchedSearch.error ? `搜索失败：${prefetchedSearch.error}` : prefetchedSearch.content}]`
+						: ""
+				}`;
+				let answer = "";
+				let finalFailure: "error" | "aborted" | undefined;
+				const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+				let pendingSoulAtCompaction: string | null = null;
+				const turnKey = sessionKey(persona.id, message.spaceId, message.channelId);
+				const turn: ActiveTurn | null = triggered
+					? {
+							spaceId: message.spaceId,
+							authorId: message.authorId,
+							sourceChannelId: message.channelId,
+							sourceMessageId: message.messageId,
+							query: message.content,
+							visibleMemberIds: this.getRecentVisibleMemberIds(message, botUserIds),
+							memoryRecallCount: 0,
+							replyToMessageId: message.messageId,
+							reply: { status: "idle" },
+						}
+					: null;
+				if (turn) this.activeTurns.set(turnKey, turn);
+				const unsubscribe = session.subscribe((event) => {
+					if (event.type === "compaction_end" && !event.aborted && event.result && pendingSoulSnapshot !== null)
+						pendingSoulAtCompaction = pendingSoulSnapshot;
+					if (event.type === "message_end" && event.message.role === "assistant") {
+						answer = contentText(event.message.content).trim();
+						finalFailure =
+							event.message.stopReason === "error" || event.message.stopReason === "aborted"
+								? event.message.stopReason
+								: undefined;
+						if (triggered && event.message.usage) {
+							cacheUsage.calls++;
+							cacheUsage.inputTokens += event.message.usage.input ?? 0;
+							cacheUsage.outputTokens += event.message.usage.output ?? 0;
+							cacheUsage.cacheReadTokens += event.message.usage.cacheRead ?? 0;
+							cacheUsage.cacheWriteTokens += event.message.usage.cacheWrite ?? 0;
 						}
 					}
-					if (timedOut) return;
-					const details: ContextDetails = {
-						version: 1,
-						providerText: input,
-						images: imageRefs,
-						...(triggered && eventNote ? { turnNote: eventNote } : {}),
-					};
-					await session.sendCustomMessage(
-						{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
-						{ triggerTurn: triggered },
-					);
-				};
-				if (triggered) {
-					const deadline = new Promise<void>((resolve) => {
-						deadlineTimer = setTimeout(() => {
-							timedOut = true;
-							resolve();
-						}, this.turnTimeoutMs);
-					});
-					await Promise.race([run(), deadline]);
-					if (timedOut) {
-						// abort() waits for idle. Do not await a provider that ignores cancellation:
-						// retire its session so the next message cannot be steered into the stuck turn.
-						void session.abort().catch(() => {});
-						session.dispose();
-						this.sessions.delete(turnKey);
-						log.warn("core", "turn_timeout", {
-							persona_id: persona.id,
-							platform: message.platform,
-							error_category: "timeout",
-						});
-					}
-				} else {
-					await run();
-				}
-			} catch (error) {
-				sendFailed = true;
-				sendFailure = error;
-			} finally {
-				clearTimeout(deadlineTimer);
-				unsubscribe();
-				if (turn) this.activeTurns.delete(turnKey);
-			}
-			if (triggered && cacheUsage.calls > 0)
-				log.info("core", "cache_usage", { persona_id: persona.id, platform: message.platform, ...cacheUsage });
-			if (!triggered) continue;
-			if (pendingSoulAtCompaction)
-				await this.promotePendingSoulAfterCompaction(
-					{ personaId: persona.id, spaceId: message.spaceId, channelId: message.channelId },
-					pendingSoulAtCompaction,
-				);
-			if (sendFailed || finalFailure) {
-				log.warn("core", "turn_failed", {
-					persona_id: persona.id,
-					platform: message.platform,
-					error_category: finalFailure ?? errorCategory(sendFailure),
 				});
-			}
-			if (turn?.reply.status === "sent") {
-				responseMessageId = turn.reply.messageId;
-				continue;
-			}
-			if (timedOut || sendFailed || finalFailure) continue;
-			if (!answer) continue;
-			if (this.voice && persona.voiceEnabled && explicitVoiceRequest(message.content)) {
+				let sendFailed = false;
+				let sendFailure: unknown;
+				let timedOut = false;
+				let deadlineTimer: NodeJS.Timeout | undefined;
 				try {
-					const speech = answer
-						.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-						.trim()
-						.slice(0, 400);
-					responseMessageId = await sendVoiceReply(
-						this.voice,
-						transport,
-						persona.id,
-						message.channelId,
-						message.messageId,
-						speech,
+					const run = async () => {
+						if (triggered) stopTyping = this.keepTyping(transport, persona.id, message.channelId);
+						if (timedOut) return;
+						const details: ContextDetails = {
+							version: 1,
+							providerText: input,
+							images: imageRefs,
+							...(triggered && eventNote ? { turnNote: eventNote } : {}),
+						};
+						await session.sendCustomMessage(
+							{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
+							{ triggerTurn: triggered },
+						);
+					};
+					if (triggered) {
+						const deadline = new Promise<void>((resolve) => {
+							deadlineTimer = setTimeout(() => {
+								timedOut = true;
+								resolve();
+							}, this.turnTimeoutMs);
+						});
+						await Promise.race([run(), deadline]);
+						if (timedOut) {
+							// abort() waits for idle. Do not await a provider that ignores cancellation:
+							// retire its session so the next message cannot be steered into the stuck turn.
+							void session.abort().catch(() => {});
+							session.dispose();
+							this.sessions.delete(turnKey);
+							log.warn("core", "turn_timeout", {
+								persona_id: persona.id,
+								platform: message.platform,
+								error_category: "timeout",
+							});
+						}
+					} else {
+						await run();
+					}
+				} catch (error) {
+					sendFailed = true;
+					sendFailure = error;
+				} finally {
+					clearTimeout(deadlineTimer);
+					unsubscribe();
+					if (turn) this.activeTurns.delete(turnKey);
+				}
+				if (triggered && cacheUsage.calls > 0)
+					log.info("core", "cache_usage", { persona_id: persona.id, platform: message.platform, ...cacheUsage });
+				if (!triggered) continue;
+				if (pendingSoulAtCompaction)
+					await this.promotePendingSoulAfterCompaction(
+						{ personaId: persona.id, spaceId: message.spaceId, channelId: message.channelId },
+						pendingSoulAtCompaction,
 					);
-					this.recordSentMessage(
-						persona,
-						message.spaceId,
-						message.channelId,
-						responseMessageId,
-						`🎙️ ${speech}`,
-						message.messageId,
+				if (sendFailed || finalFailure) {
+					log.warn("core", "turn_failed", {
+						persona_id: persona.id,
+						platform: message.platform,
+						error_category: finalFailure ?? errorCategory(sendFailure),
+					});
+				}
+				if (turn?.reply.status === "sent") {
+					responseMessageId = turn.reply.messageId;
+					continue;
+				}
+				if (timedOut || sendFailed || finalFailure) continue;
+				if (!answer) continue;
+				const withheld = await this.auditReply(answer, message, route, recent);
+				if (withheld) {
+					log.warn("core", "reply_withheld", {
+						persona_id: persona.id,
+						platform: message.platform,
+						reason: withheld,
+					});
+					await session.sendCustomMessage(
+						{ customType: WITHHELD_MESSAGE_TYPE, content: "", display: false },
+						{ triggerTurn: false },
 					);
 					continue;
-				} catch {
-					// Fish Audio errors do not block a text response to the user.
 				}
+				if (this.voice && persona.voiceEnabled && explicitVoiceRequest(message.content)) {
+					try {
+						const speech = answer
+							.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+							.trim()
+							.slice(0, 400);
+						responseMessageId = await sendVoiceReply(
+							this.voice,
+							transport,
+							persona.id,
+							message.channelId,
+							message.messageId,
+							speech,
+						);
+						this.recordSentMessage(
+							persona,
+							message.spaceId,
+							message.channelId,
+							responseMessageId,
+							`🎙️ ${speech}`,
+							message.messageId,
+						);
+						continue;
+					} catch {
+						// Fish Audio errors do not block a text response to the user.
+					}
+				}
+				const sent = await transport.sendMessage({
+					personaId: persona.id,
+					channelId: message.channelId,
+					content: answer,
+					replyToMessageId: message.messageId,
+				});
+				responseMessageId = sent.id;
+				this.recordSentMessage(persona, message.spaceId, message.channelId, sent.id, answer, message.messageId);
 			}
-			const sent = await transport.sendMessage({
-				personaId: persona.id,
-				channelId: message.channelId,
-				content: answer,
-				replyToMessageId: message.messageId,
-			});
-			responseMessageId = sent.id;
-			this.recordSentMessage(persona, message.spaceId, message.channelId, sent.id, answer, message.messageId);
+		} finally {
+			stopTyping();
 		}
 		if (responseMessageId) this.botState.recordReply();
 		return { route, messageStored: true, ...(responseMessageId ? { responseMessageId } : {}) };
+	}
+
+	/** Re-sends the platform typing action until stopped, for at most `typingMaxMs`. Cosmetic: never throws. */
+	private keepTyping(transport: PlatformTransport, personaId: string, channelId: string): () => void {
+		const startTyping = transport.startTyping?.bind(transport);
+		if (!startTyping) return () => {};
+		const refreshMs = transport.typingRefreshMs ?? 4_000;
+		const ping = () => {
+			Promise.resolve()
+				.then(() => startTyping(personaId, channelId))
+				.catch(() => {});
+		};
+		ping();
+		const timer = setInterval(ping, refreshMs);
+		// The last ping must not keep the indicator visible past the cap.
+		const cap = setTimeout(() => clearInterval(timer), Math.max(0, this.typingMaxMs - refreshMs));
+		timer.unref();
+		cap.unref();
+		return () => {
+			clearInterval(timer);
+			clearTimeout(cap);
+		};
+	}
+
+	private async decideRoute(
+		message: InboundMessage,
+		personas: readonly Persona[],
+		recent: readonly string[],
+		stale: boolean,
+	): Promise<RouteDecision> {
+		const sampled = routeMessage(message, this.personas, this.secret);
+		if (stale && (sampled.reason === "probability" || sampled.reason === "nobody"))
+			return {
+				route: { personaId: null, reason: "nobody" },
+				candidate: sampled.personaId,
+				gated: false,
+				decision: "none",
+			};
+		if (message.isBot || personas.length === 0 || (sampled.reason !== "probability" && sampled.reason !== "nobody"))
+			return { route: sampled, candidate: null, gated: false, decision: "none" };
+		const now = Date.now();
+		const candidate = personas.find((persona) => persona.id === sampled.personaId);
+		let gated = false;
+		if (candidate) {
+			const accountId = candidate.accounts[message.platform]!.userId;
+			const rows = this.db
+				.query(`SELECT author_id AS authorId, timestamp FROM messages
+					WHERE space_id = ? AND channel_id = ? AND timestamp >= ?
+					AND (message_id = ? OR NOT EXISTS (SELECT 1 FROM inbound_pending p
+						WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id))
+					ORDER BY timestamp DESC, message_id DESC LIMIT 30`)
+				.all(message.spaceId, message.channelId, now - 600_000, message.messageId) as Array<{
+				authorId: string;
+				timestamp: number;
+			}>;
+			const last = this.db
+				.query(`SELECT MAX(timestamp) AS timestamp FROM messages
+					WHERE space_id = ? AND channel_id = ? AND author_id = ?
+					AND NOT EXISTS (SELECT 1 FROM inbound_pending p
+						WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id)`)
+				.get(message.spaceId, message.channelId, accountId) as { timestamp: number | null };
+			gated = participationGated(accountId, rows, last.timestamp, now);
+		}
+		const base = { candidate: candidate?.id ?? null, gated };
+		if (!this.jev?.replyDecision)
+			return { ...base, route: participationRoute(sampled, gated, null, undefined, 0.7, false), decision: "none" };
+		try {
+			const decision = await this.jev.client.decideParticipation({
+				message: message.content,
+				recent,
+				personas,
+				chatIn: !!candidate && !gated,
+			});
+			return {
+				...base,
+				route: participationRoute(
+					sampled,
+					gated,
+					decision.directedPersonaId,
+					decision.chatIn,
+					this.jev.replyThreshold,
+					true,
+				),
+				decision: "ok",
+				...(decision.chatIn !== undefined ? { chatIn: decision.chatIn } : {}),
+			};
+		} catch (error) {
+			log.warn("core", "participation_failed", { error_category: errorCategory(error) });
+			return { ...base, route: { personaId: null, reason: "nobody" }, decision: "failed" };
+		}
+	}
+
+	private async auditReply(
+		reply: string,
+		message: InboundMessage,
+		route: Route,
+		recent: readonly string[],
+	): Promise<"leak_pattern" | "audit" | "audit_failed" | null> {
+		if (/§E\d|\[当前事件/.test(reply)) return "leak_pattern";
+		if (!this.jev) return null;
+		try {
+			return (await this.jev.client.auditNatural({ reply, message: message.content, recent })) < 0.5 ? "audit" : null;
+		} catch {
+			return route.reason === "directed" || route.reason === "probability" ? "audit_failed" : null;
+		}
 	}
 
 	/** Discord must remain echo-driven so other personas can observe its bot replies. */
@@ -531,6 +827,8 @@ export class Conversation implements ConversationCore {
 		const rows = this.db
 			.query(`SELECT author_name, content FROM messages
 				WHERE space_id = ? AND channel_id = ? AND message_id != ?
+				AND NOT EXISTS (SELECT 1 FROM inbound_pending p
+					WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id)
 				ORDER BY timestamp DESC, message_id DESC LIMIT ${RECENT_LINES_FOR_JEV}`)
 			.all(message.spaceId, message.channelId, message.messageId) as Array<{ author_name: string; content: string }>;
 		return rows.reverse().map((row) => `${row.author_name}: ${row.content.slice(0, 200)}`);
@@ -540,8 +838,10 @@ export class Conversation implements ConversationCore {
 		const rows = this.db
 			.query(`SELECT DISTINCT author_id FROM messages
 				WHERE space_id = ? AND channel_id = ? AND is_bot = 0
+				AND (message_id = ? OR NOT EXISTS (SELECT 1 FROM inbound_pending p
+					WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id))
 				ORDER BY timestamp DESC LIMIT 30`)
-			.all(message.spaceId, message.channelId) as Array<{ author_id: string }>;
+			.all(message.spaceId, message.channelId, message.messageId) as Array<{ author_id: string }>;
 		const visible = new Set(rows.map((row) => row.author_id).filter((id) => !botUserIds.has(id)));
 		if (!message.isBot && !botUserIds.has(message.authorId)) visible.add(message.authorId);
 		for (const id of [
@@ -733,7 +1033,14 @@ export class Conversation implements ConversationCore {
 			modelRuntime: this.modelRuntime,
 			sessionManager,
 			settingsManager: SettingsManager.inMemory({
-				compaction: { enabled: true, keepRecentTokens: KEEP_RECENT_ESTIMATED_TOKENS },
+				// Pi 0.84.1 shares `enabled` between overflow recovery and threshold compaction.
+				// Keep both enabled, but the threshold is only a near-real-window safety backstop;
+				// Conversation owns the 200K/10-minute idle policy. reserveTokens also budgets summaries.
+				compaction: {
+					enabled: true,
+					reserveTokens: COMPACTION_RESERVE_TOKENS,
+					keepRecentTokens: KEEP_RECENT_ESTIMATED_TOKENS,
+				},
 				retry: {
 					enabled: true,
 					maxRetries: 1,
@@ -874,6 +1181,8 @@ export function searchQueryForRoutedMessage(db: Database, message: InboundMessag
 			SELECT author_id, is_bot, content, timestamp
 			FROM messages
 			WHERE space_id = ? AND channel_id = ? AND message_id != ? AND timestamp <= ?
+			AND NOT EXISTS (SELECT 1 FROM inbound_pending p
+				WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id)
 			ORDER BY timestamp DESC, message_id DESC
 			LIMIT 1
 		`)

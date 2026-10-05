@@ -25,8 +25,11 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 
 ## What it does
 
-- **Chimes in by probability, always answers when addressed**: a message that @-mentions a character, replies to it, or contains its name or an alias always gets an answer from that character; other messages are sampled deterministically by `routingP` to decide whether anyone answers and who. Bot messages never trigger a character.
+- **Content-aware participation, always routes when addressed**: explicit mentions, replies and names/aliases retain their routing priority. With a decision client and participation enabled, other human messages identify a directed character; otherwise a deterministic `routingP` candidate must pass cooldown, speaking-share and, when enabled, content-score gates. Bot messages never trigger a character. Final text is checked before sending to withhold internal markers or unnatural replies.
 - **Failures do not stall the channel**: model/tool turns have a 180-second deadline, then abort and release the channel. Failures are logged without sending an error notice to the group. Successful Telegram text/image/voice replies are also stored in history so replies to the bot can inherit the original topic; Discord remains echo-driven.
+- **Crash recovery without stale chime-ins**: history and pending work are stored in one transaction. On restart, unfinished messages up to 10 minutes old are processed; older ones remain history only. Failed turns are not retried. Messages over 2 minutes old when processing starts cannot trigger unsolicited replies, participation decisions or quick reactions, but explicit mentions, replies and names/aliases still route normally. Unless paused, they still enter sessions, memory and topics. Recovery preserves text and replaces images with an honest unavailable-image note.
+- **"Typing…" stays visible**: while a routed character generates its reply, the typing indicator is refreshed every 4 seconds on Telegram and every 8 seconds on Discord; it stops when the reply is sent, withheld or fails, and never shows for more than 60 seconds.
+- **"Why didn't it reply?" is answerable**: every human message gets one `route` log line without its text, giving the final route, the HMAC candidate, whether cooldown/speaking-share blocked it, and the participation decision and score; paused messages log `paused`. Fields: [docs/architecture.md](docs/architecture.md#路由srccorerouterts) (Chinese).
 - **Jev quick reactions** (optional): a Jev decision API (or an in-process LLM wrapper) puts an emoji on messages. Addressed messages get the selected emoji unless the decision is `none`; ordinary messages only when strongly emotional or genuinely funny, rate-limited per channel. It does not use the main model and never delays the real reply. See [Jev](#jev).
 - **Concurrent topics** (optional): `events` assigns channel messages to topics. `§E` IDs, titles, descriptions and leading participants tell the character which event it is answering, keeping simultaneous discussions separate and recalling older topics when they resume.
 - **Images and video frames**: up to 4 images per message, scaled to fit 1024×1024 and 200 KB, reach the model; videos are sampled into 1–3 frames with ffmpeg. When the main model has no image input, Pi replaces each image with an omission note; alternatively set `visionModel` to describe images in a sentence or two first. Voice, files and stickers become text placeholders such as `[语音]`, `[文件]`, `[贴纸 😀]`.
@@ -51,10 +54,10 @@ flowchart LR
   TG[Telegram Bot API] --> TA[Telegram adapter]
   DA -- InboundMessage --> C[Conversation core]
   TA -- InboundMessage --> C
-  C --> R{Routing<br/>addressed / routingP sample}
+  C --> R{Routing<br/>addressed / content / sampling and gates}
   R --> S[Pi session<br/>persona × space × channel]
   S --> T[Tools<br/>search · run_js · voice · drawing · memory · reaction images]
-  C --> J[Jev decision client<br/>reactions · memory ranking · topics]
+  C --> J[Jev decision client<br/>participation · text audit · reactions · memory · topics]
   C --> DB[(SQLite<br/>data/jingmei.db)]
   S -- reply --> PT[PlatformTransport<br/>sent back by the adapter]
 ```
@@ -62,7 +65,7 @@ flowchart LR
 | Principle | In practice |
 |---|---|
 | Pi-native first | Sessions, context compaction, model catalog and auth, image degradation all come from Pi |
-| Deterministic before LLM | Routing is an HMAC sample, identical on replay; deduplication is a database primary key |
+| Deterministic before LLM | Replay-safe HMAC selects probability candidates; history determines cooldown and speaking share. Content decisions use bounded requests; deduplication is a database primary key |
 | Bounded cost | Stable system prompt and tool definitions hit prefix caches; dynamic content goes into messages only; reasoning off by default |
 | Private by default | Secrets live only in `.env`; logs are redacted and never contain message text; members can `/forget` at any time |
 
@@ -150,10 +153,10 @@ Run them in the project directory as the same user that runs the bot. They read 
 | `bun run jingmei pause` / `resume` | Pause / resume |
 | `bun run jingmei stats` | Status and current uptime, total runtime and number of starts, replies, and message / group / member / topic / celebration totals |
 
-- **Pause**: the bot stays online and keeps storing messages, but does not reply, react, update member memory or topics, or send celebrations, and makes no model calls. It applies to a running bot immediately without a restart, and survives restarts until `resume`. Messages received while paused do not enter the characters' session context; greetings due that day go out after resuming. To actually stop the process, use `systemctl --user stop pi-discord-agent` or Ctrl+C.
+- **Pause**: the bot stays online and keeps storing messages, but does not reply, react, update member memory or topics, or send celebrations, and makes no reply-model calls; administrator manual compaction and background context compaction after the quiet period can still call a model. It applies to a running bot immediately without a restart, and survives restarts until `resume`. Messages received while paused do not enter the characters' session context; greetings due that day go out after resuming. To actually stop the process, use `systemctl --user stop pi-discord-agent` or Ctrl+C.
 - **Status**: the bot writes a heartbeat every minute; with no heartbeat for two minutes it counts as stopped (including crashes). Replies are counted from the release that introduced this command; message and other totals cover all history.
 - **Switch model**: only the CLI on the server can switch models; there is no chat command for it. The choice is stored in the database, the running bot moves each channel over before its next reply without a restart, and it survives restarts. `default` restores `provider`/`model` from `jingmei.config.json`. `reasoningEffort` is kept and Pi clamps it when the new model does not support it. To use another provider, `login` first or put its API key in the service environment. If the bot cannot find the chosen model (for example its provider was removed), it logs `model_override_unavailable` and keeps using the configured model. A switch invalidates the provider's prefix cache once.
-- **Context cap**: whatever window the model advertises (for example Gemini's 1M), each channel session is treated as 64K and compacts automatically around 48K tokens, so replies never carry huge histories that slow them down and drain quota. Compaction keeps only about 15–20k real tokens of recent chat (Pi estimates tokens from character counts and undercounts Chinese about fivefold, so the kept tail is set to 3,000 estimated tokens); between compactions the context only grows at the end, so provider prefix caches keep hitting.
+- **Context and idle compaction**: each character's channel session uses the model's own `contextWindow` (for example Gemini's 1M), without a shared cap. Above 200,000 tokens, compaction waits until the channel has received no new message for 10 minutes, then runs in the channel queue; each new message resets the timer and all character sessions are checked. Pi still provides near-limit auto-compaction (window minus 16,384 tokens) and provider overflow recovery; administrators can still use `/compact`. Input tokens per reply grow with history and can reach roughly 200K+ before idle compaction; prefix-cache hits reduce cost, not the growing input volume. Compaction retains about 15–20k real recent tokens (Pi's character estimate undercounts Chinese about fivefold, so the kept tail remains 3,000 estimated tokens); between compactions history grows only at the end, helping prefix caches.
 
 ## Configuration reference
 
@@ -188,7 +191,7 @@ Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
 | `reactionImages` | Optional local catalog directory containing `catalog.json`; resolved from the project root like `personaPath`, also accepting absolute paths and `~/` |
 | `provider` / `model` | Pi provider and model ID |
 | `reasoningEffort` | `off` (default), `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; a level the model doesn't support fails at startup |
-| `routingP` | 0–1, the chance this character answers an ordinary message; the sum over all characters that can speak in one group/server must not exceed 1. Use 0 to answer only when addressed |
+| `routingP` | 0–1, deterministic candidate probability for ordinary messages, still subject to gates and enabled content scoring; the sum over characters in one group/server must not exceed 1. At 0, the character never chimes in randomly but can still be addressed explicitly or identified as the content's addressee |
 | `aliases` | Optional extra names that address the character (≤ 64 characters each) |
 | `spaces` | Optional restriction to some groups/servers, e.g. `["discord:<guildId>", "telegram:<chatId>"]`; omit for all |
 | `sendReactionImages` | Whether bundled and local catalog reaction images may be sent, default `true` |
@@ -237,11 +240,18 @@ Each drawing is one request (about 15 seconds with `gemini-3.1-flash-image`). On
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across reactions, memory ranking, and optional event assignment and participation scoring.
+[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across participation decisions, final-text audits, reactions, memory ranking, and optional event assignment and participation scoring.
+
+**Participation decisions** (`replyDecision`, default `true`). Explicit mentions, replies and name/alias matches route directly without a participation request. Every other human message gets one request when enabled and a client exists: choose among all scoped characters and `none`. A selected character with winning probability ≥ 0.5 routes directly, bypassing sampling and gates, and counts as addressed for quick reactions.
+
+- Ordinary candidates still come from cumulative `routingP` HMAC sampling. Any message from the character's current-platform account in the last 30 seconds puts it on cooldown. It also stays silent when, among at most 30 latest messages in the last 10 minutes, its account has at least 3 messages, there are more than 1 distinct other authors, and its share is ≥ 25%.
+- Only a sampled, ungated candidate adds the `chat_in` noul scoring question to that same request; it needs a score ≥ `replyThreshold` (default `0.7`). Directed-content detection still runs when there is no candidate or a gate blocks it. Failure logs `participation_failed` with an error category and routes nobody. Disabled or without a client, routing uses only HMAC sampling and gates.
+
+**Final-text audit**. Before sending final text (or converting it to explicitly requested voice), a deterministic check withholds `§E` followed by a digit or `[当前事件`; no audit request is made for these internal-marker leaks. With a client, a noul naturalness score < 0.5 also withholds the reply. Audit failures withhold content-directed and probability replies, but allow explicit mention/reply/name routes. Without a client, only the marker check runs. Withholding sends no error notice, records no platform message and adds no reply count: it logs text-free `reply_withheld` and persists a hidden `jingmei_withheld_v1` marker. Subsequent provider projections omit that marker and the withheld turn's assistant messages so unsent text cannot become chat history. Tool images, reactions and tool voice are outside this audit.
 
 **Quick reactions** (`quickReactions`). Every human message with text gets one Jev request asking three things at once: pick an emoji from the table (or `none`), is the message strongly emotional, is it funny.
 
-- Addressed messages (mention, reply, name): the addressed character adds the chosen emoji, nothing if Jev chose `none`.
+- Addressed messages (mention, reply, name, or a content-directed character): the corresponding character adds the chosen emoji, nothing if Jev chose `none`.
 - Ordinary messages: an emoji is added only if max(strong emotion, funny) ≥ `threshold` and the channel's previous such reaction was at least `minIntervalMs` ago, by the first character configured for that group. Messages inside the rate-limit window don't call Jev at all.
 - Runs alongside the main reply; failures are only logged and never affect the reply. While enabled, the main model's `react_to_message` tool is not registered — reactions belong to Jev.
 
@@ -251,9 +261,11 @@ Each drawing is one request (about 15 seconds with `gemini-3.1-flash-image`). On
 
 The wrapper has a 30-second default timeout and disables DeepSeek thinking (`thinking.type=disabled`). Its LLM must return logprobs; missing logprobs become an `invalid_response` call failure. When the model abstains, the wrapper takes the highest-probability option (argmax).
 
-Quick reactions and memory ranking still require an explicit `jev` section; `events` alone or a DeepSeek key alone does not enable them. You may omit `jev.apiKeyEnv` to use only the wrapper. With neither a remote key nor a resolved local LLM, these features remain disabled. An explicitly named `apiKeyEnv` missing from `.env` / the process environment is still a configuration error, not a silent fallback. Wrapper calls are billed by the chosen LLM provider.
+Quick reactions and memory ranking still require an explicit `jev` section; `events` alone or a DeepSeek key alone does not enable them. Participation decisions default to enabled whenever a shared decision client exists; final-text audits also run with a client regardless of `replyDecision`. You may omit `jev.apiKeyEnv` to use only the wrapper. With neither a remote key nor a resolved local LLM, routing falls back to deterministic sampling/gates and marker checks. An explicitly named `apiKeyEnv` missing from `.env` / the process environment is still a configuration error, not a silent fallback. Wrapper calls are billed by the chosen LLM provider.
 
 **Cost**. Remote Jev bills input tokens only; output is free (`jev-1.13` was $0.042 per million tokens at the time of writing — see the [official pricing](https://docs.typesafe.ai/models)). A reaction request carries just the message, up to 5 recent chat lines (each cut to 200 characters) and three questions — typically a few hundred tokens — and the remote request times out after 3 seconds. It uses none of the main model's tokens; the local wrapper consumes tokens from its configured LLM.
+
+With participation enabled and a client available, each human message without an explicit addressee adds **+1 decision request** (directed detection plus optional participation score combined), and each final-text reply adds **+1 naturalness audit**. Explicit addressing skips participation; marker leaks skip the audit. These calls do not use the main reply model, but the local wrapper incurs its LLM's cost; remote fallback can add one local LLM call.
 
 **Configuration**. Put `TYPESAFE_API_KEY: …` in `.env` and add to `jingmei.config.json`:
 
@@ -264,6 +276,8 @@ Quick reactions and memory ranking still require an explicit `jev` section; `eve
 	"model": "jev-latest",
 	"quickReactions": true,
 	"memoryScoring": true,
+	"replyDecision": true,
+	"replyThreshold": 0.7,
 	"threshold": 0.8,
 	"minIntervalMs": 60000
 }
@@ -276,6 +290,8 @@ Quick reactions and memory ranking still require an explicit `jev` section; `eve
 | `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0` |
 | `quickReactions` | `true` | Quick reactions |
 | `memoryScoring` | `true` | Memory ranking |
+| `replyDecision` | `true` | Content-aware participation; disabling it retains deterministic candidate gates and final-text audits |
+| `replyThreshold` | `0.7` | In (0, 1]; minimum score for an ordinary sampled candidate to chime in |
 | `threshold` | `0.8` | In (0, 1]; minimum score for reacting to an ordinary message |
 | `minIntervalMs` | `60000` | Minimum gap between two ordinary-message reactions in one channel |
 | `emojis` | platform defaults | Per-platform override: `{ "discord": { "👍": "agree" }, "telegram": { … } }`; the key `none` is reserved |

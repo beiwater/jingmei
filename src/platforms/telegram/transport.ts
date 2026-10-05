@@ -186,6 +186,8 @@ export class TelegramPlatformTransport implements PlatformTransport {
 	readonly echoesOwnMessages = false;
 	readonly displayName = "Telegram";
 	readonly promptLines = TELEGRAM_PROMPT_LINES;
+	/** sendChatAction shows "typing…" for at most five seconds. */
+	readonly typingRefreshMs = 4_000;
 
 	constructor(
 		private readonly apis: ReadonlyMap<string, BotApi>,

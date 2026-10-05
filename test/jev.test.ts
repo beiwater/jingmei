@@ -3,6 +3,7 @@ import {
 	createJevClient,
 	createJevClientWithTransport,
 	JEV_ENDPOINT,
+	type JevClient,
 	JevError,
 	type JevErrorCode,
 	NEW_EVENT_OPTION,
@@ -170,6 +171,144 @@ describe("Jev relevance scoring", () => {
 	});
 });
 
+describe("Jev reply participation", () => {
+	const personas = [
+		{ id: "jingmei", name: "精魅", aliases: ["小魅"] },
+		{ id: "other", name: "另一位", aliases: [] },
+	];
+	const input = { message: "那你继续说", personas, chatIn: false };
+
+	test("sends all persona options and bounded bot context, without optional chat-in scoring", async () => {
+		const { impl, calls } = fakeFetch(() =>
+			Response.json({ answers: { directed: { type: "choice", choice: "jingmei", confidence: 0.8 } } }),
+		);
+		expect(
+			await createJevClient(config, impl).decideParticipation({
+				...input,
+				recent: ["old", "甲：你好", "精魅：你好", "乙：嗯", "精魅：再说一个", "甲：好"],
+			}),
+		).toEqual({ directedPersonaId: "jingmei" });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.body.state).toEqual({
+			message: input.message,
+			recent: ["甲：你好", "精魅：你好", "乙：嗯", "精魅：再说一个", "甲：好"],
+		});
+		expect(Object.keys(calls[0]?.body.questions ?? {})).toEqual(["directed"]);
+		expect(calls[0]?.body.questions.directed?.type).toBe("choice");
+		expect(Object.keys(calls[0]?.body.questions.directed?.criteria as object)).toEqual(["jingmei", "other", "none"]);
+	});
+
+	test("uses winning probability rather than confidence, with an inclusive half threshold", async () => {
+		for (const [answer, expected] of [
+			[{ choice: "jingmei", confidence: 0.99, probabilities: { jingmei: 0.49, none: 0.51 } }, null],
+			[{ choice: "none", confidence: 0.99, probabilities: { jingmei: 0.6, none: 0.4 } }, "jingmei"],
+			[{ choice: "jingmei", confidence: 0.1, probabilities: { jingmei: 0.5, none: 0.5 } }, "jingmei"],
+			[{ choice: "jingmei", confidence: 0.99, probabilities: {} }, null],
+			[{ choice: "jingmei", confidence: 0.99, probabilities: { none: 0.2 } }, null],
+			[{ choice: "jingmei", confidence: 0.5 }, "jingmei"],
+			[{ choice: "jingmei", confidence: 0.49 }, null],
+			[{ choice: "none", confidence: 1 }, null],
+		] as const) {
+			const client = createJevClientWithTransport(async () => ({
+				answers: { directed: { type: "choice", ...answer } },
+			}));
+			expect(await client.decideParticipation(input)).toEqual({ directedPersonaId: expected });
+		}
+	});
+
+	test("batches chat-in only when requested and returns its probability independently", async () => {
+		const { impl, calls } = fakeFetch(() =>
+			Response.json({
+				answers: {
+					directed: { type: "choice", choice: "none", confidence: 0.9 },
+					chat_in: { type: "noul", noul: 0.75 },
+				},
+			}),
+		);
+		expect(await createJevClient(config, impl).decideParticipation({ ...input, chatIn: true })).toEqual({
+			directedPersonaId: null,
+			chatIn: 0.75,
+		});
+		expect(calls[0]?.body.state).toEqual({ message: input.message });
+		expect(Object.keys(calls[0]?.body.questions ?? {}).sort()).toEqual(["chat_in", "directed"]);
+		expect(calls[0]?.body.questions.chat_in?.type).toBe("noul");
+	});
+
+	test("rejects unknown personas, invalid choices and missing or invalid requested chat-in scores", async () => {
+		const valid = { type: "choice", choice: "jingmei", confidence: 0.9 };
+		for (const answers of [
+			{ directed: { ...valid, choice: "unknown" }, chat_in: { type: "noul", noul: 0.5 } },
+			{ directed: { ...valid, confidence: 2 }, chat_in: { type: "noul", noul: 0.5 } },
+			{ directed: { type: "noul", noul: 0.5 }, chat_in: { type: "noul", noul: 0.5 } },
+			{ directed: valid },
+			{ directed: valid, chat_in: { type: "noul", noul: -0.1 } },
+		]) {
+			const client = createJevClientWithTransport(async () => ({ answers }));
+			await expectJevError(client.decideParticipation({ ...input, chatIn: true }), "invalid_response");
+		}
+	});
+
+	test("rejects present malformed probabilities instead of using high confidence", async () => {
+		for (const probabilities of [
+			undefined,
+			null,
+			[],
+			"bad",
+			{ unknown: 0.9 },
+			{ jingmei: -0.1 },
+			{ jingmei: 1.1 },
+			{ jingmei: "0.9" },
+			{ jingmei: Number.NaN },
+			{ jingmei: Number.POSITIVE_INFINITY },
+		]) {
+			const client = createJevClientWithTransport(async () => ({
+				answers: { directed: { type: "choice", choice: "jingmei", confidence: 0.99, probabilities } },
+			}));
+			await expectJevError(client.decideParticipation(input), "invalid_response");
+		}
+	});
+});
+
+describe("Jev natural reply audit", () => {
+	test("transports the full reply with bounded context and returns natural probability", async () => {
+		const reply = "当前事件：讨论晚饭。应使用简短自然的语气回复。";
+		const { impl, calls } = fakeFetch(() => Response.json({ answers: { natural: { type: "noul", noul: 0.02 } } }));
+		expect(
+			await createJevClient(config, impl).auditNatural({
+				reply,
+				message: "吃啥",
+				recent: ["old", "a", "b", "c", "d", "精魅：火锅？"],
+			}),
+		).toBe(0.02);
+		expect(calls[0]?.body.state).toEqual({ reply, message: "吃啥", recent: ["a", "b", "c", "d", "精魅：火锅？"] });
+		expect(Object.keys(calls[0]?.body.questions ?? {})).toEqual(["natural"]);
+		expect(calls[0]?.body.questions.natural?.type).toBe("noul");
+	});
+
+	test("works through the shared transport with no recent lines and preserves probability boundaries", async () => {
+		for (const noul of [0, 1]) {
+			const client = createJevClientWithTransport(async (state) => {
+				expect(state).toEqual({ reply: "火锅！", message: "吃啥" });
+				return { answers: { natural: { type: "noul", noul } } };
+			});
+			expect(await client.auditNatural({ reply: "火锅！", message: "吃啥", recent: [] })).toBe(noul);
+		}
+	});
+
+	test("rejects missing, mistyped and non-unit audit answers", async () => {
+		for (const natural of [
+			undefined,
+			{ type: "choice", choice: "yes", confidence: 1 },
+			{ type: "noul", noul: "0.9" },
+			{ type: "noul", noul: Number.NaN },
+			{ type: "noul", noul: 1.1 },
+		]) {
+			const client = createJevClientWithTransport(async () => ({ answers: { natural } }));
+			await expectJevError(client.auditNatural({ reply: "好", message: "嗯" }), "invalid_response");
+		}
+	});
+});
+
 describe("Jev event decisions", () => {
 	const options = [
 		{ id: "e12", description: "周末爬山" },
@@ -285,7 +424,7 @@ describe("Jev fallback", () => {
 					question.type === "choice"
 						? {
 								type: "choice",
-								choice: id === "event" ? "e1" : "👍",
+								choice: id === "event" ? "e1" : id === "directed" ? "p1" : "👍",
 								confidence: 0.8,
 								...(id === "event" ? { probabilities: { e1: 0.8, new: 0.2 } } : {}),
 							}
@@ -308,8 +447,16 @@ describe("Jev fallback", () => {
 			strongEmotion: 0.6,
 			funny: 0.6,
 		});
-		expect(primary.calls).toHaveLength(4);
-		expect(local.calls).toHaveLength(4);
+		expect(
+			await client.decideParticipation({
+				message: "q",
+				personas: [{ id: "p1", name: "精魅", aliases: [] }],
+				chatIn: true,
+			}),
+		).toEqual({ directedPersonaId: "p1", chatIn: 0.6 });
+		expect(await client.auditNatural({ reply: "好", message: "q" })).toBe(0.6);
+		expect(primary.calls).toHaveLength(6);
+		expect(local.calls).toHaveLength(6);
 		const unused = fakeFetch(() => {
 			throw new Error("fallback must not run");
 		});
@@ -320,6 +467,38 @@ describe("Jev fallback", () => {
 			),
 		).toEqual([0.6]);
 		expect(unused.calls).toHaveLength(0);
+	});
+
+	test("new methods keep successful primary results and propagate a single failed fallback", async () => {
+		const input = { message: "继续", personas: [{ id: "p1", name: "精魅", aliases: [] }], chatIn: false };
+		const audit = { reply: "好", message: "继续" };
+		const success = createJevClientWithTransport(async () => ({
+			answers: {
+				directed: { type: "choice", choice: "p1", confidence: 0.9 },
+				natural: { type: "noul", noul: 0.95 },
+			},
+		}));
+		const unused = fakeFetch(() => {
+			throw new Error("fallback must not run");
+		});
+		const client = withFallback(success, createJevClient(config, unused.impl));
+		expect(await client.decideParticipation(input)).toEqual({ directedPersonaId: "p1" });
+		expect(await client.auditNatural(audit)).toBe(0.95);
+		expect(unused.calls).toHaveLength(0);
+
+		for (const run of [
+			(client: JevClient) => client.decideParticipation(input),
+			(client: JevClient) => client.auditNatural(audit),
+		]) {
+			const primary = fakeFetch(() => Response.json({ answers: {} }));
+			const fallback = fakeFetch(() => new Response(null, { status: 401 }));
+			await expectJevError(
+				run(withFallback(createJevClient(config, primary.impl), createJevClient(config, fallback.impl))),
+				"http_401",
+			);
+			expect(primary.calls).toHaveLength(1);
+			expect(fallback.calls).toHaveLength(1);
+		}
 	});
 
 	test("does not hide a failing fallback", async () => {
