@@ -18,7 +18,7 @@
 - `src/decision/jev.ts` — TypeSafe Jev 客户端
 - `src/media/` — 图片准备、视频抽帧；`src/tools/` — run_js、DeepSeek 搜索、Fish TTS、Antigravity 画图；`src/net/` — 公网 URL 过滤、有界读取
 - `src/observability/log.ts` — 结构化日志
-- `scripts/migrate-config.ts` — 旧配置迁移；`scripts/git-gpg.sh` — 提交签名
+- `scripts/migrate-config.ts` — 旧配置迁移
 - `docs/architecture.md` — 架构、数据流、表结构、上下文投影、Jev、run_js 威胁模型
 - `docs/testing.md` — 测试清单与验证漏斗
 - `docs/deploy.md` — 部署、数据目录、迁移
@@ -63,7 +63,7 @@
 ## 7. 提交规范
 
 - 原子提交：一个行为变化一个 commit；只显式暂存本任务路径，禁止 `git add -A`。
-- 提交自动 GPG 签名（`scripts/git-gpg.sh`）；签名失败停下诊断，不得绕过。不做破坏性 git 操作（reset --hard / force push / 改写历史）。
+- 不做破坏性 git 操作（reset --hard / force push / 改写历史）。
 - subject：英文祈使句、首字母大写、≤72 字符、描述具体代码结果；纯机械变更末尾加 `Work-Type: mechanical` trailer。
 - 提交前跑覆盖本次改动的测试。
 
