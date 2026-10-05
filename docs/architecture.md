@@ -223,14 +223,17 @@ flowchart TD
 - **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到主进程同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。
 - **防到什么**：vm context 由 `Object.create(null)` 创建且 `codeGeneration: { strings: false, wasm: false }`，context 内不存在任何 host realm 对象/函数——`console.log.constructor` / `this.constructor.constructor` / `Function` / `eval` 都拿不到 host `Function`。console 在 context 内部 bootstrap；结果只在 context 内 `JSON.stringify` 后以字符串跨界。子进程 env 只有 `PATH`、隔离 tmp cwd、`--smol`、同步代码 vm timeout 3 s、进程级 5 s SIGKILL 兜底、输出 4 KB 上限。
 - **残余风险**：
-  1. node:vm 不是安全边界；若引擎漏洞打穿 realm 隔离，子进程仍以服务用户运行，可读磁盘上的 `.env`、可联网。
+  1. node:vm 不是安全边界。回退 vm 时，若引擎漏洞打穿 realm 隔离，子进程仍以服务用户运行，可读磁盘上的 `.env`、数据目录并联网；auto 策略不保证每台机器都有 OS 隔离，运维须确认日志 `kind: "bwrap"`。
   2. `--smol` 不是硬内存上限，靠 5 s SIGKILL 兜底。
-  3. SIGKILL 只杀直接子进程；逃逸后派生的孙进程不受超时约束。
+  3. vm 回退时 SIGKILL 只杀直接子进程，逃逸后派生的孙进程不受超时约束；bwrap 路径通过 PID namespace 关闭这条逃逸路径。
   4. vm timeout 只约束同步代码；异步膨胀由 SIGKILL 兜底。
-- **为什么可接受**：realm 隔离 + 禁用代码生成 + 清空环境 + 资源限制 + 超时，使攻击需要未知引擎漏洞；威胁源限于群成员 prompt injection。OS 级隔离（低权用户、seccomp）是后续增强，不是当前必需。
+  5. bwrap 不隔离宿主内核，不提供 seccomp 或硬 CPU / 内存配额；内核漏洞及资源耗尽仍是风险，且沙箱可读取挂载的系统运行时文件。生产仍应使用专用低权服务用户。
+- **部署与验证**：Ubuntu 24.04 的 AppArmor userns 策略可能使已安装的 bwrap 仍不可用；按 [deploy.md](deploy.md#run_js-操作系统沙箱) 配置并确认一次性日志，不把“已安装”当作“已隔离”。
 
-`test/runjs.test.ts` 覆盖这些边界；改沙箱后必须重跑。
+`test/runjs.test.ts` 覆盖 vm 边界；`test/runjs-sandbox.test.ts` 覆盖缺少 / 拒绝 bwrap 时的回退、一次性探测及仅绑定运行时文件的安全边界。改沙箱后必须重跑。
 
 ## 日志
 
 只经 `src/observability/log.ts` 写 stdout JSONL（`schema`、`ts`、`level`、`component`、`event`、`fields`）。字段名含 token/secret/prompt/content/query/url/path 等的值一律写成 `[redacted]`，字符串里的 token、API key、URL、绝对路径会被替换掉；`persona_id` 等配置 ID 原样保留，多角色部署靠它定位出错的 bot。日志只用于观察，业务逻辑不依赖日志。
+- **自动 OS 隔离**：首次有效 `run_js` 调用在 Linux 上用相同 bwrap 参数和 Bun / wrapper 试运行 `1 + 1`，并发调用共享一次探测；可用性结果缓存到进程退出。未安装、AppArmor 拒绝 user namespace、挂载或运行时失败都选择原有 vm 路径；不新增配置。只记录一次 `run_js_sandbox`，字段 `{ kind: "bwrap" | "vm" }`，不记录探测错误、路径或 stderr。安装或修改系统策略后需重启再探测。
+- **bwrap 增加的边界**：`--unshare-all` 隔离网络及 PID 等命名空间；`--die-with-parent`、`--new-session` 配合 PID namespace，让 sandbox 结束时其中孙进程一并退出。只读挂载 `/usr`、存在时的 `/lib`、`/lib64`、`/etc/ld.so.cache`，以及 Bun 可执行文件、wrapper 和输入代码三个单独文件（映射到 `/runjs/`），不挂载它们的父目录。根文件系统不包含服务用户 home、bot 数据目录、`.env`、`jingmei.config.json` 或 repo；工作目录是新建 tmpfs `/tmp`，另提供 namespace 内的 `/proc` 和最小 `/dev`。保留原有 vm、PATH-only 环境、输出上限与超时控制。

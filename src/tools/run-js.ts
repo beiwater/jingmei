@@ -1,6 +1,8 @@
 // Sandboxed run_js: executes small pure-computation JS in an isolated child process.
 // Threat model: docs/architecture.md "run_js sandbox 威胁模型"（REQ-SEC-0001）。
 // Isolation layers:
+// - when the one-time Linux usability probe succeeds, bubblewrap additionally
+//   isolates namespaces (including network/PIDs) and imports only runtime files
 // - child process (spawned via process.execPath, --smol) gets an environment reduced to
 //   PATH only (no secrets) and an isolated tmp cwd
 // - code runs in a node:vm context built from Object.create(null) with
@@ -17,10 +19,11 @@
 // Tests: test/runjs.test.ts (must re-run after any change to the sandbox model).
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { buildRunJsBwrapArgs, createRunJsSandboxDetector } from "./run-js-sandbox.ts";
 const TIMEOUT_MS = 5000; // parent-side SIGKILL backstop (covers async blowups)
 const VM_TIMEOUT_MS = 3000; // vm timeout; only bounds synchronous execution
 const MAX_OUTPUT = 4096;
@@ -148,16 +151,72 @@ export interface RunJsResult {
 	durationMs: number;
 }
 
+// A real Bun + wrapper invocation catches missing bwrap, denied user namespaces,
+// unavailable runtime libraries and mount failures with the same argv as execution.
+const detectSandbox = createRunJsSandboxDetector(async () => {
+	if (process.platform !== "linux") return false;
+	const dir = mkdtempSync(join(tmpdir(), "runjs-probe-"));
+	try {
+		writeFileSync(join(dir, "wrapper.mjs"), WRAPPER);
+		writeFileSync(join(dir, "code.js"), "1 + 1");
+		return await new Promise<boolean>((resolve) => {
+			const child = spawn(
+				"bwrap",
+				buildRunJsBwrapArgs(process.execPath, join(dir, "wrapper.mjs"), join(dir, "code.js")),
+				{
+					cwd: dir,
+					env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+					stdio: ["ignore", "pipe", "ignore"],
+				},
+			);
+			let out = "";
+			child.stdout.on("data", (data: Buffer) => {
+				out = (out + data.toString()).slice(0, MAX_RAW);
+			});
+			const killer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+			child.on("error", () => {
+				clearTimeout(killer);
+				resolve(false);
+			});
+			child.on("close", (exitCode) => {
+				clearTimeout(killer);
+				resolve(exitCode === 0 && out.trim() === '{"ok":true,"logs":[],"result":"2"}');
+			});
+		});
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 export async function runJs(code: string, execPath: string = process.execPath): Promise<RunJsResult> {
 	if (code.length > MAX_CODE)
 		return { ok: false, output: `code too large (${code.length} > ${MAX_CODE})`, durationMs: 0 };
 	const started = Date.now();
+	const kind = await detectSandbox();
+	if (kind === "bwrap") {
+		// bwrap itself can spawn even when the interpreter cannot; preserve the
+		// existing structured missing-interpreter error without exposing stderr.
+		try {
+			accessSync(execPath, constants.X_OK);
+		} catch {
+			return {
+				ok: false,
+				output: "failed to spawn sandbox interpreter: interpreter unavailable",
+				durationMs: Date.now() - started,
+			};
+		}
+	}
 	const dir = mkdtempSync(join(tmpdir(), "runjs-"));
 	try {
 		writeFileSync(join(dir, "wrapper.mjs"), WRAPPER);
 		writeFileSync(join(dir, "code.js"), code);
 		return await new Promise<RunJsResult>((resolve) => {
-			const child = spawn(execPath, ["--smol", join(dir, "wrapper.mjs"), join(dir, "code.js")], {
+			const wrapperPath = join(dir, "wrapper.mjs");
+			const codePath = join(dir, "code.js");
+			const command = kind === "bwrap" ? "bwrap" : execPath;
+			const args =
+				kind === "bwrap" ? buildRunJsBwrapArgs(execPath, wrapperPath, codePath) : ["--smol", wrapperPath, codePath];
+			const child = spawn(command, args, {
 				cwd: dir,
 				env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, // empty except PATH: no secrets
 				stdio: ["ignore", "pipe", "ignore"], // stderr (runtime crash dumps) never reaches the model

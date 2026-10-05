@@ -64,4 +64,5 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 
 ## 失败诊断
 
+| `runjs-sandbox.test.ts` | bwrap 缺失 / userns 探测拒绝时选择 vm 且计算可用；成功 / 失败探测缓存与并发共享、一次性脱敏日志；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
 改代码前先定位失败来源：被改的行为、环境或工具链（Bun 版本、时区）、外部依赖、与本次改动无关的既有失败。外部和既有失败单独报告，不混入本次结论。

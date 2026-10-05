@@ -10,6 +10,40 @@
 - 可选话题层 `events`：需要可加载 sqlite-vec 的 SQLite；macOS 开发机执行 `brew install sqlite`。首次启动下载约 96 MB 的默认 embedding 模型到 `${dataDir}/models`，允许外网下载并保留缓存；更换 `embeddingModel` 时需相应模型资源。`summaryModel` 必须已在 Pi 中配置且认证，决策来源必须是远程 Jev 或 `localJev`（默认可用 `DEEPSEEK_API_KEY` 的 DeepSeek 包装器）。
 - 按 [README](../README.md#快速开始) 准备 `jingmei.config.json`、`.env` 和模型凭据。
 
+## run_js 操作系统沙箱
+
+Linux 首次 `run_js` 调用会自动探测 bubblewrap 是否真正可用；其他系统或探测失败时保留原有 vm 沙箱，不新增配置，也不阻止计算功能。**vm 不是安全边界**：未启用 bwrap 时，引擎逃逸仍可读服务用户的文件并联网。
+
+Ubuntu 24.04 安装发行版工具：
+
+```bash
+sudo apt install bubblewrap
+command -v bwrap
+sysctl kernel.apparmor_restrict_unprivileged_userns
+```
+
+Ubuntu 24.04 默认启用 AppArmor 对非特权 user namespace 的限制；`kernel.apparmor_restrict_unprivileged_userns = 1` 时，仅找到 `bwrap` 并不代表可创建沙箱。Ubuntu 的[官方发行说明](https://discourse.ubuntu.com/t/noble-numbat-release-notes/39890)解释了该限制及推荐的应用专用 AppArmor `flags=(unconfined)` + `userns,` 授权方式。若发行版已加载匹配 `/usr/bin/bwrap` 的授权 profile，无需另加；若实际探测仍被 AppArmor 拒绝，由管理员检查现有 profile / 内核拒绝日志，必要时按该官方模式创建 `/etc/apparmor.d/jingmei-bwrap`（这里假设 `command -v bwrap` 为 `/usr/bin/bwrap`）：
+
+```text
+abi <abi/4.0>,
+include <tunables/global>
+
+profile jingmei-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+```
+
+不要为同一个 bwrap 路径叠加多个 profile；已有 profile 时应由管理员维护那一份。加载新增 profile：
+
+```bash
+sudo apparmor_parser -r /etc/apparmor.d/jingmei-bwrap
+systemctl --user restart pi-discord-agent
+```
+
+该授权只解决 AppArmor 的 userns 限制，不承诺覆盖其他内核、容器或 systemd 策略；不推荐全局把上述 sysctl 改成 0。Bun 即使位于 `~/.bun/bin/bun` 也只挂载可执行文件本身，不暴露 home。bwrap 参数语义见 [Ubuntu bwrap 手册](https://manpages.ubuntu.com/manpages/noble/man1/bwrap.1.html)；隔离边界及剩余风险见 [architecture.md](architecture.md#run_js-sandbox-威胁模型)。
+
+重启后触发一次正常计算工具调用，并用 `journalctl --user -u pi-discord-agent -f` 查看 `event: "run_js_sandbox"`：`fields.kind: "bwrap"` 才表示试运行成功；`"vm"` 表示本进程回退。日志只出现一次，不包含失败 stderr 或路径；安装工具或调整策略后必须重启重新探测。没有工具调用时不会出现这条日志。
+
 ## systemd 用户服务
 
 仓库里的 [`deploy/pi-discord-agent.service`](../deploy/pi-discord-agent.service)：
