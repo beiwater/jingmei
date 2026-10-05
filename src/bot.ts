@@ -23,6 +23,8 @@ import { inspectVideoTranscoder } from "./media/video-frames.ts";
 import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
 import { createTelegramPlatform } from "./platforms/telegram/index.ts";
+import { ANTIGRAVITY_PROVIDER_ID, AntigravityImageError, generateAntigravityImage } from "./tools/antigravity-image.ts";
+import type { ImageGenerator } from "./core/tools.ts";
 
 async function main(): Promise<void> {
 	const config = loadConfig();
@@ -86,6 +88,16 @@ async function main(): Promise<void> {
 			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
 		});
 	}
+	// Reuses the pi-provider-antigravity login; Pi refreshes the token under its auth.json lock.
+	const imageGenerator: ImageGenerator | undefined = modelRuntime.hasConfiguredAuth(ANTIGRAVITY_PROVIDER_ID)
+		? async (prompt, aspectRatio) => {
+				const auth = await modelRuntime
+					.getAuth(ANTIGRAVITY_PROVIDER_ID, { signal: AbortSignal.timeout(30_000) })
+					.catch(() => undefined);
+				if (!auth?.auth.apiKey) throw new AntigravityImageError("invalid_credential");
+				return generateAntigravityImage(auth.auth.apiKey, prompt, { model: config.imageModel, aspectRatio });
+			}
+		: undefined;
 	core = new Conversation({
 		db,
 		botState,
@@ -99,6 +111,7 @@ async function main(): Promise<void> {
 		...(events ? { events } : {}),
 		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
+		...(imageGenerator ? { imageGenerator } : {}),
 		...(config.visionModel ? { visionModel: config.visionModel } : {}),
 		...(jev && decision
 			? {
@@ -151,6 +164,7 @@ async function main(): Promise<void> {
 		persona_count: personas.length,
 		search_enabled: !!config.webSearchApiKey,
 		voice_enabled: !!config.voice,
+		image_generation_enabled: !!imageGenerator,
 		vision_enabled: !!config.visionModel,
 		jev_quick_reactions: !!jev?.quickReactions,
 		jev_memory_scoring: !!jev?.memoryScoring,

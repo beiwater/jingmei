@@ -98,6 +98,7 @@ function fixture(
 		reasoningEffort: "off",
 		sendReactionImages: true,
 		voiceEnabled: !!options.voice,
+		imageGenerationEnabled: false,
 		accounts: { [platform]: { userId: "900", username: "luna_bot" } },
 	};
 	if (options.reactionImages) {

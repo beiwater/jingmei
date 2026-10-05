@@ -90,7 +90,7 @@ flowchart LR
 - 活跃 = 最后一条消息距当前不超过 2 小时，查询时计算，无定时清理器。候选最多 5 个最近活跃事件、2 个同频道向量召回的已关闭事件和 `new`；向量召回使用 L2 距离，最大 `EVENT_RECALL_MAX_DISTANCE = 1.0`。
 - 消息数达到 3 时首次摘要，之后在 6、12、24……刷新。每个事件后台 single-flight：独立 Pi `summaryModel` 生成标题与描述，fastembed 把标题+描述嵌入 sqlite-vec，再由决策客户端 `scoreParticipation` 排序参与者；向量先写入，参与度打分失败不影响旧话题召回。后台刷新不在频道 lane 上，停机等待 `idle()`。
 - 摘要指令要求标题与描述只概括中性事实：玩笑和接梗仍按玩笑或梗描述，不评价成员“刷屏”“违规”等行为，不给助手安排任务或角色，也不收录理解话题不需要的成员隐私。输出仍为 `title` / `description` JSON，分别截断至 40 / 200 个 Unicode 字符。
-- `formatInboundMessage` 在消息编号/回复标记后加 `§E<id>`，所有观察会话都看到归属；仅触发回复的输入追加 `[当前事件 §E<id>「标题」：描述。主要参与者：A、B、C。只回应这个事件，不要混入其他事件的内容。]`，未命名时为「尚无标题」，缺失描述/参与者时省略相应部分。system prompt 只有稳定的 §E 协议行，动态事件信息不进入缓存前缀。
+- `formatInboundMessage` 在消息编号/回复标记后加 `§E<id>`，所有观察会话都看到归属；触发回复的消息另带 `[当前事件 §E<id>「标题」：描述。主要参与者：A、B、C。只回应这个事件，不要混入其他事件的内容。]`，未命名时为「尚无标题」，缺失描述/参与者时省略相应部分。这段存在 `discord_context_v1` 的 `details.turnNote`，投影只在它是最新输入时拼到消息后；下一轮起从历史里消失，不累积 token，只让上一条触发消息之后的尾部缓存失效。system prompt 只有稳定的 §E 协议行。
 
 ### 路由（`src/core/router.ts`）
 
@@ -107,7 +107,7 @@ bot 消息永不触发。同一条消息在重放时路由结果相同。
 
 - 每个 `(角色, 空间, 频道)` 一个持久 Pi 会话，文件在 `data/sessions/<personaId>/`，映射存 `sessions` 表。Discord thread 有自己的频道 ID，因此自成会话。
 - 会话禁用 Pi 内置编码工具（`noTools: "builtin"`），不加载项目扩展、技能、提示模板和上下文文件；只挂一个隐藏扩展 `jingmei-context`。
-- Pi 自动压缩开启。`modelFor()` 把模型的 `contextWindow` 截到 `MAX_CONTEXT_WINDOW = 65536`，所以无论模型标称多大窗口，都在约 `65536 − 16384` token 时压缩。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
+- Pi 自动压缩开启。`modelFor()` 把模型的 `contextWindow` 截到 `MAX_CONTEXT_WINDOW = 65536`，所以无论模型标称多大窗口，都在约 `65536 − 16384` token（provider 实际用量）时压缩。保留尾部由 Pi 按 chars/4 估算，对中文低估约 5 倍；默认 `keepRecentTokens = 20000` 会几乎保留全部历史，压缩后仍超阈值，导致每轮都压缩、每次都改写缓存前缀。因此会话设置 `keepRecentTokens = 3000`（约 1.5–2 万真实 token）。管理员 `/compact` 手动压缩；`/context` 显示用量，自动压缩点按 `contextWindow − 16384` 报告。
 - 记忆工具：system prompt 给出 `remember_member_fact` / `recall_member_memory` 的具体时机——作者陈述自己的长期信息时先保存（按 key 举例；玩笑、一时状态、他人信息、敏感信息不存；同 key 覆盖，需合并旧值）；被问到成员个人情况而输入里没有时先回想；查不到就说不记得，不编造记忆。
 - 模型：`persona_models` 有记录（`jingmei model` 写入）时用该模型，否则用配置的 `provider`/`model`。`getSession()`（lane 内）每次读一次记录，因此 CLI 的切换不用重启；会话空闲且模型不同时 `setModel()` 并重设 `reasoningEffort`，新会话直接用当前模型创建。记录的模型不在目录里时，先离线 `refresh()` 该 provider（CLI 登录或选择模型时已把动态目录缓存到 `pi-agent/models-store.json`），仍找不到则用配置模型并记一次 `model_override_unavailable`，记录保留。
 - system prompt = 群聊协议 + 平台说明 + 已启用工具的说明 + persona 文件；固定写入角色名字、别名和当前平台已验证账号（用户名、用户 ID、入站提及形式），明确路由已选中本轮回复角色，不让模型重新判断是否被叫到。媒体说明按能力分支描述直接图片输入、可选辅助描述和占位，以及视频少量抽帧；不绑定创建时的模型，因此运行时 `setModel()` 后仍正确。会话（重新）加载时再附上该会话的正式 soul。动态内容不进 system prompt。
@@ -137,6 +137,7 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 | `send_reaction_image` | `sendReactionImages` | 按内置或该角色 `reactionImages` 图库的 id 发一张 PNG/JPEG，默认用 catalog 配文并结束本轮；启动校验路径与元数据，角色工具 schema 的 id 排序固定，不随轮次变化 |
 | `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
 | `speak` | 配了 `voice` 且 `voiceEnabled` | Fish Audio MP3 并结束本轮 |
+| `generate_image` | `antigravity` provider 已登录且 `imageGenerationEnabled` | 用 `pi-provider-antigravity` 存在 `auth.json` 的凭据（`ModelRuntime.getAuth` 负责加锁刷新，API key 是 `{token, projectId}` JSON）向 `daily-cloudcode-pa` `streamGenerateContent` 发一次 `image_gen` 请求，取最后一个非 thought 的 PNG/JPEG（≤ 10 MiB）发出并结束本轮；失败回到 idle，让模型改发文字 |
 | `react_to_message` | 未开启 Jev 秒回表情 | 给本轮消息或本频道近期人类消息点表情并结束本轮 |
 
 发送类工具只在被路由角色的当前回复轮内生效，一轮最多发送一次。
@@ -175,7 +176,7 @@ flowchart TD
 ## 成员记忆、soul、祝福
 
 - **记忆**：`memory_profiles` 记名字、活跃度、生日；`memory_facts` 只收白名单键（preference、interest、role、project、timezone、language、goal、note），拒绝敏感键和可疑内容；`memory_relationships` 来自提及、回复和明确的朋友/同学说法。`/forget` 删档案与关系并写入 `memory_opt_out`，之后不再收集，直到 `/memory enable`。
-- **自动参考**：仅触发回复的角色收到作者、被回复作者和提及成员的 `[成员记忆（仅供参考，不要在群里复述完整档案）：…]`；排除角色 bot 和 opt-out，空结果不追加。直接 `recall(spaceId, ids)`，不调用相关度决策；最多 20 人、总计 2,000 字符，每人最近 5 条事实与最强 4 条关系，没有详情时给出发言次数。其他观察角色只收到原消息。按需工具回想仍可调用相关度排序，不公开完整档案或生日，也不把推断当作事实。
+- **按需回想**：成员记忆不自动注入输入；角色需要时调用 `recall_member_memory`（按聊天显示名，排除角色 bot 和 opt-out，可用 Jev 相关度排序），结果只出现在该轮的工具结果中，不公开完整档案或生日，也不把推断当作事实。
 - **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。学到关于自身风格的稳定教训时用 `update_soul` 暂存，不写入成员资料；暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；压缩成功后事务性并入正式 soul，只重载该会话。
 - **祝福**：每分钟检查一次；目标时区当地 09:00 之后，每个成员生日、每个节日各发一次。发送前在 `celebration_deliveries` 占位，完成后标记；失败当天重试，超过 30 分钟仍在发送中的占位视为中断并重试。暂停期间整次检查跳过，恢复后当天到期的照常发送。
 

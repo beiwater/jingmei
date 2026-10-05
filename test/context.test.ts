@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
+import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
@@ -21,7 +22,13 @@ afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-function fixture(options: { imageInput: boolean; vision?: boolean; observer?: boolean; platform?: Platform }) {
+function fixture(options: {
+	imageInput: boolean;
+	vision?: boolean;
+	observer?: boolean;
+	platform?: Platform;
+	events?: boolean;
+}) {
 	const platform = options.platform ?? "discord";
 	const space: SpaceId = platform === "discord" ? SPACE : "telegram:-100111";
 	const model = {
@@ -78,6 +85,7 @@ function fixture(options: { imageInput: boolean; vision?: boolean; observer?: bo
 		reasoningEffort: "off",
 		sendReactionImages: false,
 		voiceEnabled: false,
+		imageGenerationEnabled: false,
 		accounts: { [platform]: { userId: "900", username: "luna" } },
 	};
 	const observer: Persona = {
@@ -111,6 +119,14 @@ function fixture(options: { imageInput: boolean; vision?: boolean; observer?: bo
 		modelRuntime: runtime,
 		transports: new Map([[platform, transport]]),
 		...(options.vision ? { visionModel: { provider: "fixture", model: "vision" } } : {}),
+		...(options.events
+			? {
+					events: {
+						assign: async () => 7,
+						describe: () => ({ title: "猫咪", description: "聊猫", participants: [] }),
+					} as unknown as EventTracker,
+				}
+			: {}),
 	});
 	cleanups.push(() => {
 		void core.close();
@@ -243,56 +259,39 @@ test("without a vision model the image block is left for Pi's own downgrade", as
 	expect(Array.isArray(content) && content.map((part) => part.type)).toEqual(["text", "image"]);
 });
 
-for (const platform of ["discord", "telegram"] as const) {
-	test(`${platform} triggered turns privately recall author, reply and mentioned humans only`, async () => {
-		const f = fixture({ imageInput: false, observer: true, platform });
-		for (const [id, name, value] of [
-			["5", "alice", "author-music"],
-			["6", "bob", "reply-hiking"],
-			["7", "carol", "mention-art"],
-			["8", "dave", "opted-out-secret"],
-			["900", "luna", "bot-secret"],
-			["901", "sol", "observer-bot-secret"],
-		] as const) {
-			f.memory.observe({
-				platform,
-				spaceId: f.space,
-				channelId: "222",
-				messageId: `seed-${id}`,
-				authorId: id,
-				authorName: name,
-				isBot: false,
-				content: "hello",
-			});
-			f.memory.rememberFact({
-				spaceId: f.space,
-				memberId: id,
-				key: "interest",
-				value,
-				sourceChannelId: "222",
-				sourceMessageId: `seed-${id}`,
-			});
-		}
-		f.memory.forgetMember(f.space, "8");
-		await f.send({
-			content: "hi luna",
-			replyToMessageId: "reply",
-			replyToAuthorId: "6",
-			mentionedUserIds: ["900", "7", "8", "901"],
-		});
-		const input = JSON.stringify(f.contexts[0]!.messages.at(-1));
-		expect(input).toContain("成员记忆");
-		for (const value of ["author-music", "reply-hiking", "mention-art"]) expect(input).toContain(value);
-		for (const value of ["opted-out-secret", "bot-secret", "observer-bot-secret"]) expect(input).not.toContain(value);
-		await f.send({
-			authorId: "8",
-			authorName: "dave",
-			content: "hi sol",
-			mentionedUserIds: ["901"],
-		});
-		const observerInput = JSON.stringify(f.observerContexts[0]!.messages);
-		expect(observerInput).not.toContain("成员记忆");
-		expect(observerInput).not.toContain("author-music");
-		expect(observerInput).not.toContain("bot-secret");
+test("the current-event note reaches only the turn it was written for", async () => {
+	const f = fixture({ imageInput: false, events: true });
+	await f.send({ content: "first" });
+	await f.send({ content: "second" });
+	const [first, second] = f.contexts.map((context) =>
+		context.messages.map((message) => JSON.stringify(message.content).includes("[当前事件 §E7「猫咪」")),
+	);
+	expect(first?.at(-1)).toBe(true);
+	// The earlier message is now history: its note is gone, the latest input carries its own.
+	expect(second?.filter(Boolean)).toHaveLength(1);
+	expect(second?.at(-1)).toBe(true);
+});
+
+test("member memory is not attached automatically; the model recalls it on demand", async () => {
+	const f = fixture({ imageInput: false });
+	f.memory.observe({
+		platform: "discord",
+		spaceId: f.space,
+		channelId: "222",
+		messageId: "seed",
+		authorId: "5",
+		authorName: "alice",
+		isBot: false,
+		content: "hello",
 	});
-}
+	f.memory.rememberFact({
+		spaceId: f.space,
+		memberId: "5",
+		key: "interest",
+		value: "author-music",
+		sourceChannelId: "222",
+		sourceMessageId: "seed",
+	});
+	await f.send();
+	expect(JSON.stringify(f.contexts[0]!.messages)).not.toContain("author-music");
+});

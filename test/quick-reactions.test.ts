@@ -15,6 +15,7 @@ const persona = (id: string): Persona => ({
 	adminUserIds: [],
 	sendReactionImages: false,
 	voiceEnabled: false,
+	imageGenerationEnabled: false,
 	accounts: { telegram: { userId: `${id}-id`, username: id } },
 });
 const personas = [persona("luna"), persona("mio")];

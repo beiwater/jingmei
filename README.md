@@ -31,10 +31,11 @@
 - **并行话题**（可选）：`events` 把同一频道的消息归入不同话题，用 `§E` 编号、标题、描述和主要参与者告诉角色当前在回应哪个事件，避免把同时发生的讨论混在一起；还能召回之前暂时结束的话题。
 - **看图与视频抽帧**：每条消息最多 4 张图片，缩放到 1024×1024、200 KB 以内交给模型；视频用 ffmpeg 抽 1–3 帧。主模型不支持图片输入时，Pi 会把图片替换成一条省略说明；也可以配置 `visionModel`，先把图片描述成一两句文字。语音、文件、贴纸以 `[语音]`、`[文件]`、`[贴纸 😀]` 这样的文字占位。
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
+- **画图**（可选）：登录 Antigravity provider 后，角色可以用 `generate_image` 按群友的描述生成一张图并直接发出（默认 Nano Banana 2 / `gemini-3.1-flash-image`，约十几秒）。登录方式见[画图](#画图)。**注意**：Google Antigravity 条款明确禁止用第三方工具调用 Antigravity OAuth，已有账号因此被封，建议使用小号。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
 - **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript（默认拿不到文件、网络和环境变量；这不是操作系统级沙箱，见 [docs/architecture.md](docs/architecture.md) 的 run_js 威胁模型），用于精确计算、日期运算和单位换算。
-- **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。接话角色自动收到作者、被回复作者和提及人类的有界私人记忆参考（排除 bot 和已 `/forget` 的成员，不额外调用决策模型）；需要其他近期可见成员时可按聊天显示名回想。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，压缩成功后才转为正式内容。成员可随时 `/forget`。
-  何时保存、何时回想写在 system prompt 里：作者自述长期信息时先保存再回复（玩笑、一时状态、他人信息、敏感信息不存）；被问到成员情况而手头没有时先回想；查不到就说不记得，不编造。
+- **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，压缩成功后才转为正式内容。成员可随时 `/forget`。
+  何时保存、何时回想写在 system prompt 里：作者自述长期信息时先保存再回复（玩笑、一时状态、他人信息、敏感信息不存）；被问到成员情况时先回想；查不到就说不记得，不编造。
 - **节日与生日祝福**（可选）：在指定频道、当地时间 09:00 之后发送生日祝福和中国/澳洲节日祝福；发送记录存在数据库里，重启不会重发。
 - **表情图**：角色可以从内置的 4 张 PNG（hello、laugh、think、hug）或自己的本地 PNG/JPEG 图库里挑一张发出去，默认使用图库说明作配文，发图后结束本轮；可按角色关闭。
 - **默认不思考，省 token**：`reasoningEffort` 默认 `off`；即使打开，已完成轮次的 thinking 也不会再发给模型。system prompt 和工具定义保持稳定，便于 provider 前缀缓存。
@@ -52,7 +53,7 @@ flowchart LR
   TA -- InboundMessage --> C
   C --> R{路由<br/>点名 / routingP 抽样}
   R --> S[Pi 会话<br/>角色 × 空间 × 频道]
-  S --> T[工具<br/>搜索 · run_js · 语音 · 记忆 · 表情图]
+  S --> T[工具<br/>搜索 · run_js · 语音 · 画图 · 记忆 · 表情图]
   C --> J[决策客户端 Jev<br/>表情 · 记忆排序 · 话题]
   C --> DB[(SQLite<br/>data/jingmei.db)]
   S -- 回复 --> PT[PlatformTransport<br/>由适配器发回 Discord / Telegram]
@@ -152,7 +153,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 - **暂停**：bot 保持在线并照常把消息存进数据库，但不回复、不点表情、不更新成员记忆和话题、不发祝福，也不调用任何模型。对正在运行的 bot 立即生效，不用重启；重启后仍保持暂停，直到 `resume`。暂停期间的消息不会进入角色的会话上下文；当天到期的祝福在恢复后补发。要真正停掉进程，用 `systemctl --user stop pi-discord-agent` 或 Ctrl+C。
 - **运行状态**：bot 每分钟写一次心跳，超过两分钟没有心跳即视为已停止（包括崩溃）。回复数从引入这个命令的版本开始统计；消息等数据统计全部历史。
 - **切换模型**：只能在服务器上用 CLI 切换，群里没有对应命令。选择存在数据库里，运行中的 bot 在每个频道下一次回复前换过去，不用重启，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider 先 `login`，或把 API key 放进服务进程环境。选中的模型 bot 找不到时（例如 provider 被删除），它会记 `model_override_unavailable` 警告并继续用配置模型。切换会让 provider 前缀缓存失效一次。
-- **上下文上限**：不管模型标称多大的上下文窗口（例如 Gemini 的 1M），每个频道的会话都按 64K 处理，约 48K token 时自动压缩，避免每次回复都带上巨量历史、拖慢速度和耗尽额度。
+- **上下文上限**：不管模型标称多大的上下文窗口（例如 Gemini 的 1M），每个频道的会话都按 64K 处理，约 48K token 时自动压缩，避免每次回复都带上巨量历史、拖慢速度和耗尽额度。压缩后只保留最近约 1.5–2 万 token 的聊天（Pi 按字符数估算 token，对中文低估约 5 倍，所以保留量按 3000 估算 token 设置），两次压缩之间上下文只在末尾追加，provider 前缀缓存能持续命中。
 
 ## 配置参考
 
@@ -168,6 +169,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `discord.guilds[]` | `{ guildId, channelIds }`：服务器 ID 与允许的频道 ID（17–20 位数字）；这些频道下的 thread 也可用 |
 | `telegram.chatIds` | 允许的群 ID，如 `"-1001234567890"` |
 | `voice` | 可选，Fish Audio：`apiKeyEnv`、`referenceId`（32 位十六进制音色 ID）、`model`（`s2.1-pro-free` 默认，或 `s2.1-pro`） |
+| `imageGeneration` | 可选，`{ model }`：画图用的 Antigravity 模型 ID，默认 `gemini-3.1-flash-image`。只有登录了 `antigravity` provider 时画图工具才会启用，见[画图](#画图) |
 | `jev` | 可选，见 [Jev](#jev) |
 | `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
 | `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
@@ -191,6 +193,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `spaces` | 可选，把角色限定在部分群/服务器，如 `["discord:<guildId>", "telegram:<chatId>"]`；省略即全部 |
 | `sendReactionImages` | 是否能发内置及本地图库表情图，默认 `true` |
 | `voiceEnabled` | 配置了 `voice` 时是否使用语音，默认 `true` |
+| `imageGenerationEnabled` | 登录了 Antigravity 时是否使用画图，默认 `true` |
 | `discord` / `telegram` | 该角色在对应平台的账号：`{ tokenEnv, adminUserIds? }`。至少要有一个；用到哪个平台，顶层就必须有哪个平台的段落。`adminUserIds` 是可以用 `/context`、`/compact` 的用户 ID |
 
 本地图库不入库：把整个目录放到 `personas/feiba/`，在对应角色对象中加 `"reactionImages": "personas/feiba"`，保留 `"sendReactionImages": true`。目录示例：
@@ -222,6 +225,16 @@ personas/
 
 生日只在配置了祝福目标的群/服务器里发送；2 月 29 日的生日在平年于 2 月 28 日祝福。
 
+## 画图
+
+画图复用 Pi 扩展 [`pi-provider-antigravity`](https://github.com/iamxeph/pi-provider-antigravity) 的 Antigravity 登录，精魅自己不保存另一套凭据：
+
+1. 在 `<dataDir>/pi-agent/settings.json` 写入 `{ "packages": ["npm:pi-provider-antigravity@0.13.0"] }`，下次运行 `bun run jingmei` 时 Pi 会自动安装这个扩展。
+2. `bun run jingmei login antigravity` 完成 Google 登录。
+3. 重启 bot。启动日志 `ready` 里出现 `image_generation_enabled: true` 即为生效；角色可以用 `imageGenerationEnabled: false` 单独关闭。
+
+每次画图发一次请求（`gemini-3.1-flash-image` 大约 15 秒），失败（限流、被安全策略拦截、超时）时角色改用文字说明，日志里记 `image_generation_failed` 和错误分类。一轮最多发一张图。**Google Antigravity 条款明确禁止第三方工具使用 Antigravity OAuth，已有账号被封，风险自负，建议使用小号。**
+
 ## Jev
 
 [Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。精魅用同一个决策客户端做表情、记忆排序，以及可选的话题归属与参与度判断。
@@ -232,7 +245,7 @@ personas/
 - 普通消息：只有 max(情绪强烈, 好笑) ≥ `threshold`，并且该频道距上一次这样的表情已超过 `minIntervalMs` 才点；由该群配置顺序里第一个角色来点。处于限频期的消息连 Jev 都不调用。
 - 与主回复并行，失败只记日志，不影响回复。开启后，主模型不再注册 `react_to_message` 工具，表情完全交给 Jev。
 
-**记忆排序**（`memoryScoring`）。角色按需调用 `recall_member_memory` 时，把候选事实和关系（每人最近 20 条事实、最强 16 条关系）一次性交给 Jev 与当前消息比对相关度，每人保留最相关的 5 条事实和 4 条关系。Jev 不可用时退回按时间和互动次数排序。接话前自动注入的成员记忆直接按时间和互动次数选取，不调用 Jev。
+**记忆排序**（`memoryScoring`）。角色按需调用 `recall_member_memory` 时，把候选事实和关系（每人最近 20 条事实、最强 16 条关系）一次性交给 Jev 与当前消息比对相关度，每人保留最相关的 5 条事实和 4 条关系。Jev 不可用时退回按时间和互动次数排序。
 
 **本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev` 且有 `DEEPSEEK_API_KEY` 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
 
@@ -288,7 +301,7 @@ Telegram 自定义表情表中不在 Bot API 允许集合里的表情会被丢�
 }
 ```
 
-回复某条已有话题的消息时，直接沿用该话题，不调用决策模型（bot 消息同理，未回复的 bot 消息无话题）。去掉 `[贴纸 …]`、`[视频 N帧]`、`[文件]` 等裸媒体占位后不足 2 个字母/数字的人类消息，并入 10 分钟内最近活跃的话题。其余人类消息在有候选话题时由决策客户端选择归属：短回复、追问和情绪反应倾向延续正在进行的话题；决策选“新话题”但其概率低于 0.6 时，改归概率最高的现有话题。最近 2 小时有消息的话题视为活跃，每次最多提供 5 个活跃话题、2 个同频道向量召回的旧话题，以及“新话题”选项。累计消息数达到 3、6、12、24……时，后台生成/刷新标题描述、参与度与向量；同一事件只同时刷新一次，不阻塞频道处理。摘要使用独立的 `summaryModel`，动态话题内容只追加到触发回复的消息，不写入 system prompt。
+回复某条已有话题的消息时，直接沿用该话题，不调用决策模型（bot 消息同理，未回复的 bot 消息无话题）。去掉 `[贴纸 …]`、`[视频 N帧]`、`[文件]` 等裸媒体占位后不足 2 个字母/数字的人类消息，并入 10 分钟内最近活跃的话题。其余人类消息在有候选话题时由决策客户端选择归属：短回复、追问和情绪反应倾向延续正在进行的话题；决策选“新话题”但其概率低于 0.6 时，改归概率最高的现有话题。最近 2 小时有消息的话题视为活跃，每次最多提供 5 个活跃话题、2 个同频道向量召回的旧话题，以及“新话题”选项。累计消息数达到 3、6、12、24……时，后台生成/刷新标题描述、参与度与向量；同一事件只同时刷新一次，不阻塞频道处理。摘要使用独立的 `summaryModel`；话题说明只在触发回复的那一轮附在消息后面，下一轮起不再留在历史里，也不写入 system prompt。
 
 话题摘要要求中性地描述正在讨论或玩的内容：接梗仍是接梗，不评价成员行为，不给角色安排管理任务，也不保留与话题无关的成员隐私。
 

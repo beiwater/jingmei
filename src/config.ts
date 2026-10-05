@@ -13,6 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
 import { JEV_ENDPOINT } from "./decision/jev.ts";
+import { DEFAULT_IMAGE_MODEL } from "./tools/antigravity-image.ts";
 import {
 	BUILTIN_REACTION_IMAGE_IDS,
 	type Persona,
@@ -56,6 +57,8 @@ export interface AppConfig {
 	/** Telegram group chat ids like "-1001234567890". */
 	telegram?: { chatIds: string[] };
 	voice?: { apiKey: string; referenceId: string; model: "s2.1-pro-free" | "s2.1-pro" };
+	/** Antigravity image model for `generate_image`; the tool exists only when that provider is signed in. */
+	imageModel: string;
 	/** DEEPSEEK_API_KEY, used by server-side web search. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
@@ -406,7 +409,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			const routingP = entry.routingP;
 			if (typeof routingP !== "number" || !Number.isFinite(routingP) || routingP < 0 || routingP > 1)
 				errors.push(`${field}.routingP must be a number between 0 and 1`);
-			for (const key of ["sendReactionImages", "voiceEnabled"] as const)
+			for (const key of ["sendReactionImages", "voiceEnabled", "imageGenerationEnabled"] as const)
 				if (entry[key] !== undefined && typeof entry[key] !== "boolean")
 					errors.push(`${field}.${key} must be a boolean`);
 			let aliases: string[] = [];
@@ -480,6 +483,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				sendReactionImages: entry.sendReactionImages !== false,
 				...(reactionImages ? { reactionImages } : {}),
 				voiceEnabled: entry.voiceEnabled !== false,
+				imageGenerationEnabled: entry.imageGenerationEnabled !== false,
 				tokens,
 			});
 		}
@@ -579,6 +583,15 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		}
 	}
 
+	let imageModel = DEFAULT_IMAGE_MODEL;
+	if (input.imageGeneration !== undefined) {
+		if (!isObject(input.imageGeneration)) errors.push("imageGeneration must be an object");
+		else if (input.imageGeneration.model !== undefined) {
+			if (!nonEmptyString(input.imageGeneration.model)) errors.push("imageGeneration.model must be a nonempty string");
+			else imageModel = input.imageGeneration.model.trim();
+		}
+	}
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -671,6 +684,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(discord ? { discord } : {}),
 		...(telegram ? { telegram } : {}),
 		...(voice ? { voice } : {}),
+		imageModel,
 		...(webSearchApiKey ? { webSearchApiKey } : {}),
 		...(visionModel ? { visionModel } : {}),
 		...(jev ? { jev } : {}),

@@ -28,6 +28,7 @@ function persona(id: string, name: string, userId: string, overrides: Partial<Pe
 		adminUserIds: [],
 		sendReactionImages: true,
 		voiceEnabled: true,
+		imageGenerationEnabled: false,
 		accounts: { discord: { userId, username: name } },
 		...overrides,
 	};

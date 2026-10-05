@@ -18,6 +18,9 @@
 		"referenceId": "00000000000000000000000000000000",
 		"model": "s2.1-pro-free"
 	},
+	"imageGeneration": {
+		"model": "gemini-3.1-flash-image"
+	},
 	"jev": {
 		"endpoint": "https://api.typesafe.ai/v1/systemone",
 		"apiKeyEnv": "TYPESAFE_API_KEY",
@@ -51,6 +54,7 @@
 			"aliases": [],
 			"sendReactionImages": true,
 			"voiceEnabled": true,
+			"imageGenerationEnabled": true,
 			"discord": {
 				"tokenEnv": "DISCORD_LUNA_TOKEN",
 				"adminUserIds": []

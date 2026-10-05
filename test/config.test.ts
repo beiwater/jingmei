@@ -79,6 +79,7 @@ describe("config", () => {
 			reasoningEffort: "off",
 			sendReactionImages: true,
 			voiceEnabled: true,
+			imageGenerationEnabled: true,
 			aliases: [],
 			adminUserIds: [],
 			tokens: { discord: "discord-fixture", telegram: "telegram-fixture" },

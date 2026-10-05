@@ -31,10 +31,11 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 - **Concurrent topics** (optional): `events` assigns channel messages to topics. `§E` IDs, titles, descriptions and leading participants tell the character which event it is answering, keeping simultaneous discussions separate and recalling older topics when they resume.
 - **Images and video frames**: up to 4 images per message, scaled to fit 1024×1024 and 200 KB, reach the model; videos are sampled into 1–3 frames with ffmpeg. When the main model has no image input, Pi replaces each image with an omission note; alternatively set `visionModel` to describe images in a sentence or two first. Voice, files and stickers become text placeholders such as `[语音]`, `[文件]`, `[贴纸 😀]`.
 - **Voice** (optional): with Fish Audio, characters can send MP3s with a transcript in Chinese, Japanese or English. When a member explicitly asks for a voice reply, the final answer is also turned into audio.
+- **Drawing** (optional): once the Antigravity provider is signed in, characters can call `generate_image` to draw one picture from a member's description and send it directly (Nano Banana 2 / `gemini-3.1-flash-image` by default, about 15 seconds). See [Drawing](#drawing) for sign-in. **Warning**: Google's Antigravity terms explicitly forbid third-party tools using Antigravity OAuth and accounts have been banned for it; use a secondary account.
 - **Web search**: with `DEEPSEEK_API_KEY` set, DeepSeek server-side web search is enabled. Messages that explicitly say “查一下” / “搜索” / “look up” are searched first and answered with source links; the model can also search on its own when a question depends on external facts.
 - **Calculation**: `run_js` runs small pure-computation JavaScript in a node:vm realm inside a short-lived child process (no access to files, network or environment variables by default; this is not an OS-level sandbox, see the run_js threat model in [docs/architecture.md](docs/architecture.md)) for exact arithmetic, date math and unit conversions.
-- **Member memory and soul**: per group, profiles hold names, birthdays, stable self-stated facts, and relationships formed by mentions and replies. The replying character automatically receives bounded private memory for the author, replied-to author, and mentioned humans (excluding bots and members who used `/forget`, with no extra decision call); it can recall other recently visible members by their chat display name. Characters save explicit self-stated interests, roles, projects, timezones, languages, goals, and preferences, never reciting full profiles or birthdays publicly. Each character keeps a private soul per channel; stable lessons about its own formatting, tone, or response length are staged and become formal only after successful compaction. Members can `/forget` at any time.
-  The system prompt spells out when to save and when to recall: save before replying when the author states lasting facts about themselves (never jokes, passing states, other people's details or sensitive data); recall before answering about a member when the input lacks it; if nothing is found, say so instead of inventing memories.
+- **Member memory and soul**: per group, profiles hold names, birthdays, stable self-stated facts, and relationships formed by mentions and replies. Member memory is not attached to the input automatically; the replying character calls `recall_member_memory` with a chat display name when it needs it (bots and members who used `/forget` are excluded), keeping history shorter and the cache stable. Characters save explicit self-stated interests, roles, projects, timezones, languages, goals, and preferences, never reciting full profiles or birthdays publicly. Each character keeps a private soul per channel; stable lessons about its own formatting, tone, or response length are staged and become formal only after successful compaction. Members can `/forget` at any time.
+  The system prompt spells out when to save and when to recall: save before replying when the author states lasting facts about themselves (never jokes, passing states, other people's details or sensitive data); recall before answering about a member; if nothing is found, say so instead of inventing memories.
 - **Holiday and birthday greetings** (optional): sent to a chosen channel after 09:00 local time, covering birthdays and Chinese/Australian holidays; deliveries are recorded in the database, so restarts never resend.
 - **Reaction images**: characters can send one of 4 bundled PNGs (hello, laugh, think, hug) or an image from their own local PNG/JPEG catalog, using its default caption and ending the turn; can be turned off per character.
 - **No thinking by default, fewer tokens**: `reasoningEffort` defaults to `off`; even when enabled, thinking from completed turns is not sent back to the model. The system prompt and tool definitions stay stable for provider prefix caching.
@@ -52,7 +53,7 @@ flowchart LR
   TA -- InboundMessage --> C
   C --> R{Routing<br/>addressed / routingP sample}
   R --> S[Pi session<br/>persona × space × channel]
-  S --> T[Tools<br/>search · run_js · voice · memory · reaction images]
+  S --> T[Tools<br/>search · run_js · voice · drawing · memory · reaction images]
   C --> J[Jev decision client<br/>reactions · memory ranking · topics]
   C --> DB[(SQLite<br/>data/jingmei.db)]
   S -- reply --> PT[PlatformTransport<br/>sent back by the adapter]
@@ -152,7 +153,7 @@ Run them in the project directory as the same user that runs the bot. They read 
 - **Pause**: the bot stays online and keeps storing messages, but does not reply, react, update member memory or topics, or send celebrations, and makes no model calls. It applies to a running bot immediately without a restart, and survives restarts until `resume`. Messages received while paused do not enter the characters' session context; greetings due that day go out after resuming. To actually stop the process, use `systemctl --user stop pi-discord-agent` or Ctrl+C.
 - **Status**: the bot writes a heartbeat every minute; with no heartbeat for two minutes it counts as stopped (including crashes). Replies are counted from the release that introduced this command; message and other totals cover all history.
 - **Switch model**: only the CLI on the server can switch models; there is no chat command for it. The choice is stored in the database, the running bot moves each channel over before its next reply without a restart, and it survives restarts. `default` restores `provider`/`model` from `jingmei.config.json`. `reasoningEffort` is kept and Pi clamps it when the new model does not support it. To use another provider, `login` first or put its API key in the service environment. If the bot cannot find the chosen model (for example its provider was removed), it logs `model_override_unavailable` and keeps using the configured model. A switch invalidates the provider's prefix cache once.
-- **Context cap**: whatever window the model advertises (for example Gemini's 1M), each channel session is treated as 64K and compacts automatically around 48K tokens, so replies never carry huge histories that slow them down and drain quota.
+- **Context cap**: whatever window the model advertises (for example Gemini's 1M), each channel session is treated as 64K and compacts automatically around 48K tokens, so replies never carry huge histories that slow them down and drain quota. Compaction keeps only about 15–20k real tokens of recent chat (Pi estimates tokens from character counts and undercounts Chinese about fivefold, so the kept tail is set to 3,000 estimated tokens); between compactions the context only grows at the end, so provider prefix caches keep hitting.
 
 ## Configuration reference
 
@@ -168,6 +169,7 @@ There are exactly two sources: `jingmei.config.json` for settings and `.env` for
 | `discord.guilds[]` | `{ guildId, channelIds }`: server ID and allowed channel IDs (17–20 digits); threads under those channels work too |
 | `telegram.chatIds` | Allowed group IDs, e.g. `"-1001234567890"` |
 | `voice` | Optional Fish Audio: `apiKeyEnv`, `referenceId` (32-hex voice ID), `model` (`s2.1-pro-free` default, or `s2.1-pro`) |
+| `imageGeneration` | Optional `{ model }`: the Antigravity model ID used for drawing, default `gemini-3.1-flash-image`. The drawing tool is enabled only when the `antigravity` provider is signed in, see [Drawing](#drawing) |
 | `jev` | Optional, see [Jev](#jev) |
 | `localJev` | Optional in-process LLM→Jev wrapper: required `baseUrl` (http(s)) and `model`, optional `apiKeyEnv` (omit for unauthenticated local services). Requires an OpenAI-compatible endpoint with logprobs. If the section is absent and `DEEPSEEK_API_KEY` resolves, defaults to DeepSeek / `deepseek-flash` |
 | `events` | Optional; presence enables topics. Required `summaryModel`: `"provider/model"` (first slash splits; model and authentication checked at startup). `embeddingModel` defaults to `fast-bge-small-zh-v1.5` (512 dimensions), and must be supported by fastembed. Requires a remote Jev or local LLM decision client |
@@ -191,6 +193,7 @@ Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
 | `spaces` | Optional restriction to some groups/servers, e.g. `["discord:<guildId>", "telegram:<chatId>"]`; omit for all |
 | `sendReactionImages` | Whether bundled and local catalog reaction images may be sent, default `true` |
 | `voiceEnabled` | Whether to use `voice` when configured, default `true` |
+| `imageGenerationEnabled` | Whether to draw when Antigravity is signed in, default `true` |
 | `discord` / `telegram` | The character's account on that platform: `{ tokenEnv, adminUserIds? }`. At least one is required, and each platform used needs its top-level section. `adminUserIds` may use `/context` and `/compact` |
 
 Keep local catalogs private: place the whole directory at `personas/feiba/`, add `"reactionImages": "personas/feiba"` to that character's object, and keep `"sendReactionImages": true`. Example layout:
@@ -222,6 +225,16 @@ Lunar holidays are calculated from the Gregorian date in the target time zone, i
 
 Birthdays are greeted only in groups/servers with a greeting target; February 29 birthdays are greeted on February 28 in common years.
 
+## Drawing
+
+Drawing reuses the Antigravity sign-in of the Pi extension [`pi-provider-antigravity`](https://github.com/iamxeph/pi-provider-antigravity); Jingmei keeps no second credential:
+
+1. Put `{ "packages": ["npm:pi-provider-antigravity@0.13.0"] }` in `<dataDir>/pi-agent/settings.json`; Pi installs the extension the next time `bun run jingmei` runs.
+2. Sign in with Google via `bun run jingmei login antigravity`.
+3. Restart the bot. `image_generation_enabled: true` in the startup `ready` log means it is on; a character can opt out with `imageGenerationEnabled: false`.
+
+Each drawing is one request (about 15 seconds with `gemini-3.1-flash-image`). On failure (rate limit, safety block, timeout) the character explains in text and the log records `image_generation_failed` with an error category. At most one image is sent per turn. **Google's Antigravity terms explicitly forbid third-party tools using Antigravity OAuth and accounts have been banned; use at your own risk, preferably with a secondary account.**
+
 ## Jev
 
 [Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across reactions, memory ranking, and optional event assignment and participation scoring.
@@ -232,7 +245,7 @@ Birthdays are greeted only in groups/servers with a greeting target; February 29
 - Ordinary messages: an emoji is added only if max(strong emotion, funny) ≥ `threshold` and the channel's previous such reaction was at least `minIntervalMs` ago, by the first character configured for that group. Messages inside the rate-limit window don't call Jev at all.
 - Runs alongside the main reply; failures are only logged and never affect the reply. While enabled, the main model's `react_to_message` tool is not registered — reactions belong to Jev.
 
-**Memory ranking** (`memoryScoring`). When a character explicitly calls `recall_member_memory`, candidate facts and relationships (per member: the 20 newest facts and 16 strongest relationships) are scored against the current message in a single Jev request, keeping the 5 most relevant facts and 4 relationships per member. If Jev is unavailable it falls back to recency and interaction count. Automatically injected member memory uses recency and interaction count directly without calling Jev.
+**Memory ranking** (`memoryScoring`). When a character explicitly calls `recall_member_memory`, candidate facts and relationships (per member: the 20 newest facts and 16 strongest relationships) are scored against the current message in a single Jev request, keeping the 5 most relevant facts and 4 relationships per member. If Jev is unavailable it falls back to recency and interaction count.
 
 **Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` defaults to `https://api.deepseek.com` / `deepseek-flash`. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
 
@@ -288,7 +301,7 @@ Emojis in a custom Telegram table that the Bot API does not allow are dropped wi
 }
 ```
 
-A reply to a message that already has an event inherits that event without a decision call (bot replies too; bot messages that reply to nothing have no event). A human message with fewer than 2 letters/digits after removing bare media placeholders such as `[贴纸 …]`, `[视频 N帧]` and `[文件]` joins the most recently active topic from the last 10 minutes. Other human messages go through the decision client whenever topic candidates exist: short replies, follow-ups and emotional reactions lean towards the ongoing topic, and a “new” decision whose probability is below 0.6 is reassigned to the most probable existing topic. Topics with a message in the last 2 hours are active. Candidates are up to 5 recent active topics, 2 older topics recalled by vector similarity within the same space/channel, and “new”. At 3, 6, 12, 24… messages, a background single-flight refresh generates the title/description, scores participation and updates the embedding without blocking channel processing. Summaries use the independent `summaryModel`; dynamic event details are appended only to the triggering input, never the system prompt.
+A reply to a message that already has an event inherits that event without a decision call (bot replies too; bot messages that reply to nothing have no event). A human message with fewer than 2 letters/digits after removing bare media placeholders such as `[贴纸 …]`, `[视频 N帧]` and `[文件]` joins the most recently active topic from the last 10 minutes. Other human messages go through the decision client whenever topic candidates exist: short replies, follow-ups and emotional reactions lean towards the ongoing topic, and a “new” decision whose probability is below 0.6 is reassigned to the most probable existing topic. Topics with a message in the last 2 hours are active. Candidates are up to 5 recent active topics, 2 older topics recalled by vector similarity within the same space/channel, and “new”. At 3, 6, 12, 24… messages, a background single-flight refresh generates the title/description, scores participation and updates the embedding without blocking channel processing. Summaries use the independent `summaryModel`; the event note is attached only to the triggering input for that turn, dropped from history from the next turn on, and never enters the system prompt.
 
 Topic summaries are instructed to neutrally describe what is being discussed or played: a running joke stays a joke, without judging members' behavior, assigning moderation tasks to the character, or retaining private member details unrelated to the topic.
 

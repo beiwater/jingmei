@@ -72,6 +72,7 @@ test("soul tool, compaction and restart retain the owning conversation without r
 		reasoningEffort: "off",
 		sendReactionImages: true,
 		voiceEnabled: false,
+		imageGenerationEnabled: false,
 		accounts: { discord: { userId: `1234567890123456${index}`, username: id } },
 	}));
 	const transport: PlatformTransport = {

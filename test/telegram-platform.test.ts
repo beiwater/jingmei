@@ -188,6 +188,7 @@ describe("Telegram adapter", () => {
 			adminUserIds: [],
 			sendReactionImages: true,
 			voiceEnabled: false,
+			imageGenerationEnabled: false,
 			accounts: {},
 		};
 		const getMe = spyOn(BotApi.prototype, "getMe").mockResolvedValue({
@@ -281,6 +282,7 @@ describe("Telegram text commands", () => {
 			adminUserIds: ["telegram:7"],
 			sendReactionImages: true,
 			voiceEnabled: false,
+			imageGenerationEnabled: false,
 			accounts: { telegram: { userId: id, username } },
 		});
 		const personas = [persona("a", "a_bot"), persona("b", "b_bot")];

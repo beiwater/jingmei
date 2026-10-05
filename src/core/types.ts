@@ -115,6 +115,8 @@ export interface Persona {
 	/** Persona-local image catalog resolved from the optional reactionImages directory. */
 	reactionImages?: ReactionImageCatalog;
 	voiceEnabled: boolean;
+	/** Whether this persona may use `generate_image` when Antigravity is signed in. */
+	imageGenerationEnabled: boolean;
 	/** Filled by platform startup after verifying each token. */
 	accounts: Partial<Record<Platform, PersonaAccount>>;
 }

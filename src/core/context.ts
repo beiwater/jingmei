@@ -24,6 +24,11 @@ export interface ContextDetails {
 	version: 1;
 	providerText: string;
 	images: ContextImageRef[];
+	/**
+	 * Turn-only guidance (current event) shown while this message is the latest input. Later
+	 * requests drop it, so per-turn notes never accumulate in history or the cached prefix.
+	 */
+	turnNote?: string;
 }
 
 function isContextDetails(value: unknown): value is ContextDetails {
@@ -40,7 +45,8 @@ function isContextDetails(value: unknown): value is ContextDetails {
 				!image.name.includes("/") &&
 				(image.mime === "image/jpeg" || image.mime === "image/png") &&
 				(image.description === undefined || typeof image.description === "string"),
-		)
+		) &&
+		(details.turnNote === undefined || typeof details.turnNote === "string")
 	);
 }
 
@@ -58,7 +64,8 @@ export interface ProjectionOptions {
  * - thinking blocks of completed turns (assistant messages before the last user/custom message)
  *   are dropped, keeping those of the in-progress tool loop;
  * - chat messages expand to text + image blocks; for text-only models an image with a vision
- *   description becomes `[图片：…]` text, otherwise the block is left for Pi to downgrade.
+ *   description becomes `[图片：…]` text, otherwise the block is left for Pi to downgrade;
+ * - a chat message's turn note is included only while it is the latest input.
  */
 function projectContext(messages: readonly AgentMessage[], options: ProjectionOptions): AgentMessage[] {
 	let lastInput = -1;
@@ -88,7 +95,9 @@ function projectContext(messages: readonly AgentMessage[], options: ProjectionOp
 			projected.push(message);
 			return;
 		}
-		const { providerText, images } = message.details;
+		const { images, turnNote } = message.details;
+		const providerText =
+			index === lastInput && turnNote ? `${message.details.providerText}\n\n${turnNote}` : message.details.providerText;
 		if (!images.length) {
 			projected.push({ ...message, content: providerText });
 			return;

@@ -3,6 +3,12 @@ import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { errorCategory, log } from "../observability/log.ts";
+import {
+	AntigravityImageError,
+	type GeneratedImage,
+	IMAGE_ASPECT_RATIOS,
+	type ImageAspectRatio,
+} from "../tools/antigravity-image.ts";
 import { FishAudioTtsError, synthesizeFishAudioTts } from "../tools/fish-tts.ts";
 import { runJs } from "../tools/run-js.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
@@ -371,6 +377,65 @@ export function createReactionImageTool(scope: ToolScope, catalog?: ReactionImag
 				details: { messageId: sent.id, assetId: params.asset_id },
 				terminate: true as const,
 			};
+		},
+	};
+}
+
+/** Generates one image; bound at startup to the configured model and Pi-resolved credential. */
+export type ImageGenerator = (prompt: string, aspectRatio: ImageAspectRatio) => Promise<GeneratedImage>;
+
+export function createImageGenerationTool(scope: ToolScope, generate: ImageGenerator) {
+	return {
+		name: "generate_image",
+		label: "Generate image",
+		description:
+			"Draw one new image from a text description, send it to the chat with an optional short caption, and end the turn. Use when someone asks you to draw, paint or generate a picture. Write the prompt in English with concrete subject, style and composition. Takes about 15 seconds; do not also write a text reply.",
+		parameters: Type.Object(
+			{
+				prompt: Type.String({ minLength: 1, maxLength: 2000 }),
+				aspect_ratio: Type.Optional(Type.Union(IMAGE_ASPECT_RATIOS.map((ratio) => Type.Literal(ratio)))),
+				caption: Type.Optional(Type.String({ maxLength: 200 })),
+			},
+			{ additionalProperties: false },
+		),
+		execute: async (
+			_toolCallId: string,
+			params: { prompt: string; aspect_ratio?: ImageAspectRatio; caption?: string },
+		) => {
+			const turn = scope.getTurn();
+			const fail = (error: string) => failure(`Image generation unavailable: ${error}. Reply in text instead.`, error);
+			if (!turn) return fail("no_active_turn");
+			if (turn.reply.status !== "idle") return fail("reply_already_sent");
+			turn.reply = { status: "sending", kind: "image" };
+			const caption = params.caption?.trim().slice(0, 200) || "🎨";
+			try {
+				const image = await generate(params.prompt, params.aspect_ratio ?? "1:1");
+				const sent = await scope.transport.sendMessage({
+					personaId: scope.personaId,
+					channelId: scope.channelId,
+					content: caption,
+					replyToMessageId: turn.replyToMessageId,
+					attachments: [
+						{
+							name: image.contentType === "image/png" ? "generated.png" : "generated.jpg",
+							data: image.data,
+							contentType: image.contentType,
+						},
+					],
+				});
+				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
+				scope.recordSentMessage(sent.id, caption, turn.replyToMessageId);
+				return {
+					content: [{ type: "text" as const, text: "Image sent." }],
+					details: { messageId: sent.id },
+					terminate: true as const,
+				};
+			} catch (error) {
+				turn.reply = { status: "idle" };
+				const code = error instanceof AntigravityImageError ? error.code : "send_failed";
+				log.warn("core", "image_generation_failed", { persona_id: scope.personaId, error_category: code });
+				return fail(code);
+			}
 		},
 	};
 }

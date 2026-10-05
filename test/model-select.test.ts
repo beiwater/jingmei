@@ -69,6 +69,7 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 		reasoningEffort: "off",
 		sendReactionImages: false,
 		voiceEnabled: false,
+		imageGenerationEnabled: false,
 		accounts: { discord: { userId: "900", username: "luna" } },
 	};
 	const transport: PlatformTransport = {

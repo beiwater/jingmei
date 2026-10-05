@@ -34,6 +34,7 @@
 		"format": "biome check --write ."
 	},
 	"dependencies": {
+		"@anush008/tokenizers-linux-arm64-gnu": "^0.6.0",
 		"@clack/prompts": "1.8.1",
 		"@earendil-works/pi-agent-core": "0.84.1",
 		"@earendil-works/pi-ai": "0.84.1",

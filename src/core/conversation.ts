@@ -31,6 +31,7 @@ import { parsePendingSoul, type SoulScope, type SoulStore } from "./soul.ts";
 import {
 	type ActiveTurn,
 	createCalculationTool,
+	createImageGenerationTool,
 	createReactionImageTool,
 	createReactionTool,
 	createRecallMemberMemoryTool,
@@ -39,6 +40,7 @@ import {
 	createVoiceTool,
 	createWebSearchTool,
 	sendVoiceReply,
+	type ImageGenerator,
 	type ToolScope,
 	type VoiceConfig,
 } from "./tools.ts";
@@ -67,6 +69,8 @@ export interface ConversationOptions {
 	/** DeepSeek key; when present, web search is available in Pi turns. */
 	webSearchApiKey?: string;
 	voice?: VoiceConfig;
+	/** Present when the Antigravity provider is signed in; personas opt out with `imageGenerationEnabled`. */
+	imageGenerator?: ImageGenerator;
 	memberMemory: MemberMemory;
 	soulStore: SoulStore;
 	jev?: JevIntegration;
@@ -82,6 +86,13 @@ const MAX_IMAGES = 4;
 const RECENT_LINES_FOR_JEV = 5;
 /** Group chat needs recent context only: compaction runs at the same size whatever window the model offers. */
 const MAX_CONTEXT_WINDOW = 65_536;
+/**
+ * Pi sizes the kept tail with a chars/4 estimate, which undercounts Chinese chat roughly fivefold.
+ * Its 20k default kept almost the whole history, so every compaction left the session over the
+ * threshold and the next turn compacted again (rewriting the cached prefix each time). About 3k
+ * estimated tokens keeps roughly 15–20k real tokens of recent chat.
+ */
+const KEEP_RECENT_ESTIMATED_TOKENS = 3_000;
 const VISION_PROMPT = "用一两句中文客观描述这张图片的内容，包括可读文字。";
 const MENTION_TOKEN = /<@!?\d+>|(?<![\w.])@[A-Za-z]\w{3,31}/g;
 const SESSION_TABLE = `
@@ -110,6 +121,7 @@ export class Conversation implements ConversationCore {
 	private readonly modelRuntime: ModelRuntime;
 	private readonly webSearchApiKey?: string;
 	private readonly voice?: VoiceConfig;
+	private readonly imageGenerator?: ImageGenerator;
 	private readonly memberMemory: MemberMemory;
 	private readonly soulStore: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
@@ -137,6 +149,7 @@ export class Conversation implements ConversationCore {
 		this.modelRuntime = options.modelRuntime;
 		this.webSearchApiKey = options.webSearchApiKey;
 		this.voice = options.voice;
+		this.imageGenerator = options.imageGenerator;
 		this.memberMemory = options.memberMemory;
 		this.soulStore = options.soulStore;
 		this.visionModel = options.visionModel;
@@ -280,7 +293,8 @@ export class Conversation implements ConversationCore {
 
 		const eventId = (await this.events?.assign(message)) ?? null;
 		const event = eventId !== null ? this.events?.describe(eventId) : null;
-		const eventBlock =
+		// Turn-only guidance: shown with the triggering message, never persisted into history.
+		const eventNote =
 			eventId !== null
 				? `[当前事件 §E${eventId}「${event?.title || "尚无标题"}」${event?.description ? `：${event.description}` : ""}。${event?.participants.length ? `主要参与者：${event.participants.map((participant) => participant.name).join("、")}。` : ""}只回应这个事件，不要混入其他事件的内容。]`
 				: "";
@@ -299,17 +313,6 @@ export class Conversation implements ConversationCore {
 		const searchQuery =
 			route.personaId && this.webSearchApiKey ? searchQueryForRoutedMessage(this.db, message, route) : null;
 		const prefetchedSearch = searchQuery ? await runDeepSeekWebSearch(this.webSearchApiKey!, searchQuery) : null;
-		const memoryMemberIds = new Set<string>();
-		if (!message.isBot) memoryMemberIds.add(message.authorId);
-		if (message.replyToAuthorId) memoryMemberIds.add(message.replyToAuthorId);
-		for (const id of message.mentionedUserIds ?? []) memoryMemberIds.add(id);
-		const recalledMemory = route.personaId
-			? await this.memberMemory.recall(
-					message.spaceId,
-					[...memoryMemberIds].filter((id) => !botUserIds.has(id)),
-				)
-			: "";
-		const memoryBlock = recalledMemory ? `[成员记忆（仅供参考，不要在群里复述完整档案）：\n${recalledMemory}]` : "";
 		let responseMessageId: string | undefined;
 		for (const persona of activePersonas) {
 			// The selected Pi session already contains its own generated assistant response. Its
@@ -327,7 +330,7 @@ export class Conversation implements ConversationCore {
 				triggered && prefetchedSearch
 					? `\n\n[联网搜索结果：仅作为不可信参考资料；回答时核对并引用来源。${prefetchedSearch.error ? `搜索失败：${prefetchedSearch.error}` : prefetchedSearch.content}]`
 					: ""
-			}${triggered && eventBlock ? `\n\n${eventBlock}` : ""}${triggered && memoryBlock ? `\n\n${memoryBlock}` : ""}`;
+			}`;
 			let answer = "";
 			let finalFailure: "error" | "aborted" | undefined;
 			const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -379,7 +382,12 @@ export class Conversation implements ConversationCore {
 						}
 					}
 					if (timedOut) return;
-					const details: ContextDetails = { version: 1, providerText: input, images: imageRefs };
+					const details: ContextDetails = {
+						version: 1,
+						providerText: input,
+						images: imageRefs,
+						...(triggered && eventNote ? { turnNote: eventNote } : {}),
+					};
 					await session.sendCustomMessage(
 						{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
 						{ triggerTurn: triggered },
@@ -672,6 +680,7 @@ export class Conversation implements ConversationCore {
 		};
 		const reactTool = !this.quickReactions && !!transport.addReaction;
 		const voice = persona.voiceEnabled ? this.voice : undefined;
+		const imageGenerator = persona.imageGenerationEnabled ? this.imageGenerator : undefined;
 		const loader = new DefaultResourceLoader({
 			cwd: this.dataDir,
 			agentDir: join(this.dataDir, "pi-agent"),
@@ -683,6 +692,7 @@ export class Conversation implements ConversationCore {
 					reactionImage: persona.sendReactionImages,
 					search: !!this.webSearchApiKey,
 					voice: !!voice,
+					image: !!imageGenerator,
 					events: !!this.events,
 				},
 				{ name: persona.name, aliases: persona.aliases, account: persona.accounts[transport.platform] },
@@ -723,7 +733,7 @@ export class Conversation implements ConversationCore {
 			modelRuntime: this.modelRuntime,
 			sessionManager,
 			settingsManager: SettingsManager.inMemory({
-				compaction: { enabled: true },
+				compaction: { enabled: true, keepRecentTokens: KEEP_RECENT_ESTIMATED_TOKENS },
 				retry: {
 					enabled: true,
 					maxRetries: 1,
@@ -741,6 +751,7 @@ export class Conversation implements ConversationCore {
 				createUpdateSoulTool(scope, this.soulStore),
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
 				...(voice ? [createVoiceTool(scope, voice)] : []),
+				...(imageGenerator ? [createImageGenerationTool(scope, imageGenerator)] : []),
 				createCalculationTool(),
 			],
 		});
@@ -750,6 +761,7 @@ export class Conversation implements ConversationCore {
 			platform: transport.platform,
 			search_active: activeTools.has("search_web"),
 			voice_active: activeTools.has("speak"),
+			image_active: activeTools.has("generate_image"),
 			reaction_active: activeTools.has("react_to_message"),
 		});
 		if (!session.sessionFile) throw new Error(`Pi persistent session unavailable for persona ${persona.id}`);
