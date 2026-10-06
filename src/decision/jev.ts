@@ -121,11 +121,13 @@ const DIRECTED_INSTRUCTIONS =
 	"群友接着自己或其他群友的话说、自言自语、发贴纸或表情、谈论机器人、对全群说话，都选 `none`；" +
 	"机器人刚说过话不代表下一条就是对它说的。拿不准时选 `none`。";
 
+// The previous "is chiming in appropriate?" wording scored 0 on all 193 messages of a real Telegram
+// window. This one rejects stickers, one-word acks, two-person exchanges and bot commands (19 of 193).
 const CHAT_IN_INSTRUCTIONS =
-	"作为普通群友，此时自然插一句是否合适？判断 `message`，用 `recent` 理解语境。" +
-	"开放邀请、玩笑或梗可以接、被调侃、向全群提出有实质内容的问题、确有东西可补充时给高分；" +
-	"群友彼此对话、纯「草」或贴纸等无内容回应、问题已被回答且没有新东西可说时给低分。" +
-	"不要因为消息里有问题或话题就默认应该插话。";
+	"`recent` 是群聊最近几条，`message` 是最新一条，都以「发言者: 内容」开头。" +
+	"一个爱聊天的群友看到 `message` 后接一句，会不会显得自然？" +
+	"`message` 有可接的内容（观点、吐槽、问题、梗、新闻、求助、分享）时接一句就自然；" +
+	"只有纯贴纸/表情/单字附和、明显是两个人之间的私下对话、或者话题已经说完时才不自然。";
 
 const NATURAL_INSTRUCTIONS =
 	"判断 `reply` 是否是可以原样发到群里的自然聊天正文，而不是机器人的内部思考或写作计划。" +
@@ -289,7 +291,12 @@ export function createJevClientWithTransport(
 			const questions: Record<string, Question> = {
 				directed: { type: "choice", instructions: DIRECTED_INSTRUCTIONS, criteria },
 			};
-			if (chatIn) questions.chat_in = { type: "noul", instructions: CHAT_IN_INSTRUCTIONS };
+			if (chatIn)
+				questions.chat_in = {
+					type: "noul",
+					instructions: CHAT_IN_INSTRUCTIONS,
+					criteria: { true: "群友接一句很自然。", false: "接一句会显得多余或打扰。" },
+				};
 			const answers = parseAnswers(await transport(state, questions), questions, true);
 			const directed = answers.directed;
 			if (directed?.type !== "choice") throw new JevError("invalid_response");
