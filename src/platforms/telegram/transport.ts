@@ -22,6 +22,7 @@ export const TELEGRAM_QUICK_REACTIONS: Readonly<Record<string, string>> = {
 const TELEGRAM_PROMPT_LINES: readonly string[] = [
 	"- Telegram 消息正文支持 Markdown 子集：**粗体**、*斜体*、~~删除线~~、> 引用、`行内代码`、三反引号代码块、[来源](https://example.com) 链接。标题会显示为粗体，列表和表格会显示为纯文本。按内容选择，普通聊天保持自然，不要每句都加格式。",
 	"- Telegram 单条消息正文上限 4096 字符；超长会被拆成多条，长答用清楚的短段落组织。",
+	"- 大段解释、长清单、详细步骤这类可以先不看的细节，放进 ```fold 代码块：Telegram 会显示成默认收起的引用，点开才看到全文，块里照常用 Markdown。结论用一两句写在块外面；闲聊和短回答不要用。",
 	"- Telegram 不渲染 LaTeX 数学公式；写数学时用清楚的纯文本或代码块，不要输出 $ 或 $$ 公式标记。",
 	"- 不要用 @用户名 点名群成员，直接称呼名字。",
 ];

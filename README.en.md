@@ -119,7 +119,7 @@ On startup each character registers its slash commands in its servers. Replies u
 
 Telegram limitation: **bots cannot see other bots' messages**. With several characters in one group they do not see each other's replies; each one knows only what members said and what it said itself. Discord has no such limit.
 
-Telegram replies convert Markdown into message entities and are split above 4096 characters; reactions are limited to the emoji set allowed by the Bot API (which has no 😂).
+Telegram replies convert Markdown into message entities and are split above 4096 characters. Characters put long explanations and lists in a ```` ```fold ```` block, shown as a quote that stays collapsed until tapped (inside it only bold/italic/strikethrough survive, code shows as plain text and links are written as "label (url)"). Reactions are limited to the emoji set allowed by the Bot API (which has no 😂).
 
 ## Commands
 

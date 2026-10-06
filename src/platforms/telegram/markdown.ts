@@ -5,9 +5,15 @@ const MAX_CODE_POINTS = 4096;
 const MAX_TOKEN_NODES = 4096;
 const MAX_ENTITIES = 100;
 const MARKED = new Marked();
+/** ```fold fences carry Markdown that Telegram shows as a collapsed quote until tapped. */
+const FOLD_LANGUAGE = "fold";
 
 export type TelegramMessageEntity =
-	| { type: "bold" | "italic" | "strikethrough" | "code" | "blockquote"; offset: number; length: number }
+	| {
+			type: "bold" | "italic" | "strikethrough" | "code" | "blockquote" | "expandable_blockquote";
+			offset: number;
+			length: number;
+	  }
 	| { type: "pre"; offset: number; length: number; language?: string }
 	| { type: "text_link"; offset: number; length: number; url: string }
 	/** Never produced from Markdown; the transport adds it only for trusted `mention` recipients. */
@@ -39,6 +45,7 @@ const STYLE_TYPES = new Set<TelegramMessageEntity["type"]>(["bold", "italic", "s
 const CODE_TYPES = new Set<TelegramMessageEntity["type"]>(["code", "pre"]);
 const ENTITY_TYPE_ORDER: Record<TelegramMessageEntity["type"], number> = {
 	blockquote: 0,
+	expandable_blockquote: 0,
 	text_link: 1,
 	text_mention: 1,
 	bold: 2,
@@ -139,6 +146,8 @@ function sanitizeLanguage(language: string | undefined): string | undefined {
 
 class TelegramMarkdownRenderer {
 	private nodeCount = 0;
+	/** Depth of ```fold blocks being rendered; links inside spell out their URL. */
+	private folds = 0;
 
 	private countNode(): void {
 		this.nodeCount++;
@@ -147,6 +156,24 @@ class TelegramMarkdownRenderer {
 
 	render(tokens: readonly Token[]): Fragment {
 		return this.renderBlocks(tokens, "\n\n");
+	}
+
+	/**
+	 * Bot API quotes may contain only style entities, so code and nested quotes inside a fold keep
+	 * their text and links are written out as `label (url)`.
+	 */
+	private renderFold(markdown: string): Fragment {
+		this.folds++;
+		let inner: Fragment;
+		try {
+			inner = this.render(MARKED.Lexer.lex(markdown, { gfm: true, breaks: false }));
+		} finally {
+			this.folds--;
+		}
+		if (!inner.text) return EMPTY_FRAGMENT;
+		const entities = inner.entities.filter((entity) => STYLE_TYPES.has(entity.type));
+		entities.push({ type: "expandable_blockquote", offset: 0, length: inner.text.length });
+		return { text: inner.text, entities };
 	}
 
 	private renderBlocks(tokens: readonly Token[], separator: string): Fragment {
@@ -172,6 +199,7 @@ class TelegramMarkdownRenderer {
 				const code = token as Tokens.Code;
 				if (!code.text) return EMPTY_FRAGMENT;
 				const language = sanitizeLanguage(code.lang);
+				if (language === FOLD_LANGUAGE) return this.renderFold(code.text);
 				return {
 					text: code.text,
 					entities: [{ type: "pre", offset: 0, length: code.text.length, ...(language ? { language } : {}) }],
@@ -252,7 +280,14 @@ class TelegramMarkdownRenderer {
 					const link = token as Tokens.Link;
 					const label = this.renderInline(link.tokens);
 					const publicUrl = parsePublicHttpUrl(link.href);
-					fragments.push(publicUrl ? withNonStyle(label, { type: "text_link", url: publicUrl.url }) : label);
+					if (!publicUrl) fragments.push(label);
+					else if (this.folds === 0) fragments.push(withNonStyle(label, { type: "text_link", url: publicUrl.url }));
+					else
+						fragments.push(
+							label.text === link.href || label.text === publicUrl.url
+								? label
+								: concatFragments([label, textFragment(` (${publicUrl.url})`)]),
+						);
 					break;
 				}
 				case "image": {

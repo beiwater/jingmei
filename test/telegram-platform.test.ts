@@ -354,6 +354,12 @@ describe("Telegram Markdown entities", () => {
 			text: "😀 🚀 🌙 🧪",
 			types: ["text_link", "bold", "italic", "code"],
 		},
+		{
+			name: "a fold containing styles, code, links and a quote",
+			markdown: "结论\n\n```fold\n**要点** `x` [源](https://example.com)\n\n> 引用\n```",
+			text: "结论\n\n要点 x 源 (https://example.com/)\n\n引用",
+			types: ["expandable_blockquote", "bold"],
+		},
 	])("produces valid entity ranges for $name", ({ markdown, text, types }) => {
 		const formatted = formatTelegramMarkdown(markdown);
 		expect(formatted.text).toBe(text);
@@ -406,6 +412,20 @@ describe("Telegram Markdown entities", () => {
 		expect(formatted).toEqual({
 			text: "const x = 1;",
 			entities: [{ type: "pre", offset: 0, length: 12, language: "ts" }],
+		});
+	});
+
+	test("a fold becomes a collapsed quote that holds only style entities", () => {
+		const formatted = formatTelegramMarkdown(
+			"先说结论。\n\n```fold\n1. **第一步** 跑 `bun test`\n2. 看 [文档](https://example.com/docs) 或 https://example.com\n```",
+		);
+		const text = "先说结论。\n\n1. 第一步 跑 bun test\n2. 看 文档 (https://example.com/docs) 或 https://example.com";
+		expect(formatted).toEqual({
+			text,
+			entities: [
+				{ type: "expandable_blockquote", offset: 7, length: text.length - 7 },
+				{ type: "bold", offset: 10, length: 3 },
+			],
 		});
 	});
 });

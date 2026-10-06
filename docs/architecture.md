@@ -246,7 +246,7 @@ flowchart TD
 | 其他 bot 的消息 | 可见，作为 bot 消息进入各角色会话 | Bot API 不投递，彼此不可见 |
 | 自己发送的回声 | `echoesOwnMessages = true`，Gateway 回声负责入库与其他角色观察 | `echoesOwnMessages = false`，Bot API 不投递；核心成功发送后补存并继承原话题 |
 | 允许列表 | 服务器 + 频道；thread 按父频道 | 群 ID；首次见到未列入的群记 `chat_ignored` |
-| 发送 | Markdown，2000 字符分段，禁止一切 @ 通知 | Markdown→entities，4096 限制下分段；实体被拒时退回纯文本一次 |
+| 发送 | Markdown，2000 字符分段，禁止一切 @ 通知 | Markdown→entities，4096 限制下分段；```` ```fold ```` 块→`expandable_blockquote`（块内只留样式实体，链接写成 `文字 (网址)`）；实体被拒时退回纯文本一次 |
 | 附件 | 图片/MP3 作为附件 | `sendPhoto` / `sendAudio` |
 | 表情 | Unicode 与自定义表情语法 | Bot API 允许的表情集合 |
 | 命令 | 服务器级斜杠命令，回执仅自己可见 | `setMyCommands` + 以 `bot_command` 实体开头的文字命令，回执发在群里 |
