@@ -21,7 +21,7 @@ export async function runContextCommand(
 	if (command === "context") {
 		const status = await core.getContextStatus(...target);
 		const tokens = status.tokens === null ? "暂时无法估算" : `${status.tokens.toLocaleString()} tokens`;
-		return `${labels.context}：${tokens} / ${status.contextWindow.toLocaleString()} tokens。超过 ${status.compactionAtTokens.toLocaleString()} tokens 后，频道连续安静 ${status.compactionQuietMs / 60_000} 分钟才压缩；接近窗口上限（约 ${status.safetyCompactionAtTokens.toLocaleString()} tokens）仍有自动压缩与溢出恢复保护。也可用 /compact 手动压缩。`;
+		return `${labels.context}：${tokens} / ${status.contextWindow.toLocaleString()} tokens。每次回复只带最近 ${status.windowMessages} 条群消息，更早的靠检索；连续对话会接续同一段，超过 ${status.segmentMaxTokens.toLocaleString()} tokens、距上次回复超过 ${status.segmentIdleMs / 60_000} 分钟或其间新增超过 ${status.segmentMaxPending} 条消息就开新的对话段。接近窗口上限（约 ${status.safetyCompactionAtTokens.toLocaleString()} tokens）仍有自动压缩与溢出恢复保护，也可用 /compact 手动压缩。`;
 	}
 	const result = await core.compactContext(...target);
 	return `已压缩${labels.scope}上下文。压缩前约 ${result.tokensBefore.toLocaleString()} tokens。`;

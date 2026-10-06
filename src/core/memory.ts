@@ -113,13 +113,24 @@ const SCHEMA = `
 	);
 `;
 
+/** Idempotent; also used by components that only read `memory_opt_out`. */
+export function ensureMemorySchema(db: Database): void {
+	db.exec(SCHEMA);
+}
+
 /** Small, space-scoped durable member memory shared by every platform. */
 export class MemberMemory {
 	private readonly db: Database;
+	private readonly forgetListeners: Array<(spaceId: SpaceId, userId: string) => void> = [];
 
 	constructor(db: Database) {
 		this.db = db;
-		db.exec(SCHEMA);
+		ensureMemorySchema(db);
+	}
+
+	/** Called after `forgetMember` commits, so derived stores (message index) can drop that member's rows. */
+	onForget(listener: (spaceId: SpaceId, userId: string) => void): void {
+		this.forgetListeners.push(listener);
 	}
 
 	/** Record one message once, update profile activity, and maintain evidenced social edges. */
@@ -416,6 +427,7 @@ export class MemberMemory {
 				)
 				.run(spaceId, userId, Date.now());
 		})();
+		for (const listener of this.forgetListeners) listener(spaceId, userId);
 	}
 
 	enableMember(spaceId: SpaceId, userId: string): void {

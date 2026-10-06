@@ -14,7 +14,7 @@ const EVENT_RECALL_MAX_DISTANCE = 1.0;
 const TRANSCRIPT_LIMIT = 40;
 const PARTICIPANT_LIMIT = 20;
 
-function hasSubstantiveText(content: string): boolean {
+export function hasSubstantiveText(content: string): boolean {
 	// 只移除平台的裸媒体标记，保留 [图片：描述] 等带文字的视觉描述。
 	const text = content.replace(/\[(?:图片|语音|文件|视频(?: \d+帧)?|贴纸(?: [^\]\r\n：:]+)?)\]/gu, "");
 	return /[\p{L}\p{N}].*[\p{L}\p{N}]/su.test(text);

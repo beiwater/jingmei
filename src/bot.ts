@@ -7,9 +7,10 @@ import { BotState, HEARTBEAT_MS } from "./core/bot-state.ts";
 import { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
 import { openDatabase } from "./core/db.ts";
-import { createFastEmbedder } from "./core/embedding.ts";
+import { createFastEmbedder, DEFAULT_EMBEDDING_MODEL } from "./core/embedding.ts";
 import { createPiEventSummarizer, EventTracker } from "./core/events.ts";
 import { MemberMemory } from "./core/memory.ts";
+import { MessageIndex } from "./core/message-index.ts";
 import {
 	assertBotModelConfigured,
 	createInstalledPiModelRuntime,
@@ -74,13 +75,14 @@ async function main(): Promise<void> {
 	const localDecision = config.localJev ? createLocalJevClient(config.localJev) : undefined;
 	const decision =
 		remoteDecision && localDecision ? withFallback(remoteDecision, localDecision) : (remoteDecision ?? localDecision);
+	// The message index always has vectors; topic tracking, when enabled, shares the same local model.
+	const embedder = await createFastEmbedder({
+		model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
+		cacheDir: join(config.dataDir, "models"),
+	});
 	let events: EventTracker | undefined;
 	if (config.events) {
 		if (!decision) throw new Error("events requires a decision client");
-		const embedder = await createFastEmbedder({
-			model: config.events.embeddingModel,
-			cacheDir: join(config.dataDir, "models"),
-		});
 		events = new EventTracker({
 			db,
 			decision,
@@ -88,6 +90,8 @@ async function main(): Promise<void> {
 			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
 		});
 	}
+	const messageIndex = new MessageIndex({ db, embedder });
+	memberMemory.onForget((spaceId, userId) => messageIndex.forgetAuthor(spaceId, userId));
 	// Reuses the pi-provider-antigravity login; Pi refreshes the token under its auth.json lock.
 	const imageGenerator: ImageGenerator | undefined = modelRuntime.hasConfiguredAuth(ANTIGRAVITY_PROVIDER_ID)
 		? async (prompt, aspectRatio) => {
@@ -108,6 +112,7 @@ async function main(): Promise<void> {
 		modelRuntime,
 		memberMemory,
 		soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }),
+		messageIndex,
 		...(events ? { events } : {}),
 		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
@@ -147,6 +152,7 @@ async function main(): Promise<void> {
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
 		await core?.close();
 		await events?.idle();
+		await messageIndex.idle();
 		clearInterval(heartbeat);
 		botState.stopRun();
 		db.close();

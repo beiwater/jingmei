@@ -262,7 +262,7 @@ test("without a vision model the image block is left for Pi's own downgrade", as
 	expect(Array.isArray(content) && content.map((part) => part.type)).toEqual(["text", "image"]);
 });
 
-test("the current-event note reaches only the turn it was written for", async () => {
+test("the current-event note is frozen with its message and projected on every later request", async () => {
 	const f = fixture({ imageInput: false, events: true });
 	await f.send({ content: "first" });
 	await f.send({ content: "second" });
@@ -270,9 +270,10 @@ test("the current-event note reaches only the turn it was written for", async ()
 		context.messages.map((message) => JSON.stringify(message.content).includes("[当前事件 §E7「猫咪」")),
 	);
 	expect(first?.at(-1)).toBe(true);
-	// The earlier message is now history: its note is gone, the latest input carries its own.
-	expect(second?.filter(Boolean)).toHaveLength(1);
+	// The earlier message keeps its note, so the prefix of the second request equals the first request.
+	expect(second?.filter(Boolean)).toHaveLength(2);
 	expect(second?.at(-1)).toBe(true);
+	expect(f.contexts[1]!.messages.slice(0, f.contexts[0]!.messages.length)).toEqual(f.contexts[0]!.messages);
 });
 
 test("member memory is not attached automatically; the model recalls it on demand", async () => {
@@ -335,5 +336,5 @@ test("withheld markers persist but projection removes only their turn's assistan
 	expect(JSON.stringify(projected)).not.toContain(WITHHELD_MESSAGE_TYPE);
 	for (const text of ["input-before", "input-withheld", "input-after", "input-final"])
 		expect(JSON.stringify(projected)).toContain(text);
-	expect(projected.filter((message) => JSON.stringify(message.content).includes("[当前事件"))).toHaveLength(1);
+	expect(projected.filter((message) => JSON.stringify(message.content).includes("[当前事件"))).toHaveLength(4);
 });

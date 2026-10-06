@@ -240,6 +240,7 @@ describe("MemberMemory", () => {
 			query: "What does Alice like?",
 			visibleMemberIds: new Set([ALICE, BOB, "foreign-human"]),
 			memoryRecallCount: 0,
+			historyLookupCount: 0,
 			replyToMessageId: "source",
 			reply: { status: "idle" },
 		};

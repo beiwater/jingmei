@@ -132,6 +132,7 @@ describe("generate_image tool", () => {
 			query: "画只猫",
 			visibleMemberIds: new Set(),
 			memoryRecallCount: 0,
+			historyLookupCount: 0,
 			replyToMessageId: "42",
 			reply: { status: "idle" },
 		};

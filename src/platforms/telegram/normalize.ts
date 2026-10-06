@@ -2,7 +2,7 @@
 // Telegram never delivers one bot's messages to another bot, so personas cannot observe each
 // other's Telegram output through updates; the core only knows what it sent itself.
 
-import { type InboundImage, type InboundMessage, spaceId } from "../../core/types.ts";
+import { type InboundImage, type InboundMessage, STALE_MESSAGE_MS, spaceId } from "../../core/types.ts";
 import type { prepareImage } from "../../media/image.ts";
 import type { extractVideoFrames } from "../../media/video-frames.ts";
 
@@ -173,7 +173,9 @@ export async function normalizeTelegramMessage(
 	if (!sender) return null;
 	const text = message.text ?? message.caption ?? "";
 	const entities = message.entities ?? message.caption_entities ?? [];
-	const { markers, images } = await collectMedia(message, deps);
+	// The core keeps stale messages as history only; markers without downloads keep an offline backlog moving.
+	const stale = Date.now() - message.date * 1000 > STALE_MESSAGE_MS;
+	const { markers, images } = await collectMedia(message, stale ? { ...deps, downloadFile: async () => null } : deps);
 	const content = [...markers, text].filter(Boolean).join(" ");
 	if (!content && images.length === 0) return null;
 	// In forum topics every message "replies" to the topic's creation service message.

@@ -20,6 +20,13 @@ export interface InboundImage {
 	base64: string;
 }
 
+/**
+ * A message older than this when it is received or reaches its channel lane is history only:
+ * stored and embedded, never routed, observed, reacted to or answered, and its media is not fetched.
+ * Keeps a long offline backlog from replaying one message at a time.
+ */
+export const STALE_MESSAGE_MS = 180_000;
+
 /** Platform-neutral inbound message. Every id is a string; adapters own conversion. */
 export interface InboundMessage {
 	platform: Platform;
@@ -148,8 +155,11 @@ export interface ConversationCore {
 	): Promise<{
 		tokens: number | null;
 		contextWindow: number;
-		compactionAtTokens: number;
-		compactionQuietMs: number;
+		/** Segment rotation thresholds (see conversation.ts). */
+		segmentMaxTokens: number;
+		segmentIdleMs: number;
+		segmentMaxPending: number;
+		windowMessages: number;
 		safetyCompactionAtTokens: number;
 	}>;
 	compactContext(

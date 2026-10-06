@@ -32,10 +32,12 @@ function normalizeDeps(overrides: Partial<TelegramNormalizeDeps> = {}): Telegram
 	};
 }
 
+const NOW_SEC = Math.floor(Date.now() / 1000);
+
 function message(fields: Partial<TelegramMessage>): TelegramMessage {
 	return {
 		message_id: 42,
-		date: 1_700_000_000,
+		date: NOW_SEC,
 		chat: { id: CHAT, type: "supergroup" },
 		from: { id: 7, is_bot: false, first_name: "Ann", last_name: "Lee", username: "ann" },
 		...fields,
@@ -68,7 +70,7 @@ describe("Telegram message normalization", () => {
 			content: text,
 			replyToMessageId: "40",
 			replyToAuthorId: "111",
-			timestamp: 1_700_000_000_000,
+			timestamp: NOW_SEC * 1000,
 		});
 		expect(normalized?.mentionedUserIds).toEqual(["111", "555"]);
 	});
@@ -169,6 +171,29 @@ describe("Telegram message normalization", () => {
 		);
 		expect(failed?.content).toBe("[图片]");
 		expect(failed?.images).toBeUndefined();
+	});
+
+	test("messages older than three minutes keep media markers without downloading anything", async () => {
+		let downloads = 0;
+		const deps = normalizeDeps({
+			downloadFile: async () => {
+				downloads++;
+				return { bytes: new Uint8Array([1, 2, 3]), filePath: "photos/file_1.jpg" };
+			},
+		});
+		const old = NOW_SEC - 181;
+		const photo = await normalizeTelegramMessage(
+			message({ date: old, photo: [{ file_id: "p" }], caption: "看" }),
+			deps,
+		);
+		expect(photo?.content).toBe("[图片] 看");
+		expect(photo?.images).toBeUndefined();
+		const video = await normalizeTelegramMessage(message({ date: old, video: { file_id: "v" } }), deps);
+		expect(video?.content).toBe("[视频]");
+		expect(downloads).toBe(0);
+		const fresh = await normalizeTelegramMessage(message({ photo: [{ file_id: "p" }] }), deps);
+		expect(fresh?.images).toHaveLength(1);
+		expect(downloads).toBe(1);
 	});
 });
 
@@ -293,8 +318,10 @@ describe("Telegram text commands", () => {
 				return {
 					tokens: 10,
 					contextWindow: 1_000_000,
-					compactionAtTokens: 200_000,
-					compactionQuietMs: 600_000,
+					segmentMaxTokens: 40_000,
+					segmentIdleMs: 300_000,
+					segmentMaxPending: 30,
+					windowMessages: 30,
 					safetyCompactionAtTokens: 983_616,
 				};
 			},

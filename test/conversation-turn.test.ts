@@ -712,7 +712,7 @@ test("startup replays an interrupted turn exactly once and discards expired pend
 	await abandoned;
 });
 
-test("stale traffic skips participation and quick reactions but remains observed; explicit addressing replies", async () => {
+test("traffic over three minutes old is history only: no reply even when addressed, but seeds the next segment", async () => {
 	const now = Date.now();
 	const clock = spyOn(Date, "now").mockReturnValue(now);
 	cleanups.push(() => clock.mockRestore());
@@ -724,38 +724,49 @@ test("stale traffic skips participation and quick reactions but remains observed
 			events: true,
 			participation: async () => ({ directedPersonaId: "luna", chatIn: 1 }),
 		});
-		const result = await f.send({ timestamp: now - 120_001, mentionedUserIds: [], content: "ordinary conversation" });
-		expect(result.route).toEqual({ personaId: null, reason: "nobody" });
+		const ordinary = await f.send({
+			messageId: "10",
+			timestamp: now - 180_001,
+			mentionedUserIds: [],
+			content: "ordinary conversation",
+		});
+		const addressed = await f.send({ messageId: "11", timestamp: now - 180_001 });
+		for (const result of [ordinary, addressed])
+			expect(result).toEqual({ route: { personaId: null, reason: "nobody" }, messageStored: true });
+		expect(f.calls()).toBe(0);
+		expect(f.sends).toEqual([]);
 		expect(f.participationRequests).toEqual([]);
 		expect(f.quickReactionRequests).toEqual([]);
-		expect(f.calls()).toBe(0);
-		expect(eventId(f.db, "10")).toBeGreaterThan(0);
-		expect(f.db.query("SELECT * FROM memory_observed_messages WHERE message_id = '10'").get()).not.toBeNull();
-		const session = await f.seam.getSession(f.persona, f.space, "222");
+		expect(f.db.query("SELECT * FROM memory_observed_messages").all()).toEqual([]);
+		expect(f.db.query("SELECT * FROM inbound_pending").all()).toEqual([]);
+		expect(f.db.query("SELECT message_id FROM messages ORDER BY message_id").all()).toEqual([
+			{ message_id: "10" },
+			{ message_id: "11" },
+		]);
+		expect(f.logs.filter((record) => record.event === "route").map((record) => record.fields)).toEqual([
+			{ platform: "telegram", reason: "nobody", stale: true },
+			{ platform: "telegram", reason: "nobody", stale: true },
+		]);
+		const fresh = await f.send({ messageId: "12", timestamp: now });
+		expect(fresh.route.reason).toBe("explicit");
+		expect(f.sends).toHaveLength(1);
+		const seeded = await f.seam.getSession(f.persona, f.space, "222");
 		expect(
-			session.messages.some(
+			seeded.messages.some(
 				(message) => message.role === "custom" && JSON.stringify(message).includes("ordinary conversation"),
 			),
 		).toBe(true);
-		const explicit = await f.send({ timestamp: now - 120_001 });
-		expect(explicit.route.reason).toBe("explicit");
-		expect(f.sends).toHaveLength(1);
-		expect(f.participationRequests).toEqual([]);
-		expect(f.quickReactionRequests).toEqual([]);
-		expect(f.logs.filter((record) => record.event === "route").every((record) => record.fields?.stale === true)).toBe(
-			true,
-		);
 	}
 });
 
-test("exactly two minutes is fresh and still requests participation", async () => {
+test("exactly three minutes is fresh and an explicit mention still replies", async () => {
 	const now = Date.now();
 	const clock = spyOn(Date, "now").mockReturnValue(now);
 	cleanups.push(() => clock.mockRestore());
-	const f = fixture({ routingP: 1, jev: true });
-	const result = await f.send({ timestamp: now - 120_000, mentionedUserIds: [], content: "ordinary conversation" });
-	expect(result.route.reason).toBe("probability");
-	expect(f.participationRequests).toHaveLength(1);
+	const f = fixture({ routingP: 0 });
+	const result = await f.send({ timestamp: now - 180_000 });
+	expect(result.route.reason).toBe("explicit");
+	expect(f.sends).toHaveLength(1);
 	expect(f.logs.find((record) => record.event === "route")?.fields?.stale).toBeUndefined();
 });
 

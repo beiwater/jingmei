@@ -272,6 +272,7 @@ describe("conversation guards", () => {
 			query: "",
 			visibleMemberIds: new Set(),
 			memoryRecallCount: 0,
+			historyLookupCount: 0,
 			replyToMessageId: "1",
 			reply: { status: "idle" },
 		};

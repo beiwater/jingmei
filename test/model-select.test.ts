@@ -147,8 +147,12 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	expect(used.at(-1)).toBe("fixture/beta");
 	const status = await core.getContextStatus("luna", "discord", SPACE, "222", "5");
 	expect(status.contextWindow).toBe(1_048_576);
-	expect(status.compactionAtTokens).toBe(200_000);
-	expect(status.compactionQuietMs).toBe(600_000);
+	expect(status).toMatchObject({
+		segmentMaxTokens: 40_000,
+		segmentIdleMs: 300_000,
+		segmentMaxPending: 30,
+		windowMessages: 30,
+	});
 	expect(status.safetyCompactionAtTokens).toBe(1_048_576 - 16_384);
 
 	operator.setModelOverride("luna", "live", "delta");

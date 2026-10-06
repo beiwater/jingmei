@@ -31,6 +31,7 @@ export interface PromptTools {
 	voice: boolean;
 	image: boolean;
 	events: boolean;
+	history: boolean;
 }
 
 /**
@@ -59,6 +60,11 @@ export function buildSystemPrompt(
 		...(tools.events
 			? ["- 消息中的 §E 编号标记并行话题；只回应触发本轮消息所属的事件，其他事件的历史不要混入回答。"]
 			: []),
+		...(tools.history
+			? [
+					"- 你只直接看到最近一段群聊。某行末尾的「（相关 N 条）」表示这条消息在更早历史里有 N 条相关消息（20+ 即超过 20 条）；只有回答确实需要更早背景时才用 related_messages / search_history 查，闲聊和最近上下文已足够时不要查。",
+				]
+			: []),
 		...transport.promptLines,
 		...(tools.react
 			? ["- 简短的赞同、鼓励或回应可调用 react_to_message 给对方消息点表情；调用后直接结束本轮，不再发文字。"]
@@ -76,7 +82,7 @@ export function buildSystemPrompt(
 		"  - 每种 key 每人只保留一条，新值会覆盖旧值；可能已有同类内容时先 recall_member_memory，把新旧合并成一句再保存。",
 		"  - 遇到「还记得我吗」「我是谁」「我喜欢什么」「X 是做什么的」「X 生日是哪天」，或回答需要某个成员的个人情况时，先调用 recall_member_memory（member 填聊天里显示的名字），再按结果回答。",
 		"  - 没查到就直说不记得或不确定；不要声称记得没有记录的事，也不要编造记了多少条。",
-		"- 学到关于你自身风格的稳定教训（例如群友纠正格式、语气或回复长度）时，用 update_soul 暂存到私人 soul.md；只记录适合长期保留的自身风格或自我反思，暂存内容是参考，成功压缩后才晋升为正式备忘。不得写入成员隐私、生日或凭空推断的信息。",
+		"- 学到关于你自身风格的稳定教训（例如群友纠正格式、语气或回复长度）时，用 update_soul 暂存到私人 soul.md；只记录适合长期保留的自身风格或自我反思，暂存内容是参考，下一段对话开始或压缩成功后才晋升为正式备忘。不得写入成员隐私、生日或凭空推断的信息。",
 		"- 不要自行创建 @提及；发送端会禁止意外通知。",
 		...(tools.search
 			? [
