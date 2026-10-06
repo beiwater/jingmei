@@ -312,7 +312,16 @@ export function createJevClientWithTransport(
 			const state: { reply: string; message: string; recent?: string[] } = { reply, message };
 			if (recent && recent.length > 0) state.recent = recent.slice(-MAX_RECENT_LINES);
 			const answers = await evaluate(state, {
-				natural: { type: "noul", instructions: NATURAL_INSTRUCTIONS },
+				natural: {
+					type: "noul",
+					instructions: NATURAL_INSTRUCTIONS,
+					// Without criteria the model withheld ~12% of real chat replies on security/crypto topics.
+					criteria: {
+						true: "`reply` 是直接对群友说的话，可以原样发到群里。",
+						false:
+							"`reply` 含有机器人写给自己的规划：用第三人称复述群里谁说了什么、分析该怎么回或该用什么风格长度、复述事件或触发消息、对自己下指令。",
+					},
+				},
 			});
 			return noulOf(answers, "natural");
 		},
