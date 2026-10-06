@@ -742,7 +742,7 @@ export class Conversation implements ConversationCore {
 			return { ...base, route: participationRoute(sampled, gated, null, undefined, 0.7, false), decision: "none" };
 		try {
 			const decision = await this.jev.client.decideParticipation({
-				message: message.content,
+				message: `${message.authorName}: ${message.content}`,
 				recent,
 				personas,
 				chatIn: !!candidate && !gated,

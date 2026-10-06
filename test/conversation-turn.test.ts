@@ -539,7 +539,7 @@ test("gated participation still asks for directed intent but never asks for chat
 	await f.send({ isBot: true, authorId: "900", content: "earlier reply" });
 	const dispatch = await f.send({ mentionedUserIds: [], content: "ordinary conversation" });
 	expect(f.participationRequests).toHaveLength(1);
-	expect(f.participationRequests[0]).toMatchObject({ message: "ordinary conversation", chatIn: false });
+	expect(f.participationRequests[0]).toMatchObject({ message: "Alice: ordinary conversation", chatIn: false });
 	expect(dispatch.route).toEqual({ personaId: null, reason: "nobody" });
 	expect(f.calls()).toBe(0);
 	expect(f.sends).toEqual([]);

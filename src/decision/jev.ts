@@ -113,10 +113,13 @@ const FUNNY_INSTRUCTIONS =
 	"Is `message` itself clearly funny, a joke, or deliberately humorous? " +
 	"`recent` (if present) is earlier context only; judge `message`.";
 
+// Measured on a real Telegram window: the looser "continuing the bot counts" wording called 65 of 65
+// unaddressed messages (stickers, links, members talking to each other) directed at the bot.
 const DIRECTED_INSTRUCTIONS =
-	"判断 `message` 实际在对哪个机器人角色说话。选项描述给出角色名字和别名。" +
-	"即使没有 @、回复引用或名字，延续 `recent` 中机器人的发言、语境中的「你」指向机器人、" +
-	"要求它继续或反驳它，都算在对该角色说话。只是在谈论机器人，或群友彼此交流，选择 `none`。";
+	"判断 `message` 是不是在对某个机器人角色说话。选项描述给出角色名字和别名；`message` 与 `recent` 都以「发言者: 内容」开头。" +
+	"没有 @、回复引用或名字时，只有 `message` 明显是在回应机器人刚说的那句话（回答它的问题、接它的话茬、反驳或追问它）才算。" +
+	"群友接着自己或其他群友的话说、自言自语、发贴纸或表情、谈论机器人、对全群说话，都选 `none`；" +
+	"机器人刚说过话不代表下一条就是对它说的。拿不准时选 `none`。";
 
 const CHAT_IN_INSTRUCTIONS =
 	"作为普通群友，此时自然插一句是否合适？判断 `message`，用 `recent` 理解语境。" +

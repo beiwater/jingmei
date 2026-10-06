@@ -115,7 +115,8 @@ pending 的 `payload` 是归一化 `InboundMessage` JSON，保留路由与回复
 
 `replyDecision` 默认 `true`，`replyThreshold` 默认 `0.7`、合法范围 `(0,1]`。启用且有客户端时，每条未明确点名的人类消息只调用一次 `decideParticipation({ message, recent, personas, chatIn })`，返回 `{ directedPersonaId: string | null, chatIn?: number }`：
 
-- `directed` 问题总是包含全部作用域内角色与 `none`，即使 HMAC 未抽中或候选被门控也照常问。合法角色选择的概率 ≥ 0.5 才识别为对该角色说话；directed 路由绕过抽样与门控。
+- `message` 以「发言者: 正文」传入，与 `recent` 行格式一致，让判断能区分群友互相接话与回应机器人。
+- `directed` 问题总是包含全部作用域内角色与 `none`，即使 HMAC 未抽中或候选被门控也照常问。只有明显在回应机器人刚说的话才算 directed（机器人刚发言不足以成立），拿不准选 `none`；合法角色选择的概率 ≥ 0.5 才识别为对该角色说话；directed 路由绕过抽样与门控。
 - 仅当候选被抽中且未被门控时，附带该候选的 `chat_in` noul 问题；无 directed 角色时，分数 ≥ `replyThreshold` 才让该候选接话。不另加第二次请求。
 - 调用失败只记 `participation_failed`、`error_category`，本条消息无人接话；不回退到概率候选。关闭或没有客户端时，只按 HMAC 候选与门控路由。
 
