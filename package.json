@@ -40,6 +40,8 @@
 		"@earendil-works/pi-ai": "0.84.1",
 		"@earendil-works/pi-coding-agent": "0.84.1",
 		"@earendil-works/pi-tui": "0.84.1",
+		"@myriaddreamin/typst-ts-node-compiler": "0.7.0",
+		"@resvg/resvg-js": "2.6.2",
 		"citty": "0.2.2",
 		"fastembed": "3.0.0",
 		"lunar-typescript": "1.8.6",
