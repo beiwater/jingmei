@@ -11,6 +11,8 @@ import type { PlatformTransport } from "./types.ts";
 export const CONTEXT_MESSAGE_TYPE = "discord_context_v1";
 export const PENDING_SOUL_TYPE = "discord_pending_soul_v1";
 export const WITHHELD_MESSAGE_TYPE = "jingmei_withheld_v1";
+/** Tells the model its over-long text reply was not sent and must go out through `send_text_image`. */
+export const LENGTH_GATE_MESSAGE_TYPE = "jingmei_length_gate_v1";
 
 export interface ContextImageRef {
 	/** File name inside the private media dir; never a path. */

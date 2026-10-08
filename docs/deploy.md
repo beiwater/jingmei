@@ -7,6 +7,7 @@
 - 专用 Linux 用户；代码、`.env`、`jingmei.config.json`、persona 文件和 `data/` 都放在该用户家目录下，只有该用户可读。
 - [Bun](https://bun.sh/)。仓库 CI 使用 Bun 1.3.14。
 - 可选：`ffmpeg` 与 `ffprobe`（Debian/Ubuntu：`sudo apt install ffmpeg`）。缺少任一工具时启动日志有一条 `video_frames_unavailable` 警告，视频只以 `[视频]` 占位进入上下文，其他功能不受影响；安装后重启即可。
+- 可选：开启 `textImage`（长文转图）需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会联网下载并缓存两个固定版本的 Typst 包。字体缺失时图里的汉字会变成方框；启动时检测到会记一条 `text_image_font_missing` 警告（功能仍保持开启），装好字体后重启即可。
 - 需要可加载 sqlite-vec 的 SQLite（消息检索向量总是需要；macOS 开发机执行 `brew install sqlite`）。首次启动下载约 96 MB 的默认 embedding 模型到 `${dataDir}/models`，允许外网下载并保留缓存；更换 `events.embeddingModel` 时需相应模型资源。可选话题层 `events`：`summaryModel` 必须已在 Pi 中配置且认证，决策来源必须是远程 Jev 或 `localJev`（默认可用 `DEEPSEEK_API_KEY` 的 DeepSeek 包装器）。
 - 按 [README](../README.md#快速开始) 准备 `jingmei.config.json`、`.env` 和模型凭据。
 

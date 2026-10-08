@@ -21,6 +21,10 @@
 	"imageGeneration": {
 		"model": "gemini-3.1-flash-image"
 	},
+	"textImage": {
+		"enabled": false,
+		"thresholdChars": 300
+	},
 	"jev": {
 		"endpoint": "https://api.typesafe.ai/v1/systemone",
 		"apiKeyEnv": "TYPESAFE_API_KEY",

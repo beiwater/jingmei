@@ -11,11 +11,13 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { TextImageRenderer } from "../media/text-image.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import {
 	CONTEXT_MESSAGE_TYPE,
 	type ContextDetails,
 	type ContextImageRef,
+	LENGTH_GATE_MESSAGE_TYPE,
 	makeContextExtension,
 	PENDING_SOUL_TYPE,
 	WITHHELD_MESSAGE_TYPE,
@@ -39,6 +41,7 @@ import {
 	createReactionTool,
 	createRecallMemberMemoryTool,
 	createRememberMemberFactTool,
+	createTextImageTool,
 	createUpdateSoulTool,
 	createVoiceTool,
 	createWebSearchTool,
@@ -75,6 +78,8 @@ export interface ConversationOptions {
 	voice?: VoiceConfig;
 	/** Present when the Antigravity provider is signed in; personas opt out with `imageGenerationEnabled`. */
 	imageGenerator?: ImageGenerator;
+	/** Text replies longer than `thresholdChars` are refused and must be sent through `send_text_image`. */
+	textImage?: { render: TextImageRenderer; thresholdChars: number };
 	memberMemory: MemberMemory;
 	soulStore: SoulStore;
 	jev?: JevIntegration;
@@ -170,6 +175,7 @@ export class Conversation implements ConversationCore {
 	private readonly webSearchApiKey?: string;
 	private readonly voice?: VoiceConfig;
 	private readonly imageGenerator?: ImageGenerator;
+	private readonly textImage?: ConversationOptions["textImage"];
 	private readonly memberMemory: MemberMemory;
 	private readonly soulStore: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
@@ -203,6 +209,7 @@ export class Conversation implements ConversationCore {
 		this.webSearchApiKey = options.webSearchApiKey;
 		this.voice = options.voice;
 		this.imageGenerator = options.imageGenerator;
+		this.textImage = options.textImage;
 		this.memberMemory = options.memberMemory;
 		this.soulStore = options.soulStore;
 		this.visionModel = options.visionModel;
@@ -547,6 +554,23 @@ export class Conversation implements ConversationCore {
 							{ customType: CONTEXT_MESSAGE_TYPE, content: input, display: false, details },
 							{ triggerTurn: true },
 						);
+						// An over-long text reply is never sent: the model gets one chance to resend it as an image.
+						const gate = this.textImage;
+						if (
+							gate &&
+							!timedOut &&
+							!finalFailure &&
+							turn.reply.status === "idle" &&
+							answer.length > gate.thresholdChars
+						)
+							await session.sendCustomMessage(
+								{
+									customType: LENGTH_GATE_MESSAGE_TYPE,
+									content: `[系统提示：你刚才的回复有 ${answer.length} 字，超过 ${gate.thresholdChars} 字的文字上限，没有发出。请把完整内容整理成 Markdown，调用 send_text_image 发成一张图，不要再发文字。]`,
+									display: false,
+								},
+								{ triggerTurn: true },
+							);
 					};
 					const deadline = new Promise<void>((resolve) => {
 						deadlineTimer = setTimeout(() => {
@@ -997,6 +1021,7 @@ export class Conversation implements ConversationCore {
 					image: !!imageGenerator,
 					events: !!this.events,
 					history: !!this.messageIndex,
+					...(this.textImage ? { textImageChars: this.textImage.thresholdChars } : {}),
 				},
 				{ name: persona.name, aliases: persona.aliases, account: persona.accounts[transport.platform] },
 			),
@@ -1062,6 +1087,7 @@ export class Conversation implements ConversationCore {
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
 				...(voice ? [createVoiceTool(scope, voice)] : []),
 				...(imageGenerator ? [createImageGenerationTool(scope, imageGenerator)] : []),
+				...(this.textImage ? [createTextImageTool(scope, this.textImage.render)] : []),
 				...(this.messageIndex ? createHistoryTools(scope, this.messageIndex) : []),
 				createCalculationTool(),
 			],
