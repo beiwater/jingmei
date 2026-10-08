@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
+import { TEXT_IMAGE_MAX_CHARS, TextImageError, type TextImageRenderer } from "../media/text-image.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import {
 	AntigravityImageError,
@@ -537,6 +538,68 @@ export function createReactionImageTool(scope: ToolScope, catalog?: ReactionImag
 				details: { messageId: sent.id, assetId: params.asset_id },
 				terminate: true as const,
 			};
+		},
+	};
+}
+
+/** The stored message of a text image: the caller's caption, else a one-line title taken from the Markdown. */
+function textImageCaption(markdown: string, caption: string | undefined): string {
+	const given = caption?.trim().slice(0, 200);
+	if (given) return given;
+	const title = markdown
+		.split("\n")
+		.map((line) =>
+			line
+				.replace(/^[\s>#*+\-\d.)]+/, "")
+				.replace(/[*_`$]/g, "")
+				.trim(),
+		)
+		.find(Boolean);
+	return title ? `📄 ${[...title].slice(0, 60).join("")}` : "📄";
+}
+
+export function createTextImageTool(scope: ToolScope, render: TextImageRenderer) {
+	return {
+		name: "send_text_image",
+		label: "Send text as image",
+		description:
+			"Render a long reply as one image and send it to the chat with an optional short caption, then end the turn. Use it instead of a long text reply: write the full content as Markdown in `markdown` (headings, lists, tables, code, `$...$` / `$$...$$` LaTeX math, `![alt](public https URL)` pictures). Do not also write a text reply.",
+		parameters: Type.Object(
+			{
+				markdown: Type.String({ minLength: 1, maxLength: TEXT_IMAGE_MAX_CHARS }),
+				caption: Type.Optional(Type.String({ maxLength: 200 })),
+			},
+			{ additionalProperties: false },
+		),
+		execute: async (_toolCallId: string, params: { markdown: string; caption?: string }) => {
+			const turn = scope.getTurn();
+			const fail = (error: string) => failure(`Text image unavailable: ${error}. Reply in plain text instead.`, error);
+			if (!turn) return fail("no_active_turn");
+			if (turn.reply.status !== "idle") return fail("reply_already_sent");
+			turn.reply = { status: "sending", kind: "image" };
+			const caption = textImageCaption(params.markdown, params.caption);
+			try {
+				const image = await render(params.markdown);
+				const sent = await scope.transport.sendMessage({
+					personaId: scope.personaId,
+					channelId: scope.channelId,
+					content: caption,
+					replyToMessageId: turn.replyToMessageId,
+					attachments: [{ name: "text.png", data: image.data, contentType: image.contentType }],
+				});
+				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
+				scope.recordSentMessage(sent.id, caption, turn.replyToMessageId);
+				return {
+					content: [{ type: "text" as const, text: "Text image sent." }],
+					details: { messageId: sent.id },
+					terminate: true as const,
+				};
+			} catch (error) {
+				turn.reply = { status: "idle" };
+				const code = error instanceof TextImageError ? error.code : "send_failed";
+				log.warn("core", "text_image_failed", { persona_id: scope.personaId, error_category: code });
+				return fail(code);
+			}
 		},
 	};
 }

@@ -48,6 +48,7 @@ function fixture(
 		audit?: JevClient["auditNatural"];
 		typing?: { refreshMs: number; maxMs: number };
 		quickReactions?: boolean;
+		textImage?: NonNullable<ConversationOptions["textImage"]>;
 	} = {},
 ) {
 	useExtensibleSqlite();
@@ -229,6 +230,7 @@ function fixture(
 				}
 			: {}),
 		turnTimeoutMs: options.timeoutMs ?? 2_000,
+		...(options.textImage ? { textImage: options.textImage } : {}),
 		...(options.typing ? { typingMaxMs: options.typing.maxMs } : {}),
 		...(options.voice ? { voice: { apiKey: "fixture", referenceId: "fixture", model: "s2.1-pro-free" as const } } : {}),
 	};
@@ -503,6 +505,63 @@ test("a persona catalog image is sent with its default caption and ends the turn
 		content: "Who, me?",
 		event_id: eventId(f.db, "10"),
 	});
+});
+
+const LONG_TEXT = "这是一段很长的回复。".repeat(40);
+const textImage = (render?: NonNullable<ConversationOptions["textImage"]>["render"]) => ({
+	thresholdChars: 300,
+	render: render ?? (async () => ({ data: new Uint8Array([0x89, 0x50]), contentType: "image/png" as const })),
+});
+
+test("an over-long text reply is withheld once and goes out through send_text_image", async () => {
+	const f = fixture({ textImage: textImage() });
+	f.script.push(
+		f.reply([{ type: "text", text: LONG_TEXT }]),
+		f.reply(
+			[
+				{
+					type: "toolCall",
+					id: "image",
+					name: "send_text_image",
+					arguments: { markdown: `# 标题\n\n${LONG_TEXT}`, caption: "长文" },
+				},
+			],
+			"toolUse",
+		),
+	);
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.calls()).toBe(2);
+	expect(f.sends).toHaveLength(1);
+	expect(f.sends[0]).toMatchObject({
+		content: "长文",
+		replyToMessageId: "10",
+		attachments: [{ name: "text.png", contentType: "image/png" }],
+	});
+	expect(f.db.query("SELECT content FROM messages WHERE message_id = '1001'").get()).toEqual({ content: "长文" });
+});
+
+test("a model that still answers over the limit after the one retry has its text sent normally", async () => {
+	const f = fixture({ textImage: textImage() });
+	f.script.push(f.reply([{ type: "text", text: LONG_TEXT }]), f.reply([{ type: "text", text: LONG_TEXT }]));
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.calls()).toBe(2);
+	expect(f.sends).toHaveLength(1);
+	expect(f.sends[0]).toMatchObject({ content: LONG_TEXT });
+	expect(f.sends[0]?.attachments).toBeUndefined();
+});
+
+test("replies within the limit, and every reply without the feature, are not gated", async () => {
+	const short = fixture({ textImage: textImage() });
+	short.script.push(short.reply([{ type: "text", text: "短回复" }]));
+	await short.send();
+	expect(short.calls()).toBe(1);
+	expect(short.sends[0]).toMatchObject({ content: "短回复" });
+
+	const off = fixture();
+	off.script.push(off.reply([{ type: "text", text: LONG_TEXT }]));
+	await off.send();
+	expect(off.calls()).toBe(1);
+	expect(off.sends[0]).toMatchObject({ content: LONG_TEXT });
 });
 
 for (const mode of ["tool", "explicit"] as const) {

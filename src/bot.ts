@@ -20,6 +20,7 @@ import { SoulStore } from "./core/soul.ts";
 import type { Persona, Platform, PlatformTransport } from "./core/types.ts";
 import { createJevClient, withFallback } from "./decision/jev.ts";
 import { createLocalJevClient } from "./decision/local-jev.ts";
+import { cjkFontMissing, renderTextImage, type TextImageRenderer } from "./media/text-image.ts";
 import { inspectVideoTranscoder } from "./media/video-frames.ts";
 import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
@@ -102,6 +103,17 @@ async function main(): Promise<void> {
 				return generateAntigravityImage(auth.auth.apiKey, prompt, { model: config.imageModel, aspectRatio });
 			}
 		: undefined;
+	// One probe render also warms the compiler; a broken install turns the feature off instead of failing every long reply.
+	let textImage: { render: TextImageRenderer; thresholdChars: number } | undefined;
+	if (config.textImage) {
+		try {
+			await renderTextImage("ok");
+			textImage = { render: renderTextImage, thresholdChars: config.textImage.thresholdChars };
+			if (await cjkFontMissing()) log.warn("core", "text_image_font_missing", {});
+		} catch (error) {
+			log.warn("core", "text_image_unavailable", { error_category: errorCategory(error) });
+		}
+	}
 	core = new Conversation({
 		db,
 		botState,
@@ -117,6 +129,7 @@ async function main(): Promise<void> {
 		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
 		...(imageGenerator ? { imageGenerator } : {}),
+		...(textImage ? { textImage } : {}),
 		...(config.visionModel ? { visionModel: config.visionModel } : {}),
 		...(decision
 			? {
@@ -177,6 +190,7 @@ async function main(): Promise<void> {
 		search_enabled: !!config.webSearchApiKey,
 		voice_enabled: !!config.voice,
 		image_generation_enabled: !!imageGenerator,
+		text_image_enabled: !!textImage,
 		vision_enabled: !!config.visionModel,
 		jev_quick_reactions: !!jev?.quickReactions,
 		jev_memory_scoring: !!jev?.memoryScoring,

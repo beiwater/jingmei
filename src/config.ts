@@ -13,6 +13,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
 import { JEV_ENDPOINT } from "./decision/jev.ts";
+import { TEXT_IMAGE_MAX_CHARS } from "./media/text-image.ts";
 import { DEFAULT_IMAGE_MODEL } from "./tools/antigravity-image.ts";
 import {
 	BUILTIN_REACTION_IMAGE_IDS,
@@ -61,6 +62,8 @@ export interface AppConfig {
 	voice?: { apiKey: string; referenceId: string; model: "s2.1-pro-free" | "s2.1-pro" };
 	/** Antigravity image model for `generate_image`; the tool exists only when that provider is signed in. */
 	imageModel: string;
+	/** Present when `textImage.enabled`: text replies over `thresholdChars` must be sent as a rendered image. */
+	textImage?: { thresholdChars: number };
 	/** DEEPSEEK_API_KEY, used by server-side web search. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
@@ -93,6 +96,7 @@ const DEFAULT_ROUTING_SECRET_ENV = "ROUTING_SECRET";
 const DEFAULT_JEV_MODEL = "jev-latest";
 const DEFAULT_JEV_THRESHOLD = 0.8;
 const DEFAULT_JEV_MIN_INTERVAL_MS = 60_000;
+const DEFAULT_TEXT_IMAGE_THRESHOLD = 300;
 
 /**
  * Parse this project's `key: value` secret format (not dotenv `KEY=value`).
@@ -594,6 +598,23 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		}
 	}
 
+	let textImage: AppConfig["textImage"];
+	if (input.textImage !== undefined) {
+		if (!isObject(input.textImage)) errors.push("textImage must be an object");
+		else {
+			const { enabled, thresholdChars = DEFAULT_TEXT_IMAGE_THRESHOLD } = input.textImage;
+			if (enabled !== undefined && typeof enabled !== "boolean") errors.push("textImage.enabled must be a boolean");
+			if (
+				typeof thresholdChars !== "number" ||
+				!Number.isInteger(thresholdChars) ||
+				thresholdChars < 50 ||
+				thresholdChars > TEXT_IMAGE_MAX_CHARS
+			)
+				errors.push(`textImage.thresholdChars must be an integer from 50 to ${TEXT_IMAGE_MAX_CHARS}`);
+			else if (enabled === true) textImage = { thresholdChars };
+		}
+	}
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -692,6 +713,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(telegram ? { telegram } : {}),
 		...(voice ? { voice } : {}),
 		imageModel,
+		...(textImage ? { textImage } : {}),
 		...(webSearchApiKey ? { webSearchApiKey } : {}),
 		...(visionModel ? { visionModel } : {}),
 		...(jev ? { jev } : {}),

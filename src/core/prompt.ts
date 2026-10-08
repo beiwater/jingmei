@@ -32,6 +32,8 @@ export interface PromptTools {
 	image: boolean;
 	events: boolean;
 	history: boolean;
+	/** Text replies longer than this many characters must go out through `send_text_image`. */
+	textImageChars?: number;
 }
 
 /**
@@ -97,6 +99,11 @@ export function buildSystemPrompt(
 		...(tools.image
 			? [
 					"- 你已接入 generate_image 画图工具。群友请你画画、生成图片时使用：prompt 用英文写清主体、风格和构图；它会直接发出一张图并结束本轮，不再发文字。生成要十几秒，失败时用文字说明。",
+				]
+			: []),
+		...(tools.textImageChars
+			? [
+					`- 文字回复不得超过 ${tools.textImageChars} 字，超过的不会发出。内容更长、或含公式（LaTeX，行内 $...$、独立成行 $$...$$）、表格、插图时，调用 send_text_image 把完整内容写成 Markdown 发成一张图，并结束本轮，不再发文字。`,
 				]
 			: []),
 		"",
