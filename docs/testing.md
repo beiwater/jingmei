@@ -70,6 +70,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `runjs-sandbox.test.ts` | bwrap 缺失 / userns 探测拒绝时选择 vm 且计算可用；成功 / 失败探测缓存与并发共享、一次性脱敏日志；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
 | `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
+| `text-image.test.ts` | 渲染器：中文、LaTeX 公式、表格、代码块出一张固定宽度的合法 PNG，文字越长图越高；图片只从公网 URL 下载（私网、本机、本地路径、引用式写法一律不请求），最多 4 张，下载失败/非图片/网络错误只显示占位；原始 Typst、`<svg>`、`<a>`、数学里的 `#` 转义被当成文字而不执行（执行就会让编译失败）；空与超长输入不做任何工作；过高的页面报 `too_large`。`send_text_image`：一轮只发一张、失败（渲染或发送）回到 idle、无配文时取首行标题；`textImage` 配置默认关闭、阈值默认 300 与边界校验。`conversation-turn.test.ts`：超长文字被扣留一次并通过工具发图（只发一条、入库的是配文）；模型重试后仍超长则按原样发送文字；未超长与未启用时不重试 |
 | `image-generation.test.ts` | Antigravity 画图请求带存储的 project、模型与宽高比，跳过 thought 图取最终 PNG/JPEG；无效凭据/提示词不发请求；429、HTTP 错误、无图、超大图与超时分类且不回显 token；`generate_image` 一轮只发一张、失败后回到 idle |
 
 `test/network-guard.ts` 是预加载文件，不是测试。

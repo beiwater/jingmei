@@ -37,6 +37,7 @@
 - **看图与视频抽帧**：每条消息最多 4 张图片，缩放到 1024×1024、200 KB 以内交给模型；视频用 ffmpeg 抽 1–3 帧。主模型不支持图片输入时，Pi 会把图片替换成一条省略说明；也可以配置 `visionModel`，先把图片描述成一两句文字。语音、文件、贴纸以 `[语音]`、`[文件]`、`[贴纸 😀]` 这样的文字占位。
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
 - **画图**（可选）：登录 Antigravity provider 后，角色可以用 `generate_image` 按群友的描述生成一张图并直接发出（默认 Nano Banana 2 / `gemini-3.1-flash-image`，约十几秒）。登录方式见[画图](#画图)。**注意**：Google Antigravity 条款明确禁止用第三方工具调用 Antigravity OAuth，已有账号因此被封，建议使用小号。
+- **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_text_image`，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）和公网图片。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
 - **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。Linux 首次调用自动试运行 bubblewrap：可用时额外隔离文件系统、网络与 PID；未安装或被系统策略阻止时回退原有 vm 沙箱（vm 本身不是安全边界）。无新增配置；Ubuntu 启用及日志验证见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，开新对话段或压缩成功后才转为正式内容。成员可随时 `/forget`。
@@ -177,6 +178,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `telegram.chatIds` | 允许的群 ID，如 `"-1001234567890"` |
 | `voice` | 可选，Fish Audio：`apiKeyEnv`、`referenceId`（32 位十六进制音色 ID）、`model`（`s2.1-pro-free` 默认，或 `s2.1-pro`） |
 | `imageGeneration` | 可选，`{ model }`：画图用的 Antigravity 模型 ID，默认 `gemini-3.1-flash-image`。只有登录了 `antigravity` provider 时画图工具才会启用，见[画图](#画图) |
+| `textImage` | 可选，`{ enabled, thresholdChars }`：`enabled` 默认 `false`；`thresholdChars` 是文字回复的字数上限（50–8000 的整数，默认 `300`），见[长文转图](#长文转图) |
 | `jev` | 可选，见 [Jev](#jev) |
 | `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
 | `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型，同时用于消息检索向量（不开话题时消息检索用默认模型）。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
@@ -241,6 +243,16 @@ personas/
 3. 重启 bot。启动日志 `ready` 里出现 `image_generation_enabled: true` 即为生效；角色可以用 `imageGenerationEnabled: false` 单独关闭。
 
 每次画图发一次请求（`gemini-3.1-flash-image` 大约 15 秒），失败（限流、被安全策略拦截、超时）时角色改用文字说明，日志里记 `image_generation_failed` 和错误分类。一轮最多发一张图。**Google Antigravity 条款明确禁止第三方工具使用 Antigravity OAuth，已有账号被封，风险自负，建议使用小号。**
+
+## 长文转图
+
+在配置里写 `"textImage": { "enabled": true }` 即可开启，不需要浏览器：渲染用 Typst 编译器（`@myriaddreamin/typst-ts-node-compiler`）排版成 SVG，再由 `@resvg/resvg-js` 转 PNG。服务器需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会从 Typst 官方仓库下载并缓存两个固定版本的包（cmarker、mitex）。启动时先试渲染一次，失败只记 `text_image_unavailable` 并关闭该功能。
+
+- **长度闸门**：角色的最终文字超过 `thresholdChars`（默认 300 字）时不发送。同一轮里系统会告诉它“回复超过上限，没有发出”，让它调用 `send_text_image` 重发；多花一次模型调用，只重试一次。重试后仍输出超长文字（或渲染失败），这段文字按原样分条发送，不会丢。
+- **`send_text_image`**：参数是 Markdown（≤ 8000 字）和可选的短配文。角色也可以不等闸门，在内容含公式、表格、插图时主动调用；发图后结束本轮。system prompt 会写明字数上限，让模型尽量一次到位。
+- **支持**：标题、加粗、列表、引用、表格、代码块；LaTeX 公式 `$…$`（行内）与 `$$…$$`（独立成行）；`![说明](https://…)` 公网图片（PNG/JPEG/GIF/WebP，每张 ≤ 4 MiB，最多 4 张）。
+- **限制**：图片只下载公网 http(s) 地址，不跟随重定向，私网、本机地址和本地路径一律不显示（原位显示“图片无法显示”）；Markdown 里的原始 Typst、`<svg>`、`<a>` 等不会被执行。图片宽度固定（720 px，过高时自动降为 360 px 的 1 倍清晰度），高度超过 8000 px 或文件超过 9 MB 时渲染失败，该轮回退为文字。
+- **入库内容**：Discord 与 Telegram 里这条消息存的是配文（没写配文时取 Markdown 的第一行标题），不是全文，避免长文占满之后每一轮的上下文；角色自己的会话里仍保留调用时的完整 Markdown。
 
 ## Jev
 
