@@ -104,6 +104,12 @@ cp personas/template.en.md personas/luna.md
 
 Startup validates the configuration, verifies every bot token, and checks that every persona's model exists and is authenticated. Configuration errors are listed all at once; an invalid token or unavailable model also stops startup. Then @-mention or reply to a character in the group.
 
+When started in the foreground on a terminal, a [fox-girl-loader](https://github.com/beiwater/fox-girl-loader) animation plays while the bot gets ready and shows **✓ Ready** when done; startup logs are held and printed once it finishes. Under systemd or any other non-terminal output nothing is drawn and logs stream as usual.
+
+<div align="center">
+<img src="assets/startup.gif" width="480" alt="Startup animation">
+</div>
+
 ## Discord setup
 
 Each character is one Discord application.

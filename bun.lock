@@ -15,6 +15,7 @@
         "@resvg/resvg-js": "2.6.2",
         "citty": "0.2.2",
         "fastembed": "3.0.0",
+        "fox-girl-loader": "1.0.0",
         "lunar-typescript": "1.8.6",
         "notjev": "0.2.1",
         "sqlite-vec": "0.1.9",
@@ -328,6 +329,8 @@
     "fetch-blob": ["fetch-blob@3.2.0", "", { "dependencies": { "node-domexception": "^1.0.0", "web-streams-polyfill": "^3.0.3" } }, "sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ=="],
 
     "formdata-polyfill": ["formdata-polyfill@4.0.10", "", { "dependencies": { "fetch-blob": "^3.1.2" } }, "sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g=="],
+
+    "fox-girl-loader": ["fox-girl-loader@1.0.0", "", { "bin": { "fox-girl-loader": "node/cli.js" } }, "sha512-a3BeDavD2vqihexBFSga9urlTBZIYbo8qz8zl9rygBYl8eqlfkWGApUrjnn3dvHX8sb7qbR3WFCa//fY5RkY8A=="],
 
     "gaxios": ["gaxios@7.3.0", "", { "dependencies": { "extend": "^3.0.2", "https-proxy-agent": "^7.0.1", "node-fetch": "^3.3.2" } }, "sha512-RB5vLV+vvQeoFPCX4QMK6/hjVkbIamPp1QSUD0CiZcnj12qbpiL+pLbYtgD+oZkWl0tl9z+o2Utp+MpM3QRhBA=="],
 

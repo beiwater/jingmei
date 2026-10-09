@@ -2,6 +2,7 @@
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { withLoader } from "fox-girl-loader";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, piAgentDir } from "./config.ts";
 import { BotState, HEARTBEAT_MS } from "./core/bot-state.ts";
 import { CelebrationScheduler } from "./core/celebrations.ts";
@@ -205,7 +206,8 @@ async function main(): Promise<void> {
 /** Start every configured platform; a startup failure is logged and sets a nonzero exit code. */
 export async function startBot(): Promise<void> {
 	try {
-		await main();
+		// Draws only on a terminal (no-op under systemd); startup logs are held and replayed once it finishes.
+		await withLoader({ text: "Waking jingmei", doneText: "Ready" }, main);
 	} catch (error) {
 		// `detail` goes through the logger's token/key/URL/path redaction; operators need the reason.
 		log.error("core", "startup_failed", {
