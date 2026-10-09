@@ -132,9 +132,9 @@ const CHAT_IN_INSTRUCTIONS =
 const NATURAL_INSTRUCTIONS =
 	"判断 `reply` 是否是可以原样发到群里的自然聊天正文，而不是机器人的内部思考或写作计划。" +
 	"内部计划、元叙述、重述事件或触发消息（如「当前事件」「触发消息」标签）、对自己的指令、" +
-	"分析应采用的风格或长度、讨论接下来要说什么，均不是自然正文。" +
-	"自然的简短回答、接梗、情绪表达或追问都可以。是否需要接话已由路由决定，不重新判断；" +
-	"只检查正文是否泄漏规划，不审核安全、事实准确性或是否有新信息。";
+	"分析应采用的风格或长度、列出备选说法或草稿、讨论接下来要说什么，均不是自然正文。" +
+	"自然正文不论长短都可以：简短回答、接梗、情绪表达、追问，以及直接讲给群友的长篇讲解、解题步骤、分点、公式或代码。" +
+	"是否需要接话已由路由决定，不重新判断；只检查正文是否泄漏规划，不审核安全、事实准确性、长度格式或是否有新信息。";
 
 function isUnit(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
@@ -325,11 +325,12 @@ export function createJevClientWithTransport(
 				natural: {
 					type: "noul",
 					instructions: NATURAL_INSTRUCTIONS,
-					// Without criteria the model withheld ~12% of real chat replies on security/crypto topics.
+					// Without criteria the model withheld ~12% of real chat replies on security/crypto topics; with the
+					// earlier short-reply wording it withheld every long step-by-step answer (e.g. worked maths solutions).
 					criteria: {
-						true: "`reply` 是直接对群友说的话，可以原样发到群里。",
+						true: "`reply` 从头到尾都是直接对群友说的话（长篇讲解、解题步骤、分点或公式也算），可以原样发到群里。",
 						false:
-							"`reply` 含有机器人写给自己的规划：用第三人称复述群里谁说了什么、分析该怎么回或该用什么风格长度、复述事件或触发消息、对自己下指令。",
+							"`reply` 含有机器人写给自己的规划：用第三人称复述群里谁说了什么、分析自己该怎么回或该用什么风格长度、列出几种备选说法或草稿、复述事件或触发消息、对自己下指令。",
 					},
 				},
 			});
