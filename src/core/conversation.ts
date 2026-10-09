@@ -36,19 +36,18 @@ import {
 	type ActiveTurn,
 	createCalculationTool,
 	createHistoryTools,
-	createImageGenerationTool,
-	createReactionImageTool,
 	createReactionTool,
 	createRecallMemberMemoryTool,
 	createRememberMemberFactTool,
-	createTextImageTool,
+	createSendReplyTool,
 	createUpdateSoulTool,
-	createVoiceTool,
 	createWebSearchTool,
-	sendVoiceReply,
 	type ImageGenerator,
+	isLeak,
+	sendVoiceReply,
 	type ToolScope,
 	type VoiceConfig,
+	type WithheldReason,
 } from "./tools.ts";
 import {
 	type ConversationCore,
@@ -78,7 +77,7 @@ export interface ConversationOptions {
 	voice?: VoiceConfig;
 	/** Present when the Antigravity provider is signed in; personas opt out with `imageGenerationEnabled`. */
 	imageGenerator?: ImageGenerator;
-	/** Text replies longer than `thresholdChars` are refused and must be sent through `send_text_image`. */
+	/** Text replies longer than `thresholdChars` are refused and must be sent as a `send_reply` text image. */
 	textImage?: { render: TextImageRenderer; thresholdChars: number };
 	memberMemory: MemberMemory;
 	soulStore: SoulStore;
@@ -514,6 +513,7 @@ export class Conversation implements ConversationCore {
 					memoryRecallCount: 0,
 					historyLookupCount: 0,
 					replyToMessageId: message.messageId,
+					audit: (text) => this.auditReply(text, message, route, recent),
 					reply: { status: "idle" },
 				};
 				this.activeTurns.set(turnKey, turn);
@@ -566,7 +566,7 @@ export class Conversation implements ConversationCore {
 							await session.sendCustomMessage(
 								{
 									customType: LENGTH_GATE_MESSAGE_TYPE,
-									content: `[系统提示：你刚才的回复有 ${answer.length} 字，超过 ${gate.thresholdChars} 字的文字上限，没有发出。请把完整内容整理成 Markdown，调用 send_text_image 发成一张图，不要再发文字。]`,
+									content: `[系统提示：你刚才的回复有 ${answer.length} 字，超过 ${gate.thresholdChars} 字的文字上限，没有发出。请把完整内容整理成 Markdown，调用 send_reply 用 text_image 部分发成一张图，不要再发文字。]`,
 									display: false,
 								},
 								{ triggerTurn: true },
@@ -625,8 +625,9 @@ export class Conversation implements ConversationCore {
 						error_category: finalFailure ?? errorCategory(sendFailure),
 					});
 				}
-				if (turn.reply.status === "sent") {
-					responseMessageId = turn.reply.messageId;
+				// A reaction, a sent or withheld send_reply (or one cut off by the deadline) ends the reply.
+				if (turn.reply.status !== "idle") {
+					if (turn.reply.status === "sent" && turn.reply.messageId) responseMessageId = turn.reply.messageId;
 					continue;
 				}
 				if (timedOut || sendFailed || finalFailure) continue;
@@ -665,6 +666,7 @@ export class Conversation implements ConversationCore {
 							responseMessageId,
 							`🎙️ ${speech}`,
 							message.messageId,
+							message.messageId,
 						);
 						continue;
 					} catch {
@@ -678,7 +680,15 @@ export class Conversation implements ConversationCore {
 					replyToMessageId: message.messageId,
 				});
 				responseMessageId = sent.id;
-				this.recordSentMessage(persona, message.spaceId, message.channelId, sent.id, answer, message.messageId);
+				this.recordSentMessage(
+					persona,
+					message.spaceId,
+					message.channelId,
+					sent.id,
+					answer,
+					message.messageId,
+					message.messageId,
+				);
 			}
 		} finally {
 			stopTyping();
@@ -774,8 +784,8 @@ export class Conversation implements ConversationCore {
 		message: InboundMessage,
 		route: Route,
 		recent: readonly string[],
-	): Promise<"leak_pattern" | "audit" | "audit_failed" | null> {
-		if (/§E\d|\[当前事件/.test(reply)) return "leak_pattern";
+	): Promise<WithheldReason | null> {
+		if (isLeak(reply)) return "leak_pattern";
 		if (!this.jev) return null;
 		try {
 			return (await this.jev.client.auditNatural({ reply, message: message.content, recent })) < 0.5 ? "audit" : null;
@@ -784,14 +794,18 @@ export class Conversation implements ConversationCore {
 		}
 	}
 
-	/** Discord must remain echo-driven so other personas can observe its bot replies. */
+	/**
+	 * Discord must remain echo-driven so other personas can observe its bot replies. The row inherits
+	 * the topic of `sourceMessageId`, the message this turn answers.
+	 */
 	private recordSentMessage(
 		persona: Persona,
 		spaceId: SpaceId,
 		channelId: string,
 		messageId: string,
 		content: string,
-		replyToMessageId: string,
+		sourceMessageId: string,
+		replyToMessageId: string | undefined,
 	): void {
 		const platform = platformOf(spaceId);
 		if (this.transports.get(platform)!.echoesOwnMessages) return;
@@ -810,11 +824,11 @@ export class Conversation implements ConversationCore {
 					account.userId,
 					account.username,
 					content,
-					replyToMessageId,
+					replyToMessageId ?? null,
 					Date.now(),
 					spaceId,
 					channelId,
-					replyToMessageId,
+					sourceMessageId,
 				);
 			if (stored.changes) this.messageIndex?.enqueue({ spaceId, channelId, messageId });
 		} catch (error) {
@@ -1001,8 +1015,8 @@ export class Conversation implements ConversationCore {
 			spaceId,
 			channelId,
 			getTurn: () => this.activeTurns.get(key),
-			recordSentMessage: (messageId, content, replyToMessageId) =>
-				this.recordSentMessage(persona, spaceId, channelId, messageId, content, replyToMessageId),
+			recordSentMessage: (messageId, content, sourceMessageId, replyToMessageId) =>
+				this.recordSentMessage(persona, spaceId, channelId, messageId, content, sourceMessageId, replyToMessageId),
 		};
 		const reactTool = !this.quickReactions && !!transport.addReaction;
 		const voice = persona.voiceEnabled ? this.voice : undefined;
@@ -1080,22 +1094,18 @@ export class Conversation implements ConversationCore {
 			noTools: "builtin",
 			customTools: [
 				...(reactTool ? [createReactionTool(scope, this.db)] : []),
-				...(persona.sendReactionImages ? [createReactionImageTool(scope, persona.reactionImages)] : []),
 				createRememberMemberFactTool(scope, this.memberMemory),
 				createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
 				createUpdateSoulTool(scope, this.soulStore),
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
-				...(voice ? [createVoiceTool(scope, voice)] : []),
-				...(imageGenerator ? [createImageGenerationTool(scope, imageGenerator)] : []),
-				...(this.textImage
-					? [
-							createTextImageTool(
-								scope,
-								this.textImage.render,
-								imageGenerator ? async (prompt) => (await imageGenerator(prompt, "4:3")).data : undefined,
-							),
-						]
-					: []),
+				createSendReplyTool(scope, {
+					...(voice ? { voice } : {}),
+					...(persona.sendReactionImages
+						? { reactionImages: persona.reactionImages ? { catalog: persona.reactionImages } : {} }
+						: {}),
+					...(imageGenerator ? { generateImage: imageGenerator } : {}),
+					...(this.textImage ? { textImage: this.textImage } : {}),
+				}),
 				...(this.messageIndex ? createHistoryTools(scope, this.messageIndex) : []),
 				createCalculationTool(),
 			],
@@ -1105,8 +1115,9 @@ export class Conversation implements ConversationCore {
 			persona_id: persona.id,
 			platform: transport.platform,
 			search_active: activeTools.has("search_web"),
-			voice_active: activeTools.has("speak"),
-			image_active: activeTools.has("generate_image"),
+			send_reply_active: activeTools.has("send_reply"),
+			voice_active: !!voice,
+			image_active: !!imageGenerator,
 			reaction_active: activeTools.has("react_to_message"),
 		});
 		if (!session.sessionFile) throw new Error(`Pi persistent session unavailable for persona ${persona.id}`);

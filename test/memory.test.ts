@@ -242,6 +242,7 @@ describe("MemberMemory", () => {
 			memoryRecallCount: 0,
 			historyLookupCount: 0,
 			replyToMessageId: "source",
+			audit: async () => null,
 			reply: { status: "idle" },
 		};
 		let scoreCalls = 0;

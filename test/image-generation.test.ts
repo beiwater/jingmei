@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { type ActiveTurn, createImageGenerationTool, type ToolScope } from "../src/core/tools.ts";
-import type { PlatformTransport } from "../src/core/types.ts";
 import { AntigravityImageError, generateAntigravityImage } from "../src/tools/antigravity-image.ts";
 
 const CREDENTIAL = JSON.stringify({ token: "unit-test-token", projectId: "unit-project" });
@@ -119,69 +117,5 @@ describe("Antigravity image client", () => {
 					}),
 			}),
 		).rejects.toMatchObject({ code: "timeout" });
-	});
-});
-
-describe("generate_image tool", () => {
-	function setup(sendMessage: PlatformTransport["sendMessage"]) {
-		const turn: ActiveTurn = {
-			spaceId: "telegram:-100",
-			authorId: "7",
-			sourceChannelId: "-100",
-			sourceMessageId: "42",
-			query: "画只猫",
-			visibleMemberIds: new Set(),
-			memoryRecallCount: 0,
-			historyLookupCount: 0,
-			replyToMessageId: "42",
-			reply: { status: "idle" },
-		};
-		const recorded: string[] = [];
-		const scope: ToolScope = {
-			personaId: "luna",
-			transport: { sendMessage } as PlatformTransport,
-			spaceId: "telegram:-100",
-			channelId: "-100",
-			getTurn: () => turn,
-			recordSentMessage: (messageId) => recorded.push(messageId),
-		};
-		return { turn, scope, recorded };
-	}
-
-	test("sends one generated image as the turn's reply", async () => {
-		const sends: Parameters<PlatformTransport["sendMessage"]>[0][] = [];
-		const { turn, scope, recorded } = setup(async (input) => {
-			sends.push(input);
-			return { id: "99" };
-		});
-		const tool = createImageGenerationTool(scope, async () => ({
-			data: new Uint8Array([1]),
-			contentType: "image/jpeg",
-		}));
-
-		const result = await tool.execute("call", { prompt: "a cat", caption: "  喵  " });
-		expect(result).toMatchObject({ terminate: true });
-		expect(sends).toHaveLength(1);
-		expect(sends[0]).toMatchObject({ content: "喵", replyToMessageId: "42" });
-		expect(sends[0]?.attachments?.[0]).toMatchObject({ name: "generated.jpg", contentType: "image/jpeg" });
-		expect(turn.reply).toEqual({ status: "sent", kind: "image", messageId: "99" });
-		expect(recorded).toEqual(["99"]);
-
-		const second = await tool.execute("call", { prompt: "another" });
-		expect(second).toMatchObject({ isError: true, details: { error: "reply_already_sent" } });
-		expect(sends).toHaveLength(1);
-	});
-
-	test("a failed generation leaves the turn free for a text reply", async () => {
-		const { turn, scope } = setup(async () => {
-			throw new Error("must not send");
-		});
-		const tool = createImageGenerationTool(scope, async () => {
-			throw new AntigravityImageError("rate_limited");
-		});
-
-		const result = await tool.execute("call", { prompt: "a cat" });
-		expect(result).toMatchObject({ isError: true, details: { error: "rate_limited" } });
-		expect(turn.reply).toEqual({ status: "idle" });
 	});
 });

@@ -453,21 +453,20 @@ test("an echoing transport is not pre-inserted; its inbound bot echo is still pr
 	expect(f.sends).toHaveLength(1);
 });
 
-test("reaction-image tool sends are stored with their caption and source topic", async () => {
-	const f = fixture({ events: true });
-	f.script.push(
-		f.reply(
-			[
-				{
-					type: "toolCall",
-					id: "image",
-					name: "send_reaction_image",
-					arguments: { asset_id: "hello", caption: "wave" },
-				},
-			],
-			"toolUse",
-		),
+/** One assistant message calling send_reply with these parts. */
+function sendReply(f: ReturnType<typeof fixture>, parts: unknown[], text?: string) {
+	return f.reply(
+		[
+			...(text ? [{ type: "text" as const, text }] : []),
+			{ type: "toolCall" as const, id: "reply", name: "send_reply", arguments: { parts } },
+		],
+		"toolUse",
 	);
+}
+
+test("reaction-image parts are stored with their caption and source topic", async () => {
+	const f = fixture({ events: true });
+	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "hello", caption: "wave" }]));
 	expect((await f.send()).responseMessageId).toBe("1001");
 	expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("image/png");
 	expect(
@@ -481,12 +480,7 @@ test("reaction-image tool sends are stored with their caption and source topic",
 
 test("a persona catalog image is sent with its default caption and ends the turn", async () => {
 	const f = fixture({ events: true, reactionImages: true });
-	f.script.push(
-		f.reply(
-			[{ type: "toolCall", id: "image", name: "send_reaction_image", arguments: { asset_id: "innocent" } }],
-			"toolUse",
-		),
-	);
+	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "innocent" }]));
 	expect((await f.send()).responseMessageId).toBe("1001");
 	expect(f.sends).toHaveLength(1);
 	expect(f.calls()).toBe(1);
@@ -513,21 +507,11 @@ const textImage = (render?: NonNullable<ConversationOptions["textImage"]>["rende
 	render: render ?? (async () => ({ data: new Uint8Array([0x89, 0x50]), contentType: "image/png" as const })),
 });
 
-test("an over-long text reply is withheld once and goes out through send_text_image", async () => {
+test("an over-long text reply is withheld once and goes out as a send_reply text image", async () => {
 	const f = fixture({ textImage: textImage() });
 	f.script.push(
 		f.reply([{ type: "text", text: LONG_TEXT }]),
-		f.reply(
-			[
-				{
-					type: "toolCall",
-					id: "image",
-					name: "send_text_image",
-					arguments: { markdown: `# 标题\n\n${LONG_TEXT}`, caption: "长文" },
-				},
-			],
-			"toolUse",
-		),
+		sendReply(f, [{ type: "text_image", markdown: `# 标题\n\n${LONG_TEXT}`, caption: "长文" }]),
 	);
 	expect((await f.send()).responseMessageId).toBe("1001");
 	expect(f.calls()).toBe(2);
@@ -564,6 +548,55 @@ test("replies within the limit, and every reply without the feature, are not gat
 	expect(off.sends[0]).toMatchObject({ content: LONG_TEXT });
 });
 
+test("a multi-part reply goes out in order in one model call; later parts are stored unthreaded", async () => {
+	const f = fixture({ events: true });
+	f.script.push(
+		sendReply(
+			f,
+			[
+				{ type: "reaction_image", asset_id: "think" },
+				{ type: "text", text: "第一段" },
+				{ type: "text", text: "第二段" },
+			],
+			"写在工具调用旁边的文字不会再发",
+		),
+	);
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.calls()).toBe(1);
+	expect(f.sends.map((send) => [send.content, send.replyToMessageId])).toEqual([
+		["🤔", "10"],
+		["第一段", undefined],
+		["第二段", undefined],
+	]);
+	const topic = eventId(f.db, "10");
+	expect(
+		f.db
+			.query(
+				"SELECT message_id, content, reply_to_message_id, event_id FROM messages WHERE is_bot = 1 ORDER BY message_id",
+			)
+			.all(),
+	).toEqual([
+		{ message_id: "1001", content: "🤔", reply_to_message_id: "10", event_id: topic },
+		{ message_id: "1002", content: "第一段", reply_to_message_id: null, event_id: topic },
+		{ message_id: "1003", content: "第二段", reply_to_message_id: null, event_id: topic },
+	]);
+});
+
+test("a send_reply the audit withholds sends nothing, not even the text beside the call", async () => {
+	const f = fixture({ jev: true, audit: async () => 0 });
+	f.script.push(sendReply(f, [{ type: "text", text: "我先列个回答计划" }], "顺便说一句"));
+	expect((await f.send()).responseMessageId).toBeUndefined();
+	expect(f.calls()).toBe(1);
+	expect(f.sends).toEqual([]);
+	expect(f.auditRequests.map((request) => request.reply)).toEqual(["我先列个回答计划"]);
+	expect(f.logs).toContainEqual(
+		expect.objectContaining({
+			event: "reply_withheld",
+			fields: { persona_id: "luna", platform: "telegram", reason: "audit" },
+		}),
+	);
+});
+
 for (const mode of ["tool", "explicit"] as const) {
 	test(`${mode} voice replies store the transcript and source topic on non-echoing transports`, async () => {
 		const f = fixture({ events: true, voice: true });
@@ -573,9 +606,7 @@ for (const mode of ["tool", "explicit"] as const) {
 		}) as unknown as typeof globalThis.fetch);
 		try {
 			if (mode === "tool") {
-				f.script.push(
-					f.reply([{ type: "toolCall", id: "voice", name: "speak", arguments: { text: "hello" } }], "toolUse"),
-				);
+				f.script.push(sendReply(f, [{ type: "voice", text: "hello" }]));
 			}
 			const sent = await f.send({ content: mode === "explicit" ? "Luna 用语音回复" : "hi Luna" });
 			expect(sent.responseMessageId).toBe("1001");

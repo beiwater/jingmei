@@ -85,8 +85,8 @@ flowchart LR
 8. **只有被路由的角色写会话**：群消息一律入库并进入检索索引，但没有被路由的角色不写自己的会话，这些消息要等它下次被触发时才作为“积累的消息”进入。被路由的角色先进入对话段（见“会话”），把触发消息按 `[ISO] #id ↪ replyId §E12 作者 · bot: 内容 （相关 N 条）` 格式写成一条 `discord_context_v1` 自定义消息（`sendCustomMessage`，`triggerTurn: true`）生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
    - 触发的模型/工具轮次共用 180 秒总期限；Pi 最多自动重试一次（1 秒退避），provider 单次超时 60 秒且不叠加 provider 重试。期限到达调用 `session.abort()` 并退役会话，不等待忽略取消的 provider，下一条消息重开持久会话继续处理。最终 assistant `error` / `aborted` 记 `turn_failed`，总期限记 `turn_timeout`；只记录角色、平台和错误类别，不向群里发送失败提示，也不发送失败轮次的半截文字。这三类失败连同发送失败都会清掉该角色的 `last_reply_at`，下一次触发必开新对话段。
    - 触发角色在调用模型前显示“正在输入”，不等待平台请求完成；按 `PlatformTransport.typingRefreshMs`（Telegram 4 秒、Discord 8 秒，均短于平台自身的显示时长）重发，直到该角色的回复发出、被扣留、失败或超时，最长 60 秒（最后一次重发也不会让显示超过 60 秒）。计时器 `unref()`，平台请求失败不影响回复。
-9. 回复：工具已经发过图片/语音/表情就结束；启用 `textImage` 时，模型本轮结束后若仍没发送且最终文字超过 `thresholdChars`，在同一个总期限内追加一条隐藏的 `jingmei_length_gate_v1` 自定义消息（`triggerTurn: true`，说明字数与上限、要求改用 `send_text_image`）让模型重试一次；重试后工具已发图则结束，仍超长就继续下面的流程，文字按原样分条发送。否则最终文字先通过泄漏检查与自然度审查，再发送文字（明确要求语音且配置了语音时改发 MP3），回复原消息。被扣留的文字不发送、不补写 `messages`、不计回复数。
-10. transport 的 `echoesOwnMessages = false` 时，文字、语音及发送型工具成功后补写 `messages`：bot 账号 ID/用户名、正文或媒体文字稿/说明、被回复消息 ID、发送时间，并继承原消息的 `event_id`，同时排入消息索引。Discord 依旧等 Gateway 回声入库。每次逻辑发送只按 transport 返回的首条消息 ID 记录一行；超长回复的后续分段不单独入库。
+9. 回复：本轮已点过表情、`send_reply` 已发出（哪怕只发出一部分）或被扣留就结束；启用 `textImage` 时，模型本轮结束后若仍没发送且最终文字超过 `thresholdChars`，在同一个总期限内追加一条隐藏的 `jingmei_length_gate_v1` 自定义消息（`triggerTurn: true`，说明字数与上限、要求改用 `send_reply` 的 `text_image` 部分）让模型重试一次；重试后已发出则结束，仍超长就继续下面的流程，文字按原样分条发送。否则最终文字先通过泄漏检查与自然度审查，再发送文字（明确要求语音且配置了语音时改发 MP3），回复原消息。被扣留的文字不发送、不补写 `messages`、不计回复数。
+10. transport 的 `echoesOwnMessages = false` 时，文字、语音及 `send_reply` 每个成功发出的部分都补写 `messages`：bot 账号 ID/用户名、正文或媒体文字稿/说明、被回复消息 ID（只有真正作为平台回复发出的消息才有，`send_reply` 只有第一部分回复原消息）、发送时间，并继承本轮触发消息的 `event_id`，同时排入消息索引。Discord 依旧等 Gateway 回声入库。每次逻辑发送只按 transport 返回的首条消息 ID 记录一行；超长回复的后续分段不单独入库。
 
 启动时 `Conversation` 快照已有 pending（避免平台启动期间新接收的正常任务被再次恢复），平台全部启动后调用 `recoverPending()`，按 `received_at, rowid` 的原接收顺序排入频道 lane；启动流程不等待恢复的模型轮次（心跳与运行记录照常开始），异常只记 `inbound_recovery_failed { error_category }`。消息年龄采用平台 `timestamp`，缺失则接受时补为 `received_at`；年龄 ≤ `STALE_MESSAGE_MS = 180000` 毫秒才恢复，更旧的删除 pending、保留历史，不写入会话（之后若角色被触发，仍会作为积累的消息进入）。仅在计数非零时记录一次 `inbound_recovered { recovered, expired }`。单进程，不引入 lease、worker 或 poller 偏移变更。
 
@@ -135,7 +135,7 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 
 - 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
 - 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 扣留，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
-- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。工具图片、工具语音、表情等已发送副作用不在审查范围内。
+- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。被扣留时一条不发，`turn.reply` 置为 `withheld` 并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
 - 扣留只记录 `reply_withheld { persona_id, platform, reason }`，不记正文、不发错误提示、不记平台历史、不增加回复数。在同一会话追加 `jingmei_withheld_v1` 自定义消息，`display: false`、不触发轮次，标记留在持久文件；provider 投影移除该标记及它前面的被扣留轮次 assistant 消息。
 
 ### 会话
@@ -183,14 +183,13 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 | `remember_member_fact` / `recall_member_memory` | 总是 | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
 | `related_messages` / `search_history` | 挂载消息索引 | 查当前群/频道更早的历史：前者按某条消息的号码查相关消息，后者按关键词 + 语义检索（可限时间范围）；两者每轮合计最多 3 次，详见“历史检索索引” |
 | `update_soul` | 总是 | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
-| `send_reaction_image` | `sendReactionImages` | 按内置或该角色 `reactionImages` 图库的 id 发一张 PNG/JPEG，默认用 catalog 配文并结束本轮；启动校验路径与元数据，角色工具 schema 的 id 排序固定，不随轮次变化 |
 | `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
-| `speak` | 配了 `voice` 且 `voiceEnabled` | Fish Audio MP3 并结束本轮 |
-| `generate_image` | `antigravity` provider 已登录且 `imageGenerationEnabled` | 用 `pi-provider-antigravity` 存在 `auth.json` 的凭据（`ModelRuntime.getAuth` 负责加锁刷新，API key 是 `{token, projectId}` JSON）向 `daily-cloudcode-pa` `streamGenerateContent` 发一次 `image_gen` 请求，取最后一个非 thought 的 PNG/JPEG（≤ 10 MiB）发出并结束本轮；失败回到 idle，让模型改发文字 |
-| `send_text_image` | `textImage.enabled` 且启动试渲染成功 | 把 Markdown（≤ 8000 字，含 `$…$` LaTeX 公式、表格、代码块、公网图片）渲染成一张 PNG 发出并结束本轮，配文取参数或首行标题；`plot` 代码块由 `src/media/plot.ts` 处理：白名单表达式解析器（数字、x/y/t、四则与乘方、常用函数，无属性访问与任意名称）在 JS 里取样（函数 400 点、参数方程 600 点、隐函数 83×83 网格且向外多取一格以便裁掉库补的边界线、3D 每边 ≤ 24 格），只把数字与转义后的图例字符串生成 Typst，交给 cetz 0.4.0 + cetz-plot 0.1.2 / plotsy-3d 0.2.1 绘制，每张 ≤ 3 个；`image` 代码块在角色开启画图时调用同一个 `ImageGenerator`（4:3，每张 ≤ 2 个，与公网图片下载并行），结果按图片白名单嵌入；渲染链路 cmarker 0.1.8 + mitex 0.2.7（Typst 包，首次渲染按固定版本下载并缓存；cmarker 0.1.9 起要求 Typst ≥ 0.15，而内置编译器是 0.14）→ `typst-ts-node-compiler` 导出 SVG → `@resvg/resvg-js` 转 PNG，字体用系统 CJK 字体。工作区根目录是 `<tmpdir>/jingmei-text-image` 这个空目录，编译器读不到别处；用户内容只以数据（`doc.md`、图片字节）进入，cmarker 的 `raw-typst` 关闭，`<svg>`/`<a>` 处理器被替换，`image` 只接受本次下载的文件名白名单；图片只下载公网 URL（`parsePublicHttpUrl`，`redirect: "error"`，≤ 4 张、每张 ≤ 4 MiB）。高度 > 8000 px 或 > 9 MB 渲染失败，回到 idle，让模型改发文字 |
+| `send_reply` | 总是；部分种类按条件出现 | 本轮回复按顺序拆成 1–4 部分（`parts`），每部分发成一条消息，发完结束本轮（`terminate`）。schema 只列出该角色可用的种类，会话内固定，不随轮次变化：`text` 总有（≤ 2000 字；开启 `textImage` 时还不得超过 `thresholdChars`）；`voice` 需配了 `voice` 且 `voiceEnabled`（≤ 400 字，Fish Audio MP3，配文是 `🎙️ 文字稿`）；`image` 需 `antigravity` provider 已登录且 `imageGenerationEnabled`；`reaction_image` 需 `sendReactionImages`（内置或该角色 `reactionImages` 图库的 id，id 排序固定；默认用 catalog 配文；启动校验路径与元数据）；`text_image` 需 `textImage.enabled` 且启动试渲染成功。除 `text` 外每种每次最多 1 个（总数 4 由 schema 限制，种类上限由代码检查）。流程：种类上限与文字长度 → 泄漏检查与自然度审查（见“最终文字扣留”）→ 所有部分 `Promise.allSettled` 并行准备（画图、渲染、TTS、读文件）→ 全部成功才严格按顺序发送，只有第一条带 `replyToMessageId`。任一部分准备失败：一条不发，`turn.reply` 回到 idle，错误结果列出失败的部分序号、种类与错误码（记 `reply_part_failed { persona_id, part_type, error_category }`），模型可去掉它重发或改发文字。发送中途失败（或本轮已超时）：已发出的保留并入库，后面的不再发，`turn.reply` 记为已发送（首条消息 ID），以错误结果 + `terminate` 结束本轮并告诉模型不要重发；第一条就失败则什么都没发，回到 idle。一轮只能有一次成功的 `send_reply`（或一次表情） |
+| `send_reply` 的 `image` | 同上 | 用 `pi-provider-antigravity` 存在 `auth.json` 的凭据（`ModelRuntime.getAuth` 负责加锁刷新，API key 是 `{token, projectId}` JSON）向 `daily-cloudcode-pa` `streamGenerateContent` 发一次 `image_gen` 请求，取最后一个非 thought 的 PNG/JPEG（≤ 10 MiB）；比例默认 1:1，配文默认 `🎨` |
+| `send_reply` 的 `text_image` | 同上 | 把 Markdown（≤ 8000 字，含 `$…$` LaTeX 公式、表格、代码块、公网图片）渲染成一张 PNG，配文取参数或首行标题；`plot` 代码块由 `src/media/plot.ts` 处理：白名单表达式解析器（数字、x/y/t、四则与乘方、常用函数，无属性访问与任意名称）在 JS 里取样（函数 400 点、参数方程 600 点、隐函数 83×83 网格且向外多取一格以便裁掉库补的边界线、3D 每边 ≤ 24 格），只把数字与转义后的图例字符串生成 Typst，交给 cetz 0.4.0 + cetz-plot 0.1.2 / plotsy-3d 0.2.1 绘制，每张 ≤ 3 个；`image` 代码块在角色开启画图时调用同一个 `ImageGenerator`（4:3，每张 ≤ 2 个，与公网图片下载并行），结果按图片白名单嵌入；渲染链路 cmarker 0.1.8 + mitex 0.2.7（Typst 包，首次渲染按固定版本下载并缓存；cmarker 0.1.9 起要求 Typst ≥ 0.15，而内置编译器是 0.14）→ `typst-ts-node-compiler` 导出 SVG → `@resvg/resvg-js` 转 PNG，字体用系统 CJK 字体。工作区根目录是 `<tmpdir>/jingmei-text-image` 这个空目录，编译器读不到别处；用户内容只以数据（`doc.md`、图片字节）进入，cmarker 的 `raw-typst` 关闭，`<svg>`/`<a>` 处理器被替换，`image` 只接受本次下载的文件名白名单；图片只下载公网 URL（`parsePublicHttpUrl`，`redirect: "error"`，≤ 4 张、每张 ≤ 4 MiB）。高度 > 8000 px 或 > 9 MB 渲染失败 |
 | `react_to_message` | 未开启 Jev 秒回表情 | 给本轮消息或本频道近期人类消息点表情并结束本轮 |
 
-发送类工具只在被路由角色的当前回复轮内生效，一轮最多发送一次。
+`send_reply` 与 `react_to_message` 只在被路由角色的当前回复轮内生效，一轮只能用其中之一成功回复一次。
 
 ## Jev
 

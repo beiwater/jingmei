@@ -1,6 +1,5 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BotState } from "../src/core/bot-state.ts";
 import { ensureMessagesTable } from "../src/core/db.ts";
@@ -13,7 +12,6 @@ import {
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
 import { participationGated, participationRoute, routeMessage } from "../src/core/router.ts";
-import { type ActiveTurn, createReactionImageTool } from "../src/core/tools.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport } from "../src/core/types.ts";
 
 function persona(id: string, name: string, userId: string, overrides: Partial<Persona> = {}): Persona {
@@ -261,41 +259,5 @@ describe("conversation guards", () => {
 		}
 		await core.close();
 		db.close();
-	});
-
-	test("a failed reaction image read permits another send attempt", async () => {
-		const turn: ActiveTurn = {
-			spaceId: "discord:1",
-			authorId: "3",
-			sourceChannelId: "2",
-			sourceMessageId: "1",
-			query: "",
-			visibleMemberIds: new Set(),
-			memoryRecallCount: 0,
-			historyLookupCount: 0,
-			replyToMessageId: "1",
-			reply: { status: "idle" },
-		};
-		const tool = createReactionImageTool({
-			personaId: "luna",
-			transport: transports(async () => {
-				throw new Error("must not send unread image");
-			}).get("discord")!,
-			spaceId: "discord:1",
-			channelId: "2",
-			getTurn: () => turn,
-			recordSentMessage: () => {},
-		});
-		const read = fs.readFileSync as (...args: unknown[]) => unknown;
-		const missing = spyOn(fs, "readFileSync").mockImplementation(((path: unknown, ...args: unknown[]) => {
-			if (String(path).endsWith("/assets/reactions/hello.png")) throw new Error("fixture missing image");
-			return read(path, ...args);
-		}) as typeof fs.readFileSync);
-		try {
-			for (const call of ["first", "retry"])
-				await expect(tool.execute(call, { asset_id: "hello" })).rejects.toThrow("fixture missing image");
-		} finally {
-			missing.mockRestore();
-		}
 	});
 });

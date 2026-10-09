@@ -19,6 +19,7 @@ import type { HistoryHit, HistoryLine, MessageIndex } from "./message-index.ts";
 import type { SoulStore } from "./soul.ts";
 import {
 	BUILTIN_REACTION_IMAGE_IDS,
+	type OutboundAttachment,
 	type PlatformTransport,
 	type ReactionImage,
 	type ReactionImageCatalog,
@@ -44,12 +45,13 @@ export interface ActiveTurn {
 	/** Shared by related_messages and search_history. */
 	historyLookupCount: number;
 	replyToMessageId: string;
-	reply:
-		| { status: "idle" }
-		| { status: "sending"; kind: "image" | "reaction" | "voice" }
-		| { status: "sent"; kind: "reaction"; messageId?: never }
-		| { status: "sent"; kind: "image" | "voice"; messageId: string };
+	/** Leak check and naturalness audit of reply text, exactly as for a final text reply; null lets it be sent. */
+	audit(text: string): Promise<WithheldReason | null>;
+	/** One reply per turn: a reaction, or one `send_reply` (whose `messageId` is its first sent message). */
+	reply: { status: "idle" } | { status: "sending" } | { status: "withheld" } | { status: "sent"; messageId?: string };
 }
+
+export type WithheldReason = "leak_pattern" | "audit" | "audit_failed";
 
 /** Where a session's tools act: one persona, one platform, one space channel. */
 export interface ToolScope {
@@ -58,8 +60,11 @@ export interface ToolScope {
 	spaceId: SpaceId;
 	channelId: string;
 	getTurn(): ActiveTurn | undefined;
-	/** Persist sends on transports without inbound bot echoes. */
-	recordSentMessage(messageId: string, content: string, replyToMessageId: string): void;
+	/**
+	 * Persist sends on transports without inbound bot echoes. The stored row takes its topic from
+	 * `sourceMessageId`; `replyToMessageId` is set only when the message was sent as a platform reply.
+	 */
+	recordSentMessage(messageId: string, content: string, sourceMessageId: string, replyToMessageId?: string): void;
 }
 
 const REACTION_ASSETS = {
@@ -133,10 +138,10 @@ export function createReactionTool(scope: ToolScope, db: Database) {
 				return failure("Target must be a stored human message in this channel.", "message_not_reactable");
 			if (turn.reply.status !== "idle")
 				return failure("A reaction was already applied this turn.", "reaction_already_sent");
-			turn.reply = { status: "sending", kind: "reaction" };
+			turn.reply = { status: "sending" };
 			try {
 				await transport.addReaction(scope.personaId, channelId, target, params.emoji);
-				turn.reply = { status: "sent", kind: "reaction" };
+				turn.reply = { status: "sent" };
 			} catch (error) {
 				turn.reply = { status: "idle" };
 				throw error;
@@ -445,100 +450,14 @@ export async function sendVoiceReply(
 	text: string,
 ): Promise<string> {
 	const audio = await synthesizeFishAudioTts(voice.apiKey, text, voice.referenceId, { model: voice.model });
-	const sent = await transport.sendMessage({
-		personaId,
-		channelId,
-		content: `🎙️ ${text.trim()}`,
-		replyToMessageId,
-		attachments: [{ name: "voice-reply.mp3", data: audio, contentType: "audio/mpeg" }],
-	});
+	const sent = await transport.sendMessage({ personaId, channelId, replyToMessageId, ...voiceMessage(text, audio) });
 	return sent.id;
 }
 
-export function createVoiceTool(scope: ToolScope, voice: VoiceConfig) {
+function voiceMessage(text: string, audio: Uint8Array): PreparedPart {
 	return {
-		name: "speak",
-		label: "Speak aloud",
-		description:
-			"Generate one short female-voice MP3 reply in Chinese, Japanese or English using Fish Audio, attach it to the chat, and end the turn. Use when asked to reply by voice or when a brief voice reply adds clear value. Do not imitate a specific copyrighted character or real person's voice.",
-		parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 400 }) }, { additionalProperties: false }),
-		execute: async (_toolCallId: string, params: { text: string }) => {
-			const turn = scope.getTurn();
-			const fail = (error: string) => failure(`Voice reply unavailable: ${error}. Reply in text instead.`, error);
-			if (!turn) return fail("no_active_turn");
-			if (turn.reply.status !== "idle") return fail("reply_already_sent");
-			turn.reply = { status: "sending", kind: "voice" };
-			try {
-				const messageId = await sendVoiceReply(
-					voice,
-					scope.transport,
-					scope.personaId,
-					scope.channelId,
-					turn.replyToMessageId,
-					params.text,
-				);
-				turn.reply = { status: "sent", kind: "voice", messageId };
-				scope.recordSentMessage(messageId, `🎙️ ${params.text.trim()}`, turn.replyToMessageId);
-				return {
-					content: [{ type: "text" as const, text: "Voice reply sent." }],
-					details: { messageId },
-					terminate: true as const,
-				};
-			} catch (error) {
-				turn.reply = { status: "idle" };
-				return fail(error instanceof FishAudioTtsError ? error.code : "send_failed");
-			}
-		},
-	};
-}
-
-export function createReactionImageTool(scope: ToolScope, catalog?: ReactionImageCatalog) {
-	const ids = [...BUILTIN_REACTION_IMAGE_IDS, ...Object.keys(catalog ?? {}).sort()];
-	return {
-		name: "send_reaction_image",
-		label: "Send reaction image",
-		description:
-			"Send exactly one original reaction image to the chat. Choose one catalog id and an optional short caption. Use only when an image clearly fits; this sends the image immediately and ends the turn, so do not also write a text reply.",
-		parameters: Type.Object(
-			{
-				asset_id: Type.Union(ids.map((id) => Type.Literal(id))),
-				caption: Type.Optional(Type.String({ maxLength: 200 })),
-			},
-			{ additionalProperties: false },
-		),
-		execute: async (_toolCallId: string, params: { asset_id: string; caption?: string }) => {
-			const asset = resolveReactionAsset(params.asset_id, catalog);
-			if (!asset) return failure("Unknown reaction image id.", "unknown_asset");
-			const turn = scope.getTurn();
-			if (!turn) return failure("No active reply turn.", "no_active_turn");
-			if (turn.reply.status !== "idle")
-				return failure("A reaction image was already sent this turn.", "image_already_sent");
-			turn.reply = { status: "sending", kind: "image" };
-			let sent: { id: string };
-			try {
-				sent = await scope.transport.sendMessage({
-					personaId: scope.personaId,
-					channelId: scope.channelId,
-					content: (params.caption?.trim() || asset.caption).slice(0, 200),
-					replyToMessageId: turn.replyToMessageId,
-					attachments: [{ name: basename(asset.path), data: readFileSync(asset.path), contentType: asset.contentType }],
-				});
-				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
-				scope.recordSentMessage(
-					sent.id,
-					(params.caption?.trim() || asset.caption).slice(0, 200),
-					turn.replyToMessageId,
-				);
-			} catch (error) {
-				turn.reply = { status: "idle" };
-				throw error;
-			}
-			return {
-				content: [{ type: "text" as const, text: "Reaction image sent." }],
-				details: { messageId: sent.id, assetId: params.asset_id },
-				terminate: true as const,
-			};
-		},
+		content: `🎙️ ${text.trim()}`,
+		attachments: [{ name: "voice-reply.mp3", data: audio, contentType: "audio/mpeg" }],
 	};
 }
 
@@ -558,99 +477,164 @@ function textImageCaption(markdown: string, caption: string | undefined): string
 	return title ? `📄 ${[...title].slice(0, 60).join("")}` : "📄";
 }
 
-const TEXT_IMAGE_DESCRIPTION =
-	"Render a long reply as one image and send it to the chat with an optional short caption, then end the turn. Use it instead of a long text reply: write the full content as Markdown in `markdown` (headings, lists, tables, code, `$...$` / `$$...$$` LaTeX math, `![alt](public https URL)` pictures). Do not also write a text reply.\n" +
+/** Generates one image; bound at startup to the configured model and Pi-resolved credential. */
+export type ImageGenerator = (prompt: string, aspectRatio: ImageAspectRatio) => Promise<GeneratedImage>;
+
+/** What a persona's `send_reply` may send besides text; each present source adds one part type. */
+export interface ReplySources {
+	voice?: VoiceConfig;
+	/** Present when the persona may send reaction images: the built-ins plus its own catalog. */
+	reactionImages?: { catalog?: ReactionImageCatalog };
+	generateImage?: ImageGenerator;
+	textImage?: { render: TextImageRenderer; thresholdChars: number };
+}
+
+export type ReplyPart =
+	| { type: "text"; text: string }
+	| { type: "voice"; text: string }
+	| { type: "image"; prompt: string; aspect_ratio?: ImageAspectRatio; caption?: string }
+	| { type: "reaction_image"; asset_id: string; caption?: string }
+	| { type: "text_image"; markdown: string; caption?: string };
+
+/** One reply holds at most this many messages; every kind but text at most once (each is slow or loud). */
+const REPLY_MAX_PARTS = 4;
+const REPLY_PART_LIMITS: Record<ReplyPart["type"], number> = {
+	text: REPLY_MAX_PARTS,
+	voice: 1,
+	image: 1,
+	reaction_image: 1,
+	text_image: 1,
+};
+/** One chat bubble; longer text belongs in a text image (or is split by the platform when that is off). */
+const TEXT_PART_MAX_CHARS = 2000;
+
+const TEXT_IMAGE_PART_DESCRIPTION =
+	"text_image renders long content as one image (use it instead of long text, or for formulas, tables, pictures and graphs): write the full content as Markdown in `markdown` (headings, lists, tables, code, `$...$` / `$$...$$` LaTeX math, `![alt](public https URL)` pictures). " +
 	"Graphs (up to 3): a fenced block with language `plot` holding JSON. 2D: " +
 	'{"x":[-3,3],"y":[-2,2],"plots":[{"y":"sin(x)","label":"sin x"},{"implicit":"x^2+y^2=1"},{"x":"cos(t)","y":"sin(2t)","t":[0,6.28]},{"points":[[1,2],[2,3]]}]} ' +
 	"(x/y ranges optional; each item is a function of x, an implicit equation in x and y, a parametric curve in t, or points). " +
 	'3D surface: {"z":"sin(x)*cos(y)","x":[-3,3],"y":[-3,3]} with whole-number ranges. ' +
 	"Expressions: numbers, x y t, + - * / ^, implicit multiplication like 2x, pi, e, sin cos tan asin acos atan sinh cosh tanh exp ln log sqrt cbrt abs floor ceil.";
 
-export function createTextImageTool(
-	scope: ToolScope,
-	render: TextImageRenderer,
-	generatePicture?: (prompt: string) => Promise<Uint8Array>,
-) {
-	return {
-		name: "send_text_image",
-		label: "Send text as image",
-		description: generatePicture
-			? `${TEXT_IMAGE_DESCRIPTION}\nNew pictures (up to 2, about 15 s each): a fenced block with language \`image\` holding an English description of subject, style and composition is replaced by a freshly drawn picture.`
-			: TEXT_IMAGE_DESCRIPTION,
-		parameters: Type.Object(
-			{
-				markdown: Type.String({ minLength: 1, maxLength: TEXT_IMAGE_MAX_CHARS }),
-				caption: Type.Optional(Type.String({ maxLength: 200 })),
-			},
-			{ additionalProperties: false },
-		),
-		execute: async (_toolCallId: string, params: { markdown: string; caption?: string }) => {
-			const turn = scope.getTurn();
-			const fail = (error: string) => failure(`Text image unavailable: ${error}. Reply in plain text instead.`, error);
-			if (!turn) return fail("no_active_turn");
-			if (turn.reply.status !== "idle") return fail("reply_already_sent");
-			turn.reply = { status: "sending", kind: "image" };
-			const caption = textImageCaption(params.markdown, params.caption);
-			try {
-				const image = await render(params.markdown, generatePicture ? { generatePicture } : undefined);
-				const sent = await scope.transport.sendMessage({
-					personaId: scope.personaId,
-					channelId: scope.channelId,
-					content: caption,
-					replyToMessageId: turn.replyToMessageId,
-					attachments: [{ name: "text.png", data: image.data, contentType: image.contentType }],
-				});
-				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
-				scope.recordSentMessage(sent.id, caption, turn.replyToMessageId);
-				return {
-					content: [{ type: "text" as const, text: "Text image sent." }],
-					details: { messageId: sent.id },
-					terminate: true as const,
-				};
-			} catch (error) {
-				turn.reply = { status: "idle" };
-				const code = error instanceof TextImageError ? error.code : "send_failed";
-				log.warn("core", "text_image_failed", { persona_id: scope.personaId, error_category: code });
-				return fail(code);
-			}
-		},
-	};
+function sendReplyDescription(sources: ReplySources): string {
+	return [
+		`Send this turn's reply as 1-${REPLY_MAX_PARTS} ordered parts, then end the turn. Each part becomes its own chat message, sent in the given order; only the first replies to the triggering message. Use it to send several messages at once, for example a picture followed by a text${sources.voice ? " or voice" : ""} explanation, or a few separate short paragraphs. For one plain text message just answer normally. Do not also write a text reply.`,
+		"Part types:",
+		"- text: one chat message.",
+		...(sources.voice
+			? [
+					"- voice (at most 1): a short female-voice MP3 in Chinese, Japanese or English, sent with its transcript. Do not imitate a specific copyrighted character or real person's voice.",
+				]
+			: []),
+		...(sources.generateImage
+			? [
+					"- image (at most 1): draw one new picture from `prompt`, written in English with concrete subject, style and composition; takes about 15 seconds.",
+				]
+			: []),
+		...(sources.reactionImages
+			? [
+					"- reaction_image (at most 1): one original reaction image by catalog id, only when an image clearly fits; the catalog caption is used unless you give one.",
+				]
+			: []),
+		...(sources.textImage
+			? [
+					`- text_image (at most 1): ${TEXT_IMAGE_PART_DESCRIPTION}${sources.generateImage ? " New pictures inside it (up to 2, about 15 s each): a fenced block with language `image` holding an English description of subject, style and composition is replaced by a freshly drawn picture." : ""}`,
+				]
+			: []),
+		"Slow parts are prepared together before anything is sent; if any part cannot be prepared, nothing is sent.",
+	].join("\n");
 }
 
-/** Generates one image; bound at startup to the configured model and Pi-resolved credential. */
-export type ImageGenerator = (prompt: string, aspectRatio: ImageAspectRatio) => Promise<GeneratedImage>;
-
-export function createImageGenerationTool(scope: ToolScope, generate: ImageGenerator) {
-	return {
-		name: "generate_image",
-		label: "Generate image",
-		description:
-			"Draw one new image from a text description, send it to the chat with an optional short caption, and end the turn. Use when someone asks you to draw, paint or generate a picture. Write the prompt in English with concrete subject, style and composition. Takes about 15 seconds; do not also write a text reply.",
-		parameters: Type.Object(
-			{
-				prompt: Type.String({ minLength: 1, maxLength: 2000 }),
-				aspect_ratio: Type.Optional(Type.Union(IMAGE_ASPECT_RATIOS.map((ratio) => Type.Literal(ratio)))),
-				caption: Type.Optional(Type.String({ maxLength: 200 })),
-			},
-			{ additionalProperties: false },
+function replyPartSchema(sources: ReplySources) {
+	const caption = Type.Optional(Type.String({ maxLength: 200 }));
+	const strict = { additionalProperties: false } as const;
+	const reactionIds = [...BUILTIN_REACTION_IMAGE_IDS, ...Object.keys(sources.reactionImages?.catalog ?? {}).sort()];
+	const variants = [
+		Type.Object(
+			{ type: Type.Literal("text"), text: Type.String({ minLength: 1, maxLength: TEXT_PART_MAX_CHARS }) },
+			strict,
 		),
-		execute: async (
-			_toolCallId: string,
-			params: { prompt: string; aspect_ratio?: ImageAspectRatio; caption?: string },
-		) => {
-			const turn = scope.getTurn();
-			const fail = (error: string) => failure(`Image generation unavailable: ${error}. Reply in text instead.`, error);
-			if (!turn) return fail("no_active_turn");
-			if (turn.reply.status !== "idle") return fail("reply_already_sent");
-			turn.reply = { status: "sending", kind: "image" };
-			const caption = params.caption?.trim().slice(0, 200) || "🎨";
-			try {
-				const image = await generate(params.prompt, params.aspect_ratio ?? "1:1");
-				const sent = await scope.transport.sendMessage({
-					personaId: scope.personaId,
-					channelId: scope.channelId,
-					content: caption,
-					replyToMessageId: turn.replyToMessageId,
+		...(sources.voice
+			? [Type.Object({ type: Type.Literal("voice"), text: Type.String({ minLength: 1, maxLength: 400 }) }, strict)]
+			: []),
+		...(sources.generateImage
+			? [
+					Type.Object(
+						{
+							type: Type.Literal("image"),
+							prompt: Type.String({ minLength: 1, maxLength: 2000 }),
+							aspect_ratio: Type.Optional(Type.Union(IMAGE_ASPECT_RATIOS.map((ratio) => Type.Literal(ratio)))),
+							caption,
+						},
+						strict,
+					),
+				]
+			: []),
+		...(sources.reactionImages
+			? [
+					Type.Object(
+						{
+							type: Type.Literal("reaction_image"),
+							asset_id: Type.Union(reactionIds.map((id) => Type.Literal(id))),
+							caption,
+						},
+						strict,
+					),
+				]
+			: []),
+		...(sources.textImage
+			? [
+					Type.Object(
+						{
+							type: Type.Literal("text_image"),
+							markdown: Type.String({ minLength: 1, maxLength: TEXT_IMAGE_MAX_CHARS }),
+							caption,
+						},
+						strict,
+					),
+				]
+			: []),
+	];
+	return variants.length === 1 ? variants[0]! : Type.Union(variants);
+}
+
+/** A part ready to go out: everything slow (drawing, rendering, speech, file reads) is already done. */
+interface PreparedPart {
+	content: string;
+	attachments?: OutboundAttachment[];
+}
+
+function partError(error: unknown): string {
+	return error instanceof TextImageError || error instanceof AntigravityImageError || error instanceof FishAudioTtsError
+		? error.code
+		: "prepare_failed";
+}
+
+/**
+ * The turn's one outgoing reply as ordered parts. Caps, length and the reply audit are checked before
+ * any work; slow parts are prepared in parallel and nothing is sent unless all succeed; parts are then
+ * sent strictly in order and a send failure stops the rest without resending what already went out.
+ */
+export function createSendReplyTool(scope: ToolScope, sources: ReplySources) {
+	const { voice, generateImage, textImage } = sources;
+	const generatePicture = generateImage
+		? async (prompt: string) => (await generateImage(prompt, "4:3")).data
+		: undefined;
+
+	async function prepare(part: ReplyPart): Promise<PreparedPart> {
+		switch (part.type) {
+			case "text":
+				return { content: part.text };
+			case "voice": {
+				const audio = await synthesizeFishAudioTts(voice!.apiKey, part.text, voice!.referenceId, {
+					model: voice!.model,
+				});
+				return voiceMessage(part.text, audio);
+			}
+			case "image": {
+				const image = await generateImage!(part.prompt, part.aspect_ratio ?? "1:1");
+				return {
+					content: part.caption?.trim().slice(0, 200) || "🎨",
 					attachments: [
 						{
 							name: image.contentType === "image/png" ? "generated.png" : "generated.jpg",
@@ -658,20 +642,147 @@ export function createImageGenerationTool(scope: ToolScope, generate: ImageGener
 							contentType: image.contentType,
 						},
 					],
-				});
-				turn.reply = { status: "sent", kind: "image", messageId: sent.id };
-				scope.recordSentMessage(sent.id, caption, turn.replyToMessageId);
+				};
+			}
+			case "reaction_image": {
+				const asset = resolveReactionAsset(part.asset_id, sources.reactionImages?.catalog);
+				if (!asset) throw new Error("unknown reaction image");
 				return {
-					content: [{ type: "text" as const, text: "Image sent." }],
-					details: { messageId: sent.id },
+					content: (part.caption?.trim() || asset.caption).slice(0, 200),
+					attachments: [{ name: basename(asset.path), data: readFileSync(asset.path), contentType: asset.contentType }],
+				};
+			}
+			case "text_image": {
+				const image = await textImage!.render(part.markdown, generatePicture ? { generatePicture } : undefined);
+				return {
+					content: textImageCaption(part.markdown, part.caption),
+					attachments: [{ name: "text.png", data: image.data, contentType: image.contentType }],
+				};
+			}
+		}
+	}
+
+	return {
+		name: "send_reply",
+		label: "Send reply",
+		description: sendReplyDescription(sources),
+		parameters: Type.Object(
+			{ parts: Type.Array(replyPartSchema(sources), { minItems: 1, maxItems: REPLY_MAX_PARTS }) },
+			{ additionalProperties: false },
+		),
+		execute: async (_toolCallId: string, params: { parts: ReplyPart[] }, signal?: AbortSignal) => {
+			const turn = scope.getTurn();
+			const { parts } = params;
+			const fail = (text: string, error: string) => failure(`${text} Nothing was sent.`, error);
+			if (!turn) return fail("No active reply turn.", "no_active_turn");
+			if (turn.reply.status !== "idle") return fail("This turn already replied.", "reply_already_sent");
+			for (const [type, limit] of Object.entries(REPLY_PART_LIMITS))
+				if (parts.filter((part) => part.type === type).length > limit)
+					return fail(`At most ${limit} ${type} part per reply.`, "too_many_parts");
+			const longText = textImage
+				? parts.findIndex((part) => part.type === "text" && part.text.length > textImage.thresholdChars)
+				: -1;
+			if (longText >= 0)
+				return fail(
+					`Part ${longText + 1} is over the ${textImage!.thresholdChars}-character text limit; put long content in a text_image part.`,
+					"text_too_long",
+				);
+
+			turn.reply = { status: "sending" };
+			// Everything the chat will read as the persona's words passes the same checks as a final text reply.
+			const spoken = parts.flatMap((part) => (part.type === "text" || part.type === "voice" ? [part.text] : []));
+			const visible = parts.flatMap((part) => [
+				...(part.type === "text" || part.type === "voice" ? [part.text] : []),
+				...("caption" in part && part.caption ? [part.caption] : []),
+				...(part.type === "text_image" ? [part.markdown] : []),
+			]);
+			const withheld = visible.some(isLeak)
+				? "leak_pattern"
+				: spoken.length > 0
+					? await turn.audit(spoken.join("\n\n"))
+					: null;
+			if (withheld) {
+				turn.reply = { status: "withheld" };
+				log.warn("core", "reply_withheld", {
+					persona_id: scope.personaId,
+					platform: scope.transport.platform,
+					reason: withheld,
+				});
+				return {
+					content: [{ type: "text" as const, text: "The reply was withheld by review. Nothing was sent." }],
+					details: { error: "withheld" },
 					terminate: true as const,
 				};
-			} catch (error) {
-				turn.reply = { status: "idle" };
-				const code = error instanceof AntigravityImageError ? error.code : "send_failed";
-				log.warn("core", "image_generation_failed", { persona_id: scope.personaId, error_category: code });
-				return fail(code);
 			}
+
+			const prepared = await Promise.allSettled(parts.map(prepare));
+			const failed = prepared.flatMap((result, index) =>
+				result.status === "rejected" ? [{ index, type: parts[index]!.type, error: partError(result.reason) }] : [],
+			);
+			if (failed.length > 0) {
+				turn.reply = { status: "idle" };
+				for (const part of failed)
+					log.warn("core", "reply_part_failed", {
+						persona_id: scope.personaId,
+						part_type: part.type,
+						error_category: part.error,
+					});
+				return fail(
+					`${failed.map((part) => `Part ${part.index + 1} (${part.type}) failed: ${part.error}.`).join(" ")} Send again without it or reply in text.`,
+					failed[0]!.error,
+				);
+			}
+
+			const sentIds: string[] = [];
+			for (const [index, result] of prepared.entries()) {
+				const part = (result as PromiseFulfilledResult<PreparedPart>).value;
+				const replyToMessageId = index === 0 ? turn.replyToMessageId : undefined;
+				try {
+					// A timed-out turn sends nothing more.
+					if (signal?.aborted) throw new Error("aborted");
+					const sent = await scope.transport.sendMessage({
+						personaId: scope.personaId,
+						channelId: scope.channelId,
+						...part,
+						...(replyToMessageId ? { replyToMessageId } : {}),
+					});
+					sentIds.push(sent.id);
+					scope.recordSentMessage(sent.id, part.content, turn.sourceMessageId, replyToMessageId);
+				} catch (error) {
+					log.warn("core", "reply_part_failed", {
+						persona_id: scope.personaId,
+						part_type: parts[index]!.type,
+						error_category: errorCategory(error),
+					});
+					if (sentIds.length === 0) {
+						turn.reply = { status: "idle" };
+						return fail("Sending failed.", "send_failed");
+					}
+					turn.reply = { status: "sent", messageId: sentIds[0]! };
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `${index === 1 ? "Part 1 was" : `Parts 1-${index} were`} sent; part ${index + 1} (${parts[index]!.type}) failed to send and the rest were not sent. Do not resend the parts already in the chat.`,
+							},
+						],
+						details: { messageIds: sentIds, error: "send_failed" },
+						isError: true as const,
+						terminate: true as const,
+					};
+				}
+			}
+			turn.reply = { status: "sent", messageId: sentIds[0]! };
+			return {
+				content: [{ type: "text" as const, text: `Reply sent (${sentIds.length} messages).` }],
+				details: { messageIds: sentIds },
+				terminate: true as const,
+			};
 		},
 	};
+}
+
+/** Internal turn markers that must never reach the chat. */
+export function isLeak(text: string): boolean {
+	return /§E\d|\[当前事件/.test(text);
 }

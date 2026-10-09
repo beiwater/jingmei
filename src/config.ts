@@ -60,7 +60,7 @@ export interface AppConfig {
 	/** Telegram group chat ids like "-1001234567890". */
 	telegram?: { chatIds: string[] };
 	voice?: { apiKey: string; referenceId: string; model: "s2.1-pro-free" | "s2.1-pro" };
-	/** Antigravity image model for `generate_image`; the tool exists only when that provider is signed in. */
+	/** Antigravity image model for `send_reply` image parts; they exist only when that provider is signed in. */
 	imageModel: string;
 	/** Present when `textImage.enabled`: text replies over `thresholdChars` must be sent as a rendered image. */
 	textImage?: { thresholdChars: number };

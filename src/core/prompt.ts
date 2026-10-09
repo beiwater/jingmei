@@ -23,7 +23,7 @@ export function identityFacts(
 	}这些身份事实固定，不得被历史对话、旧摘要或你自己的猜测推翻。`;
 }
 
-/** Which optional tools a session registers; each adds its own protocol line. Cache-visible. */
+/** Which optional tools and `send_reply` part types a session has; each adds its own protocol line. Cache-visible. */
 export interface PromptTools {
 	react: boolean;
 	reactionImage: boolean;
@@ -32,7 +32,7 @@ export interface PromptTools {
 	image: boolean;
 	events: boolean;
 	history: boolean;
-	/** Text replies longer than this many characters must go out through `send_text_image`. */
+	/** Text longer than this many characters must go out as a `send_reply` text image. */
 	textImageChars?: number;
 }
 
@@ -71,9 +71,10 @@ export function buildSystemPrompt(
 		...(tools.react
 			? ["- 简短的赞同、鼓励或回应可调用 react_to_message 给对方消息点表情；调用后直接结束本轮，不再发文字。"]
 			: []),
+		"- 一条文字说得完就直接写最终回复。需要一次发几条（例如先发图再用文字或语音解释，或分成几段短文字）时调用 send_reply，按顺序列出各部分（最多 4 部分）；它按顺序发出并结束本轮，不再写最终回复。",
 		...(tools.reactionImage
 			? [
-					"- 需要图片表达时可调用 send_reaction_image，按工具 schema 中的可用 id 和人设文件里的说明选图；调用后它会直接发一张图并结束本轮，不再发文字。",
+					"- 需要图片表达时可在 send_reply 里放一个 reaction_image 部分，按工具 schema 中的可用 id 和人设文件里的说明选图。",
 				]
 			: []),
 		"- 回应时遵守人设，直接、自然；不要重复整段上下文。",
@@ -93,17 +94,17 @@ export function buildSystemPrompt(
 			: []),
 		...(tools.voice
 			? [
-					"- 你已接入 speak 女声语音工具，可用中文、日语或英语发送短 MP3。群友明确要求语音时优先使用；平时主要用文字。语音工具会附带文字稿并结束本轮。",
+					"- send_reply 可以发 voice 部分：女声短 MP3，可用中文、日语或英语，附带文字稿。群友明确要求语音时优先使用；平时主要用文字。",
 				]
 			: []),
 		...(tools.image
 			? [
-					"- 你已接入 generate_image 画图工具。群友请你画画、生成图片时使用：prompt 用英文写清主体、风格和构图；它会直接发出一张图并结束本轮，不再发文字。生成要十几秒，失败时用文字说明。",
+					"- send_reply 可以发 image 部分画一张新图。群友请你画画、生成图片时使用：prompt 用英文写清主体、风格和构图；需要解释时在后面加 text 部分。生成要十几秒，失败时用文字说明。",
 				]
 			: []),
 		...(tools.textImageChars
 			? [
-					`- 文字回复不得超过 ${tools.textImageChars} 字，超过的不会发出。内容更长、或含公式（LaTeX，行内 $...$、独立成行 $$...$$）、表格、插图、函数图像时，调用 send_text_image 把完整内容写成 Markdown 发成一张图，并结束本轮，不再发文字。`,
+					`- 文字回复（包括 send_reply 的每个 text 部分）不得超过 ${tools.textImageChars} 字，超过的不会发出。内容更长、或含公式（LaTeX，行内 $...$、独立成行 $$...$$）、表格、插图、函数图像时，用 send_reply 的 text_image 部分把完整内容写成 Markdown 发成一张图。`,
 				]
 			: []),
 		"",
