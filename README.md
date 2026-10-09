@@ -104,6 +104,12 @@ cp personas/template.zh.md personas/luna.md
 
 启动时会校验配置、验证每个 bot token、确认每个角色的模型存在且已认证。配置错误会一次列全；token 或模型不可用也会报错退出。之后去群里 @ 角色或回复它试试。
 
+在终端前台启动时，准备期间会播放 [fox-girl-loader](https://github.com/beiwater/fox-girl-loader) 加载动画，就绪后显示 **✓ Ready**，期间的启动日志在动画结束后补显示；systemd 等非终端环境不绘制动画，日志照常输出。
+
+<div align="center">
+<img src="assets/startup.gif" width="480" alt="启动动画">
+</div>
+
 ## Discord 设置
 
 每个角色对应一个 Discord application。

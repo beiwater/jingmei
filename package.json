@@ -44,6 +44,7 @@
 		"@resvg/resvg-js": "2.6.2",
 		"citty": "0.2.2",
 		"fastembed": "3.0.0",
+		"fox-girl-loader": "1.0.0",
 		"lunar-typescript": "1.8.6",
 		"notjev": "0.2.1",
 		"sqlite-vec": "0.1.9"
