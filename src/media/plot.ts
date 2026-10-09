@@ -523,7 +523,10 @@ function build3d(spec: Record<string, unknown>): Plot {
 		.filter(Number.isFinite)
 		.sort((a, b) => a - b);
 	if (!finite.length) throw new PlotError("曲面在该范围内没有定义");
-	const z = range(spec.zRange, "zRange") ?? [quantile(finite, 0.02), quantile(finite, 0.98)];
+	// The full value range, unless a pole stretches it far beyond the 2–98% band.
+	const band: Range = [quantile(finite, 0.02), quantile(finite, 0.98)];
+	const full: Range = [finite[0]!, finite[finite.length - 1]!];
+	const z = range(spec.zRange, "zRange") ?? (full[1] - full[0] > 5 * (band[1] - band[0]) + 1e-9 ? band : full);
 	if (!(z[1] > z[0])) z[1] = z[0] + 1;
 	// Out-of-domain cells sit on the floor; poles are cut at the z range.
 	const zs = raw.map((row) => row.map((v) => (Number.isFinite(v) ? Math.min(z[1], Math.max(z[0], v)) : z[0])));
@@ -576,7 +579,7 @@ export function plotTypst(plot: Plot): string {
     (x, y) => zs.at(int(calc.round((x - ${num(plot.x[0])}) * ${plot.samples}))).at(int(calc.round((y - ${num(plot.y[0])}) * ${plot.samples}))),
     subdivisions: ${plot.samples},
     subdivision-mode: "increase",
-    scale-dim: (${num(0.54 / xSpan)}, ${num(0.54 / ySpan)}, ${num(0.3 / (zHigh - zLow))}),
+    scale-dim: (${num(0.54 / xSpan)}, ${num(0.54 / ySpan)}, ${num(0.42 / (zHigh - zLow))}),
     xdomain: ${pair(plot.x)},
     ydomain: ${pair(plot.y)},
     axis-step: (${Math.max(1, Math.ceil(xSpan / 6))}, ${Math.max(1, Math.ceil(ySpan / 6))}, ${Math.max(1, Math.ceil((zHigh - zLow) / 4))}),
@@ -585,8 +588,9 @@ export function plotTypst(plot: Plot): string {
     front-axis-dot-scale: (0.05, 0.05),
     rear-axis-dot-scale: (0.08, 0.08),
     rear-axis-text-size: 0.5em,
+    color-func: (x, y, z, ..bounds) => gradient.linear(..color.map.viridis).sample(calc.clamp((z - ${num(plot.z[0])}) / ${num(Math.max(plot.z[1] - plot.z[0], 1e-9))}, 0, 1) * 100%).transparentize(8%),
     axis-label-size: 1.2em,
-    axis-label-offset: (${num((0.3 * xSpan) / 6)}, ${num((0.2 * ySpan) / 6)}, ${num((0.15 * (zHigh - zLow)) / 2)}),
+    axis-label-offset: (${num((0.3 * ySpan) / 6)}, ${num((0.2 * xSpan) / 6)}, ${num((0.15 * xSpan) / 6)}),
     axis-text-offset: ${num((0.075 * (xSpan + ySpan)) / 12)},
   )
 }`;
