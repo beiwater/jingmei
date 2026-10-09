@@ -1,16 +1,25 @@
 import { readBoundedBody } from "../net/read-bounded-body.ts";
 import { errorCategory, log } from "../observability/log.ts";
 
-/** TypeSafe Jev decision model client (https://docs.typesafe.ai/api.md). Never logs text, state or key. */
+/**
+ * Decision model client: TypeSafe Jev (https://docs.typesafe.ai/api.md) or the OpenAI Decisions API
+ * (https://developers.openai.com/api/docs/guides/decisions), behind one question model. Never logs text, state or key.
+ */
 
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const OPENAI_DECISIONS_ENDPOINT = "https://api.openai.com/v1/decisions";
+export const OPENAI_DECISIONS_MODEL = "gpt-6-luna";
 export const NEW_EVENT_OPTION = "new";
 const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_RECENT_LINES = 5;
 const NONE_OPTION = "none";
 
+export type JevProvider = "typesafe" | "openai";
+
 export interface JevConfig {
+	/** Wire format of `endpoint`; default `typesafe`. */
+	provider?: JevProvider;
 	endpoint?: string;
 	apiKey?: string;
 	model: string;
@@ -200,19 +209,21 @@ function noulOf(answers: Record<string, Answer>, id: string): number {
 
 export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fetch): JevClient {
 	const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const model = config.model || "jev-latest";
+	const openai = config.provider === "openai";
+	const model = config.model || (openai ? OPENAI_DECISIONS_MODEL : "jev-latest");
+	const endpoint = config.endpoint ?? (openai ? OPENAI_DECISIONS_ENDPOINT : JEV_ENDPOINT);
 
 	return createJevClientWithTransport(async (state, questions) => {
 		const signal = AbortSignal.timeout(timeoutMs);
 		let bytes: Uint8Array | null;
 		try {
-			const response = await fetchImpl(config.endpoint ?? JEV_ENDPOINT, {
+			const response = await fetchImpl(endpoint, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
 				},
-				body: JSON.stringify({ state, model, questions }),
+				body: JSON.stringify(openai ? toOpenAiRequest(model, state, questions) : { state, model, questions }),
 				signal,
 			});
 			if (!response.ok) {
@@ -232,8 +243,64 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 		} catch {
 			throw new JevError("invalid_response");
 		}
-		return payload;
+		return openai ? fromOpenAiResponse(payload) : payload;
 	});
+}
+
+function text(value: unknown): string {
+	return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/** OpenAI has no `criteria` on a predicate: the true/false descriptions join its instructions. */
+function toOpenAiRequest(model: string, state: unknown, questions: Readonly<Record<string, Question>>) {
+	return {
+		model,
+		input: text(state),
+		questions: Object.entries(questions).map(([name, question]) =>
+			question.type === "noul"
+				? {
+						type: "predicate",
+						name,
+						instructions: question.criteria
+							? `${text(question.instructions)}\n是：${question.criteria.true}\n否：${question.criteria.false}`
+							: text(question.instructions),
+					}
+				: {
+						type: "choice",
+						name,
+						instructions: text(question.instructions),
+						choices: Object.entries(question.criteria).map(([value, description]) => ({ value, description })),
+					},
+		),
+	};
+}
+
+/** Re-keys OpenAI answers by name in the TypeSafe shape; a refusal or unknown type fails `parseAnswers`. */
+function fromOpenAiResponse(payload: unknown) {
+	const list = typeof payload === "object" && payload !== null && "answers" in payload ? payload.answers : undefined;
+	if (!Array.isArray(list)) throw new JevError("invalid_response");
+	const answers: Record<string, unknown> = {};
+	for (const answer of list) {
+		if (typeof answer !== "object" || answer === null || typeof answer.name !== "string") continue;
+		if (answer.type === "predicate") answers[answer.name] = { type: "noul", noul: answer.probability };
+		else if (answer.type === "choice")
+			answers[answer.name] = {
+				type: "choice",
+				choice: answer.choice,
+				confidence: answer.confidence,
+				...(Array.isArray(answer.probabilities)
+					? {
+							probabilities: Object.fromEntries(
+								answer.probabilities.map((entry: { value?: unknown; probability?: unknown }) => [
+									entry.value,
+									entry.probability,
+								]),
+							),
+						}
+					: {}),
+			};
+	}
+	return { answers };
 }
 
 export function createJevClientWithTransport(

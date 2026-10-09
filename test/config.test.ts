@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { migrateDiscordConfig } from "../scripts/migrate-config.ts";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
 import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
-import { JEV_ENDPOINT } from "../src/decision/jev.ts";
+import { JEV_ENDPOINT, OPENAI_DECISIONS_ENDPOINT, OPENAI_DECISIONS_MODEL } from "../src/decision/jev.ts";
 
 const GUILD = "1552560014353506386";
 const CHANNEL = "1552560015276113962";
@@ -66,6 +66,7 @@ describe("config", () => {
 		expect(config.celebrations).toEqual([]);
 		expect(config.webSearchApiKey).toBeUndefined();
 		expect(config.jev).toEqual({
+			provider: "typesafe",
 			endpoint: JEV_ENDPOINT,
 			apiKey: "jev-fixture",
 			model: "jev-latest",
@@ -148,6 +149,23 @@ describe("config", () => {
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.apiKey).toBeUndefined();
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.quickReactions).toBe(true);
 		expect(validateConfig(base({ jev: {} }), root, env).jev).toBeUndefined();
+	});
+
+	test("the OpenAI provider gets its own endpoint and model and replaces the DeepSeek default", () => {
+		const config = validateConfig(base({ jev: { provider: "openai", apiKeyEnv: "TYPESAFE_API_KEY" } }), root, {
+			...env,
+			DEEPSEEK_API_KEY: "deepseek-fixture",
+		});
+		expect(config.jev).toMatchObject({
+			provider: "openai",
+			endpoint: OPENAI_DECISIONS_ENDPOINT,
+			model: OPENAI_DECISIONS_MODEL,
+			apiKey: "jev-fixture",
+		});
+		expect(config.localJev).toBeUndefined();
+		expect(errorsOf(() => validateConfig(base({ jev: { provider: "deepseek" } }), root, env))).toContainEqual(
+			'jev.provider must be "typesafe" or "openai"',
+		);
 	});
 
 	test("explicit local endpoints override DeepSeek and can run without credentials", () => {

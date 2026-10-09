@@ -265,7 +265,7 @@ Turn it on with `"textImage": { "enabled": true }`; no browser is needed. Render
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across participation decisions, final-text audits, reactions, memory ranking, and optional event assignment and participation scoring.
+[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. The remote decision API can instead be the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`jev.provider: "openai"`, model `gpt-6-luna`): the questions are identical, yes/no questions go out as `predicate` and choices as `choice`, a yes/no question's criteria are folded into its instructions, and a refusal counts as a failed call. Jingmei shares one decision client across participation decisions, final-text audits, reactions, memory ranking, and optional event assignment and participation scoring.
 
 **Participation decisions** (`replyDecision`, default `true`). Explicit mentions, replies and name/alias matches route directly without a participation request. Every other human message gets one request when enabled and a client exists: given the speaker, choose among all scoped characters and `none`. Without explicit addressing, only an obvious response to what the character just said counts (the character having just spoken does not), and uncertain cases choose `none`. A selected character with winning probability ≥ 0.5 routes directly, bypassing sampling and gates, and counts as addressed for quick reactions.
 
@@ -282,7 +282,7 @@ Turn it on with `"textImage": { "enabled": true }`; no browser is needed. Render
 
 **Memory ranking** (`memoryScoring`). When a character explicitly calls `recall_member_memory`, candidate facts and relationships (per member: the 20 newest facts and 16 strongest relationships) are scored against the current message in a single Jev request, keeping the 5 most relevant facts and 4 relationships per member. If Jev is unavailable it falls back to recency and interaction count.
 
-**Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` defaults to `https://api.deepseek.com` / `deepseek-flash`. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
+**Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` and no remote key defaults to `https://api.deepseek.com` / `deepseek-flash`. With a remote key that default does not apply, so there is no fallback unless `localJev` is written out. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
 
 The wrapper has a 30-second default timeout and disables DeepSeek thinking (`thinking.type=disabled`). Its LLM must return logprobs; missing logprobs become an `invalid_response` call failure. When the model abstains, the wrapper takes the highest-probability option (argmax).
 
@@ -310,9 +310,10 @@ With participation enabled and a client available, each human message without an
 
 | Field | Default | Meaning |
 |---|---|---|
-| `endpoint` | `https://api.typesafe.ai/v1/systemone` | Remote Jev http(s) URL |
+| `provider` | `typesafe` | Remote wire format: `typesafe` or `openai` |
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | Remote Jev http(s) URL; `openai` defaults to `https://api.openai.com/v1/decisions` |
 | `apiKeyEnv` | none | Env var for the remote key; omit to use only the local wrapper |
-| `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0` |
+| `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0`; `openai` defaults to `gpt-6-luna` |
 | `quickReactions` | `true` | Quick reactions |
 | `memoryScoring` | `true` | Memory ranking |
 | `replyDecision` | `true` | Content-aware participation; disabling it retains deterministic candidate gates and final-text audits |

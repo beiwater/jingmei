@@ -265,7 +265,7 @@ personas/
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。精魅用同一个决策客户端做接话判断、最终文字审查、表情、记忆排序，以及可选的话题归属与参与度判断。
+[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。远程决策接口也可以换成 [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)（`jev.provider: "openai"`，模型 `gpt-6-luna`）：问题完全相同，是非题以 `predicate` 发送、选择题以 `choice` 发送，是非题的判断标准并入说明文字，拒答按调用失败处理。精魅用同一个决策客户端做接话判断、最终文字审查、表情、记忆排序，以及可选的话题归属与参与度判断。
 
 **接话判断**（`replyDecision`，默认 `true`）。明确 @、回复、名字/别名命中时直接路由，不请求接话判断。其他人类消息在启用且有客户端时各发一次请求：带上发言者，从当前空间的全部角色与 `none` 中判断是否在对某个角色说话。没有点名时只有明显在回应角色刚说的话才算（角色刚发过言不算），拿不准选 `none`；选中角色的概率 ≥ 0.5 时直接路由，不受抽样与门控限制，秒回表情也视它为被点名。
 
@@ -282,7 +282,7 @@ personas/
 
 **记忆排序**（`memoryScoring`）。角色按需调用 `recall_member_memory` 时，把候选事实和关系（每人最近 20 条事实、最强 16 条关系）一次性交给 Jev 与当前消息比对相关度，每人保留最相关的 5 条事实和 4 条关系。Jev 不可用时退回按时间和互动次数排序。
 
-**本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev` 且有 `DEEPSEEK_API_KEY` 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
+**本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev`、有 `DEEPSEEK_API_KEY` 且没有远程 key 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；配置了远程 key 时这个默认不生效，也就没有回退，要回退须显式写 `localJev`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
 
 包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
 
@@ -310,9 +310,10 @@ personas/
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `endpoint` | `https://api.typesafe.ai/v1/systemone` | 远程 Jev 的 http(s) URL |
+| `provider` | `typesafe` | 远程接口格式：`typesafe` 或 `openai` |
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | 远程 Jev 的 http(s) URL；`openai` 默认 `https://api.openai.com/v1/decisions` |
 | `apiKeyEnv` | 无 | 远程 key 的环境变量名；省略则仅使用本地包装器 |
-| `model` | `jev-latest` | 也可固定版本，如 `jev-1.13.0` |
+| `model` | `jev-latest` | 也可固定版本，如 `jev-1.13.0`；`openai` 默认 `gpt-6-luna` |
 | `quickReactions` | `true` | 秒回表情 |
 | `memoryScoring` | `true` | 记忆排序 |
 | `replyDecision` | `true` | 内容感知接话判断；关闭仍保留确定性抽样门控与最终文字审查 |
