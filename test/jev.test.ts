@@ -297,6 +297,31 @@ describe("Jev natural reply audit", () => {
 		}
 	});
 
+	test("asks the reason for a failed audit as one choice over the fixed issue menu", async () => {
+		const { impl, calls } = fakeFetch(() =>
+			Response.json({ answers: { issue: { type: "choice", choice: "recap", confidence: 0.8 } } }),
+		);
+		expect(
+			await createJevClient(config, impl).classifyAuditIssue({
+				reply: "雨夹雪说了X",
+				message: "梳理时间线",
+				recent: [],
+			}),
+		).toBe("recap");
+		expect(calls[0]?.body.state).toEqual({ reply: "雨夹雪说了X", message: "梳理时间线" });
+		expect(calls[0]?.body.questions.issue?.type).toBe("choice");
+		expect(Object.keys(calls[0]?.body.questions.issue?.criteria as object)).toEqual([
+			"recap",
+			"planning",
+			"drafts",
+			"other",
+		]);
+		const unknown = createJevClientWithTransport(async () => ({
+			answers: { issue: { type: "choice", choice: "rude", confidence: 1 } },
+		}));
+		await expectJevError(unknown.classifyAuditIssue({ reply: "好", message: "嗯" }), "invalid_response");
+	});
+
 	test("rejects missing, mistyped and non-unit audit answers", async () => {
 		for (const natural of [
 			undefined,

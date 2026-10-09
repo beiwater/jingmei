@@ -134,9 +134,10 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 ### 最终文字扣留
 
 - 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
-- 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 扣留，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
-- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。被扣留时一条不发，`turn.reply` 置为 `withheld` 并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
-- 扣留只记录 `reply_withheld { persona_id, platform, reason }`，不记正文、不发错误提示、不记平台历史、不增加回复数。在同一会话追加 `jingmei_withheld_v1` 自定义消息，`display: false`、不触发轮次，标记留在持久文件；provider 投影移除该标记及它前面的被扣留轮次 assistant 消息。
+- 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 不通过，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
+- **重写一次**：`ActiveTurn.audit` 返回 `Withheld { reason, rewrite? }`。每轮第一次 `leak_pattern` 或 `audit` 带 `rewrite`：`audit` 时先调 `classifyAuditIssue` 取原因（`recap` / `planning` / `drafts` / `other`，调用失败按 `other`），映射到 `conversation.ts` 的 `REWRITE_HINTS`；记 `reply_rewrite { persona_id, platform, reason }`。最终文字追加 `jingmei_audit_gate_v1`（`display: false`、触发轮次）让模型重写；`send_reply` 返回带提示的 `isError` 结果、`turn.reply` 回到 `idle`、不 `terminate`。之后同一轮的审查不再带 `rewrite`，也不再问原因。
+- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留，不重写；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown（命中的那段交给 `turn.audit`）；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。最终被扣留时一条不发，`turn.reply` 置为 `withheld`（带原因）并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
+- 最终扣留记录 `reply_withheld { persona_id, platform, reason }`，不记正文。除 `audit_failed` 外，改发固定的 `(系统提示：说了不该说的东西被捂嘴了)`：回复原消息、按普通机器人消息入库并计一次回复。最终文字在同一会话追加 `jingmei_withheld_v1` 自定义消息，`display: false`、不触发轮次，标记留在持久文件；provider 投影移除该标记及它前面的被扣留轮次 assistant 消息（越过本轮的重写提示）。
 
 ### 会话
 
@@ -159,13 +160,14 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 - **展开聊天消息**：`discord_context_v1` 自定义消息展开为文字 + 图片块，图片从 `data/media/` 读取；文件缺失就跳过该图。消息带 `details.turnNote` 时（触发消息，写入时固化）把它拼在文字后，每条带 turnNote 的消息都拼，不只最新一条。
 - **看不了图的模型**：有 `visionModel` 描述时替换为 `[图片：描述]` 文字；否则保留图片块，由 Pi 按模型能力替换为省略说明。
 - **已晋升的 soul 暂存笔记**：内容已并入正式 soul 的 `discord_pending_soul_v1` 消息被丢弃，避免重复。
-- **被扣留的最终回复**：遇到 `jingmei_withheld_v1` 时，删除它前面该轮次的 assistant 消息和标记本身；保留入站聊天和未被扣留的历史，原会话文件不改写。重载后仍按持久标记执行相同投影。
+- **被扣留的最终回复**：遇到 `jingmei_withheld_v1` 时，删除它前面该轮次的 assistant 消息和标记本身（本轮的 `jingmei_audit_gate_v1` 不算输入边界）；保留入站聊天和未被扣留的历史，原会话文件不改写。重载后仍按持久标记执行相同投影。
+- **审查重写提示**：`jingmei_audit_gate_v1` 不是最后一条输入（轮次已结束）时，删除它和紧挨在它前面的被拒草稿；进行中的重写仍能看到两者。
 
 隐藏扩展也处理 `session_before_compact`：在调用方 `customInstructions` 后追加固定身份和群聊摘要规则，只保留确认事实、归因成员说法，不把助手猜测、过去拒绝或语气固化为约束/偏好；风格教训须由成员明确提出，并纠正旧摘要中冲突身份及猜测规则。Pi 0.84.1 不支持在此事件结果中返回指令，因此调用 Pi 导出的 `compact()`，保留其结果、截断点和用量；使用压缩时的当前模型、thinking、认证、streamFunction 与重试设置，失败/中止时取消，不回退到无规则摘要。
 
 Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附加规则覆盖历史摘要，不覆盖该单独的前缀摘要。
 
-`discord_context_v1`、`discord_pending_soul_v1` 和新增的 `jingmei_withheld_v1` 都是持久会话协议名，不能改名。
+`discord_context_v1`、`discord_pending_soul_v1`、`jingmei_withheld_v1` 和 `jingmei_audit_gate_v1` 都是持久会话协议名，不能改名。
 
 ### 历史检索索引（`src/core/message-index.ts`）
 

@@ -41,6 +41,9 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 		auditNatural: async () => {
 			throw new Error("unused");
 		},
+		classifyAuditIssue: async () => {
+			throw new Error("unused");
+		},
 	};
 	const transport = {
 		platform: "telegram",

@@ -45,13 +45,26 @@ export interface ActiveTurn {
 	/** Shared by related_messages and search_history. */
 	historyLookupCount: number;
 	replyToMessageId: string;
-	/** Leak check and naturalness audit of reply text, exactly as for a final text reply; null lets it be sent. */
-	audit(text: string): Promise<WithheldReason | null>;
+	/**
+	 * Leak check and naturalness audit of reply text, shared by the final text reply and `send_reply`; null lets
+	 * it be sent. The turn's first leak or audit rejection carries `rewrite` and allows one more attempt.
+	 */
+	audit(text: string): Promise<Withheld | null>;
 	/** One reply per turn: a reaction, or one `send_reply` (whose `messageId` is its first sent message). */
-	reply: { status: "idle" } | { status: "sending" } | { status: "withheld" } | { status: "sent"; messageId?: string };
+	reply:
+		| { status: "idle" }
+		| { status: "sending" }
+		| { status: "withheld"; reason: WithheldReason }
+		| { status: "sent"; messageId?: string };
 }
 
 export type WithheldReason = "leak_pattern" | "audit" | "audit_failed";
+
+export interface Withheld {
+	reason: WithheldReason;
+	/** Present once per turn: what to fix, told to the model so it can rewrite instead of going silent. */
+	rewrite?: string;
+}
 
 /** Where a session's tools act: one persona, one platform, one space channel. */
 export interface ToolScope {
@@ -696,17 +709,24 @@ export function createSendReplyTool(scope: ToolScope, sources: ReplySources) {
 				...("caption" in part && part.caption ? [part.caption] : []),
 				...(part.type === "text_image" ? [part.markdown] : []),
 			]);
-			const withheld = visible.some(isLeak)
-				? "leak_pattern"
-				: spoken.length > 0
-					? await turn.audit(spoken.join("\n\n"))
-					: null;
+			const leaked = visible.find(isLeak);
+			const withheld =
+				leaked !== undefined || spoken.length > 0 ? await turn.audit(leaked ?? spoken.join("\n\n")) : null;
+			if (withheld?.rewrite) {
+				turn.reply = { status: "idle" };
+				log.warn("core", "reply_rewrite", {
+					persona_id: scope.personaId,
+					platform: scope.transport.platform,
+					reason: withheld.reason,
+				});
+				return fail(`The reply was withheld by review: ${withheld.rewrite} Rewrite it and reply again.`, "withheld");
+			}
 			if (withheld) {
-				turn.reply = { status: "withheld" };
+				turn.reply = { status: "withheld", reason: withheld.reason };
 				log.warn("core", "reply_withheld", {
 					persona_id: scope.personaId,
 					platform: scope.transport.platform,
-					reason: withheld,
+					reason: withheld.reason,
 				});
 				return {
 					content: [{ type: "text" as const, text: "The reply was withheld by review. Nothing was sent." }],
