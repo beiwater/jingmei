@@ -558,12 +558,25 @@ function textImageCaption(markdown: string, caption: string | undefined): string
 	return title ? `📄 ${[...title].slice(0, 60).join("")}` : "📄";
 }
 
-export function createTextImageTool(scope: ToolScope, render: TextImageRenderer) {
+const TEXT_IMAGE_DESCRIPTION =
+	"Render a long reply as one image and send it to the chat with an optional short caption, then end the turn. Use it instead of a long text reply: write the full content as Markdown in `markdown` (headings, lists, tables, code, `$...$` / `$$...$$` LaTeX math, `![alt](public https URL)` pictures). Do not also write a text reply.\n" +
+	"Graphs (up to 3): a fenced block with language `plot` holding JSON. 2D: " +
+	'{"x":[-3,3],"y":[-2,2],"plots":[{"y":"sin(x)","label":"sin x"},{"implicit":"x^2+y^2=1"},{"x":"cos(t)","y":"sin(2t)","t":[0,6.28]},{"points":[[1,2],[2,3]]}]} ' +
+	"(x/y ranges optional; each item is a function of x, an implicit equation in x and y, a parametric curve in t, or points). " +
+	'3D surface: {"z":"sin(x)*cos(y)","x":[-3,3],"y":[-3,3]} with whole-number ranges. ' +
+	"Expressions: numbers, x y t, + - * / ^, implicit multiplication like 2x, pi, e, sin cos tan asin acos atan sinh cosh tanh exp ln log sqrt cbrt abs floor ceil.";
+
+export function createTextImageTool(
+	scope: ToolScope,
+	render: TextImageRenderer,
+	generatePicture?: (prompt: string) => Promise<Uint8Array>,
+) {
 	return {
 		name: "send_text_image",
 		label: "Send text as image",
-		description:
-			"Render a long reply as one image and send it to the chat with an optional short caption, then end the turn. Use it instead of a long text reply: write the full content as Markdown in `markdown` (headings, lists, tables, code, `$...$` / `$$...$$` LaTeX math, `![alt](public https URL)` pictures). Do not also write a text reply.",
+		description: generatePicture
+			? `${TEXT_IMAGE_DESCRIPTION}\nNew pictures (up to 2, about 15 s each): a fenced block with language \`image\` holding an English description of subject, style and composition is replaced by a freshly drawn picture.`
+			: TEXT_IMAGE_DESCRIPTION,
 		parameters: Type.Object(
 			{
 				markdown: Type.String({ minLength: 1, maxLength: TEXT_IMAGE_MAX_CHARS }),
@@ -579,7 +592,7 @@ export function createTextImageTool(scope: ToolScope, render: TextImageRenderer)
 			turn.reply = { status: "sending", kind: "image" };
 			const caption = textImageCaption(params.markdown, params.caption);
 			try {
-				const image = await render(params.markdown);
+				const image = await render(params.markdown, generatePicture ? { generatePicture } : undefined);
 				const sent = await scope.transport.sendMessage({
 					personaId: scope.personaId,
 					channelId: scope.channelId,

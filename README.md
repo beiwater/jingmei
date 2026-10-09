@@ -37,7 +37,7 @@
 - **看图与视频抽帧**：每条消息最多 4 张图片，缩放到 1024×1024、200 KB 以内交给模型；视频用 ffmpeg 抽 1–3 帧。主模型不支持图片输入时，Pi 会把图片替换成一条省略说明；也可以配置 `visionModel`，先把图片描述成一两句文字。语音、文件、贴纸以 `[语音]`、`[文件]`、`[贴纸 😀]` 这样的文字占位。
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
 - **画图**（可选）：登录 Antigravity provider 后，角色可以用 `generate_image` 按群友的描述生成一张图并直接发出（默认 Nano Banana 2 / `gemini-3.1-flash-image`，约十几秒）。登录方式见[画图](#画图)。**注意**：Google Antigravity 条款明确禁止用第三方工具调用 Antigravity OAuth，已有账号因此被封，建议使用小号。
-- **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_text_image`，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）和公网图片。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
+- **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_text_image`，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）、公网图片、函数图（函数、隐函数、参数方程、散点、3D 曲面），以及开启画图时由 AI 新画的插图。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
 - **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。Linux 首次调用自动试运行 bubblewrap：可用时额外隔离文件系统、网络与 PID；未安装或被系统策略阻止时回退原有 vm 沙箱（vm 本身不是安全边界）。无新增配置；Ubuntu 启用及日志验证见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，开新对话段或压缩成功后才转为正式内容。成员可随时 `/forget`。
@@ -252,11 +252,13 @@ personas/
 
 ## 长文转图
 
-在配置里写 `"textImage": { "enabled": true }` 即可开启，不需要浏览器：渲染用 Typst 编译器（`@myriaddreamin/typst-ts-node-compiler`）排版成 SVG，再由 `@resvg/resvg-js` 转 PNG。服务器需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会从 Typst 官方仓库下载并缓存两个固定版本的包（cmarker、mitex）。启动时先试渲染一次，失败只记 `text_image_unavailable` 并关闭该功能。
+在配置里写 `"textImage": { "enabled": true }` 即可开启，不需要浏览器：渲染用 Typst 编译器（`@myriaddreamin/typst-ts-node-compiler`）排版成 SVG，再由 `@resvg/resvg-js` 转 PNG。服务器需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会从 Typst 官方仓库下载并缓存固定版本的包（cmarker、mitex；用到函数图时还有 cetz、cetz-plot、plotsy-3d）。启动时先试渲染一次，失败只记 `text_image_unavailable` 并关闭该功能。
 
 - **长度闸门**：角色的最终文字超过 `thresholdChars`（默认 300 字）时不发送。同一轮里系统会告诉它“回复超过上限，没有发出”，让它调用 `send_text_image` 重发；多花一次模型调用，只重试一次。重试后仍输出超长文字（或渲染失败），这段文字按原样分条发送，不会丢。
 - **`send_text_image`**：参数是 Markdown（≤ 8000 字）和可选的短配文。角色也可以不等闸门，在内容含公式、表格、插图时主动调用；发图后结束本轮。system prompt 会写明字数上限，让模型尽量一次到位。
 - **支持**：标题、加粗、列表、引用、表格、代码块；LaTeX 公式 `$…$`（行内）与 `$$…$$`（独立成行）；`![说明](https://…)` 公网图片（PNG/JPEG/GIF/WebP，每张 ≤ 4 MiB，最多 4 张）。
+- **函数图**：Markdown 里写一个语言为 `plot` 的代码块，内容是 JSON。2D 如 `{"x":[-3,3],"y":[-2,2],"plots":[{"y":"sin(x)","label":"sin x"},{"implicit":"x^2+y^2=1"},{"x":"cos(t)","y":"sin(2t)","t":[0,6.28]},{"points":[[1,2],[2,3]]}]}`：每项是关于 x 的函数、x/y 的隐函数方程、关于 t 的参数方程或散点；范围可省略（自动选取，隐函数会自动找曲线位置，没有关于 x 的函数时两轴等比例），`tan`、`1/x` 这类间断点自动断开。3D 曲面如 `{"z":"sin(x)*cos(y)","x":[-3,3],"y":[-3,3]}`，范围须为整数。表达式只认数字、x/y/t、`+ - * / ^`、`2x` 式省略乘号、`pi`、`e` 和常用函数（sin cos tan asin acos atan sinh cosh tanh exp ln log sqrt cbrt abs floor ceil）。取样在 JS 里完成，交给 Typst 的只有数字和转义后的图例文字，模型写的表达式从不作为代码执行。作图用 Typst 包 cetz-plot（2D）与 plotsy-3d（3D），首次用到时下载。每张最多 3 个图，写错的图在原位显示原因，不影响其余内容。
+- **AI 插图**：角色开启了画图（见[画图](#画图)）时，语言为 `image` 的代码块写英文画面描述，渲染时会调用同一个画图模型新画一张嵌进图里（每张最多 2 张，每张约十几秒）；失败或未开启画图时原位显示“图片无法生成”。
 - **限制**：图片只下载公网 http(s) 地址，不跟随重定向，私网、本机地址和本地路径一律不显示（原位显示“图片无法显示”）；Markdown 里的原始 Typst、`<svg>`、`<a>` 等不会被执行。图片宽度固定（720 px，过高时自动降为 360 px 的 1 倍清晰度），高度超过 8000 px 或文件超过 9 MB 时渲染失败，该轮回退为文字。
 - **入库内容**：Discord 与 Telegram 里这条消息存的是配文（没写配文时取 Markdown 的第一行标题），不是全文，避免长文占满之后每一轮的上下文；角色自己的会话里仍保留调用时的完整 Markdown。
 

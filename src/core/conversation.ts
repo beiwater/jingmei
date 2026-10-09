@@ -1087,7 +1087,15 @@ export class Conversation implements ConversationCore {
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
 				...(voice ? [createVoiceTool(scope, voice)] : []),
 				...(imageGenerator ? [createImageGenerationTool(scope, imageGenerator)] : []),
-				...(this.textImage ? [createTextImageTool(scope, this.textImage.render)] : []),
+				...(this.textImage
+					? [
+							createTextImageTool(
+								scope,
+								this.textImage.render,
+								imageGenerator ? async (prompt) => (await imageGenerator(prompt, "4:3")).data : undefined,
+							),
+						]
+					: []),
 				...(this.messageIndex ? createHistoryTools(scope, this.messageIndex) : []),
 				createCalculationTool(),
 			],

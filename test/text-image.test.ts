@@ -115,6 +115,46 @@ describe("renderTextImage", () => {
 		expect(Array.from(image.data.slice(0, 8))).toEqual(PNG_SIGNATURE);
 	});
 
+	test("draws ```plot graphs and 3D surfaces, and a broken spec only leaves a note", async () => {
+		const plot = (spec: unknown) => ["```plot", JSON.stringify(spec), "```"].join("\n");
+		const bare = dimensions((await renderTextImage("函数图")).data);
+		const image = await renderTextImage(
+			[
+				"函数图",
+				plot({ x: [-6, 6], y: [-4, 4], plots: [{ y: "tan(x)", label: "tan" }, { implicit: "x^2+y^2=4" }] }),
+				plot({ z: "sin(x)*cos(y)", x: [-3, 3], y: [-3, 3] }),
+				plot({ plots: [{ y: "nope(x)" }] }),
+			].join("\n\n"),
+		);
+		expect(Array.from(image.data.slice(0, 8))).toEqual(PNG_SIGNATURE);
+		expect(dimensions(image.data).height).toBeGreaterThan(bare.height + 600);
+	});
+
+	test("plot labels are text, never Typst code", async () => {
+		const label = '") #panic("injected") ("';
+		const image = await renderTextImage(["```plot", JSON.stringify({ plots: [{ y: "x", label }] }), "```"].join("\n"));
+		expect(Array.from(image.data.slice(0, 8))).toEqual(PNG_SIGNATURE);
+	});
+
+	test("```image blocks are drawn by the picture generator, at most two, and fall back to a note", async () => {
+		const prompts: string[] = [];
+		const generatePicture = async (prompt: string) => {
+			prompts.push(prompt);
+			return PICTURE;
+		};
+		const blocks = ["a red fox", "a blue whale", "a green frog"].map((p) => ["```image", p, "```"].join("\n"));
+		const drawn = await renderTextImage(["前", ...blocks, "后"].join("\n\n"), { generatePicture });
+		expect(prompts).toEqual(["a red fox", "a blue whale"]);
+		const failing = await renderTextImage(["前", blocks[0]!, "后"].join("\n\n"), {
+			generatePicture: async () => {
+				throw new Error("quota");
+			},
+		});
+		const absent = await renderTextImage(["前", blocks[0]!, "后"].join("\n\n"));
+		expect(dimensions(drawn.data).height).toBeGreaterThan(dimensions(absent.data).height + 100);
+		expect(dimensions(failing.data).height).toBe(dimensions(absent.data).height);
+	});
+
 	test("rejects empty and oversized input before any work", async () => {
 		const { urls, fetchImpl } = recordingFetch();
 		for (const markdown of ["", "  \n ", "字".repeat(TEXT_IMAGE_MAX_CHARS + 1)])

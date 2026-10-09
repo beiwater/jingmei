@@ -4,10 +4,14 @@ import { join } from "node:path";
 import type { NodeCompiler } from "@myriaddreamin/typst-ts-node-compiler";
 import { parsePublicHttpUrl } from "../net/public-url.ts";
 import { readBoundedBody } from "../net/read-bounded-body.ts";
+import { preparePlots } from "./plot.ts";
 
 /** Longest Markdown source one image may be rendered from. */
 export const TEXT_IMAGE_MAX_CHARS = 8_000;
 const MAX_IMAGES = 4;
+/** Pictures drawn for ```image blocks per render; each takes about 15 seconds. */
+export const MAX_GENERATED_IMAGES = 2;
+const MAX_GENERATED_PROMPT_CHARS = 1_000;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const IMAGE_TIMEOUT_MS = 10_000;
 /** Telegram `sendPhoto` accepts 10 MB and width + height <= 10000 px. */
@@ -36,8 +40,14 @@ export interface TextImage {
 	contentType: "image/png";
 }
 
-/** Renders Markdown (with `$…$` LaTeX math and public image URLs) to one PNG. */
-export type TextImageRenderer = (markdown: string) => Promise<TextImage>;
+/** Draws one picture from an English description for an ```image block. */
+export type PictureGenerator = (prompt: string) => Promise<Uint8Array>;
+
+/** Renders Markdown (with `$…$` LaTeX math, public image URLs, ```plot graphs and ```image pictures) to one PNG. */
+export type TextImageRenderer = (
+	markdown: string,
+	options?: { generatePicture?: PictureGenerator },
+) => Promise<TextImage>;
 
 /** `![alt](url)` and `![alt](url "title")`; the capture groups are alt and url. */
 const IMAGE_SYNTAX = /!\[([^\]\n]*)\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g;
@@ -98,17 +108,65 @@ async function inlineImages(
 	return { markdown: rewritten, images };
 }
 
+const IMAGE_FENCE = /^```image[^\S\r\n]*\r?\n([\s\S]*?)\r?\n```[^\S\r\n]*$/gm;
+
+/** Prompts of the first ```image blocks that will be drawn, in document order. */
+function pictureRequests(markdown: string): string[] {
+	return [...markdown.matchAll(IMAGE_FENCE)]
+		.slice(0, MAX_GENERATED_IMAGES)
+		.map((match) => match[1]!.trim().slice(0, MAX_GENERATED_PROMPT_CHARS));
+}
+
+async function drawPicture(prompt: string, generate: PictureGenerator | undefined) {
+	if (!generate || !prompt) return null;
+	try {
+		const data = await generate(prompt);
+		const ext = imageExtension(data);
+		return ext ? { data, ext } : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Swaps each ```image block for its drawn picture, or a placeholder when none was drawn. */
+function placePictures(
+	markdown: string,
+	pictures: ReadonlyArray<{ data: Uint8Array; ext: string } | null>,
+	images: LoadedImage[],
+): string {
+	let index = 0;
+	return markdown.replace(IMAGE_FENCE, (_whole, prompt: string) => {
+		const picture = pictures[index++];
+		if (!picture)
+			return `（图片无法生成${index > MAX_GENERATED_IMAGES ? `：每张最多 ${MAX_GENERATED_IMAGES} 张` : ""}）`;
+		const name = `gen-${images.length}.${picture.ext}`;
+		images.push({ name, data: picture.data });
+		return `![${prompt.trim().split("\n")[0]!.replace(/[[\]]/g, "").slice(0, 60)}](${name})`;
+	});
+}
+
 /**
  * Everything user-controlled reaches Typst only as data (`doc.md`, image bytes), never as source:
  * cmarker's raw Typst is off, raw HTML `<svg>`/`<a>` handlers are neutralised, and `image` is
  * restricted to the files fetched for this render.
  */
-function mainSource(imageNames: readonly string[]): string {
+function mainSource(
+	imageNames: readonly string[],
+	plots: ReadonlyArray<{ name: string; typst: string; surface: boolean }>,
+): string {
 	const allowed = `(${imageNames.map((name) => JSON.stringify(name)).join(", ")}${imageNames.length === 1 ? "," : ""})`;
+	// Plot code is generated from sampled numbers and escaped labels only (see plot.ts), never from model text.
+	const plotImports = plots.length
+		? `#import "@preview/cetz:0.4.0"\n#import "@preview/cetz-plot:0.1.2": plot\n${
+				plots.some((p) => p.surface) ? '#import "@preview/plotsy-3d:0.2.1": plot-3d-surface\n' : ""
+			}`
+		: "";
+	const plotTable = `(${plots.map((p) => `${JSON.stringify(p.name)}: [#${p.typst}]`).join(", ")}${plots.length ? "" : ":"})`;
 	return `
 #import "@preview/cmarker:0.1.8"
 #import "@preview/mitex:0.2.7": mitex
-#let allowed-images = ${allowed}
+${plotImports}#let allowed-images = ${allowed}
+#let plots = ${plotTable}
 #set page(width: ${PAGE_WIDTH_PT}pt, height: auto, margin: 18pt, fill: white)
 #set text(font: ${FONT}, size: 10.5pt, lang: "zh", fill: rgb("#1f2328"))
 #set par(leading: 0.8em)
@@ -124,7 +182,9 @@ function mainSource(imageNames: readonly string[]): string {
   raw-typst: false,
   html: (svg: ("raw-text", (attrs, body) => none), a: (attrs, body) => body),
   blockquote: it => quote(block: true, it),
-  scope: (image: (source, ..args) => if type(source) == str and allowed-images.contains(source) {
+  scope: (image: (source, ..args) => if type(source) == str and source in plots {
+    align(center, plots.at(source))
+  } else if type(source) == str and allowed-images.contains(source) {
     image(source, width: 100%, ..args)
   } else { [（图片无法显示）] }),
 )
@@ -164,10 +224,18 @@ async function toPng(svg: string): Promise<Uint8Array> {
 	throw new TextImageError("too_large");
 }
 
-export async function renderTextImage(markdown: string, options: { fetch?: typeof fetch } = {}): Promise<TextImage> {
+export async function renderTextImage(
+	markdown: string,
+	options: { fetch?: typeof fetch; generatePicture?: PictureGenerator } = {},
+): Promise<TextImage> {
 	const source = markdown.trim();
 	if (!source || source.length > TEXT_IMAGE_MAX_CHARS) throw new TextImageError("invalid_input");
-	const { markdown: prepared, images } = await inlineImages(source, options.fetch ?? fetch);
+	const [inlined, pictures] = await Promise.all([
+		inlineImages(source, options.fetch ?? fetch),
+		Promise.all(pictureRequests(source).map((prompt) => drawPicture(prompt, options.generatePicture))),
+	]);
+	const images = inlined.images;
+	const { markdown: prepared, plots } = preparePlots(placePictures(inlined.markdown, pictures, images));
 	const typst = await getCompiler().catch(() => {
 		throw new TextImageError("render_failed");
 	});
@@ -175,7 +243,12 @@ export async function renderTextImage(markdown: string, options: { fetch?: typeo
 	let svg: string;
 	try {
 		for (const shadow of shadows) typst.mapShadow(join(TYPST_DIR, shadow.name), Buffer.from(shadow.data));
-		const compiled = typst.compile({ mainFileContent: mainSource(images.map((image) => image.name)) });
+		const compiled = typst.compile({
+			mainFileContent: mainSource(
+				images.map((image) => image.name),
+				plots,
+			),
+		});
 		if (compiled.hasError() || !compiled.result) throw new TextImageError("render_failed");
 		svg = typst.svg(compiled.result);
 	} catch (error) {
