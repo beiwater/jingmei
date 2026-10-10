@@ -58,8 +58,8 @@ export class BotState {
 	}
 
 	/** False when already paused; the original pause time is kept. */
-	pause(now = Date.now()): boolean {
-		return this.db.query("INSERT OR IGNORE INTO bot_pause (id, paused_at) VALUES (1, ?)").run(now).changes > 0;
+	pause(): boolean {
+		return this.db.query("INSERT OR IGNORE INTO bot_pause (id, paused_at) VALUES (1, ?)").run(Date.now()).changes > 0;
 	}
 
 	/** False when not paused. */
@@ -76,30 +76,32 @@ export class BotState {
 			.get(personaId);
 	}
 
-	setModelOverride(personaId: string, provider: string, model: string, now = Date.now()): void {
+	setModelOverride(personaId: string, provider: string, model: string): void {
 		this.db
 			.query(`
 			INSERT INTO persona_models (persona_id, provider, model, updated_at) VALUES (?, ?, ?, ?)
 			ON CONFLICT(persona_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, updated_at = excluded.updated_at
 		`)
-			.run(personaId, provider, model, now);
+			.run(personaId, provider, model, Date.now());
 	}
 
 	clearModelOverride(personaId: string): void {
 		this.db.query("DELETE FROM persona_models WHERE persona_id = ?").run(personaId);
 	}
 
-	startRun(now = Date.now()): void {
+	startRun(): void {
+		const now = Date.now();
 		this.runId = Number(
 			this.db.query("INSERT INTO bot_runs (started_at, last_seen_at) VALUES (?, ?)").run(now, now).lastInsertRowid,
 		);
 	}
 
-	heartbeat(now = Date.now()): void {
-		this.db.query("UPDATE bot_runs SET last_seen_at = ? WHERE id = ?").run(now, this.runId);
+	heartbeat(): void {
+		this.db.query("UPDATE bot_runs SET last_seen_at = ? WHERE id = ?").run(Date.now(), this.runId);
 	}
 
-	stopRun(now = Date.now()): void {
+	stopRun(): void {
+		const now = Date.now();
 		this.db.query("UPDATE bot_runs SET last_seen_at = ?, stopped_at = ? WHERE id = ?").run(now, now, this.runId);
 		this.runId = null;
 	}

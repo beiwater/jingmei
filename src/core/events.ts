@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { contentText } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { type EventOption, type JevClient, NEW_EVENT_OPTION } from "../decision/jev.ts";
 import { errorCategory, log } from "../observability/log.ts";
@@ -48,7 +49,7 @@ export function createPiEventSummarizer(
 			{ maxTokens: 512, cacheRetention: "none", timeoutMs: 30_000, maxRetries: 0 },
 		);
 		if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error("事件摘要生成失败");
-		const text = reply.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+		const text = contentText(reply.content);
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(text);
@@ -84,7 +85,6 @@ export interface EventTrackerOptions {
 	decision: JevClient;
 	embedder: Embedder;
 	summarize: EventSummarizer;
-	now?: () => number;
 }
 
 interface EventRow {
@@ -114,7 +114,6 @@ export class EventTracker {
 	private readonly decision: JevClient;
 	private readonly embedder: Embedder;
 	private readonly summarize: EventSummarizer;
-	private readonly now: () => number;
 	private readonly flights = new Map<number, RefreshFlight>();
 
 	constructor(options: EventTrackerOptions) {
@@ -122,12 +121,8 @@ export class EventTracker {
 		this.decision = options.decision;
 		this.embedder = options.embedder;
 		this.summarize = options.summarize;
-		this.now = options.now ?? Date.now;
 		ensureMessagesTable(this.db);
 		loadVectorExtension(this.db);
-		if (!Number.isInteger(this.embedder.dimensions) || this.embedder.dimensions <= 0) {
-			throw new Error("事件向量维度必须为正整数");
-		}
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS events (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,11 +167,11 @@ export class EventTracker {
 					.query(
 						"SELECT * FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at >= ? ORDER BY last_message_at DESC, id DESC LIMIT 5",
 					)
-					.all(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS) as EventRow[];
+					.all(message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS) as EventRow[];
 				const latest = active[0];
 				if (
 					latest &&
-					latest.last_message_at >= this.now() - LOW_CONTENT_WINDOW_MS &&
+					latest.last_message_at >= Date.now() - LOW_CONTENT_WINDOW_MS &&
 					!hasSubstantiveText(message.content)
 				) {
 					eventId = latest.id;
@@ -296,15 +291,14 @@ export class EventTracker {
 			.query(
 				"SELECT e.id FROM events e JOIN event_vectors v ON v.rowid = e.id WHERE e.space_id = ? AND e.channel_id = ? AND e.last_message_at < ? LIMIT 1",
 			)
-			.get(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS);
+			.get(message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS);
 		if (!closed) return [];
-		const [vector] = await this.embedder.embed([message.content]);
-		if (!vector) throw new Error("事件召回未返回向量");
+		const vector = (await this.embedder.embed([message.content]))[0]!;
 		const matches = this.db
 			.query(
 				"SELECT rowid, distance FROM event_vectors WHERE embedding MATCH ? AND k = 2 AND rowid IN (SELECT id FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at < ?) ORDER BY distance",
 			)
-			.all(vector, message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS) as Array<{
+			.all(vector, message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS) as Array<{
 			rowid: number;
 			distance: number;
 		}>;
@@ -348,8 +342,7 @@ export class EventTracker {
 			.query("UPDATE events SET title = ?, description = ? WHERE id = ?")
 			.run(summary.title, summary.description, eventId);
 		// 向量只依赖摘要，先写入：参与度打分失败不应让该事件无法被召回。
-		const [vector] = await this.embedder.embed([`${summary.title}\n${summary.description}`]);
-		if (!vector) throw new Error("事件摘要未返回向量");
+		const vector = (await this.embedder.embed([`${summary.title}\n${summary.description}`]))[0]!;
 		this.db.transaction(() => {
 			this.db.query("DELETE FROM event_vectors WHERE rowid = ?").run(eventId);
 			this.db.query("INSERT INTO event_vectors(rowid, embedding) VALUES (?, ?)").run(eventId, vector);
@@ -364,8 +357,6 @@ export class EventTracker {
 			transcript,
 			members: [...members.values()],
 		});
-		if (scores.length !== members.size || scores.some((score) => !Number.isFinite(score) || score < 0 || score > 1))
-			throw new Error("参与度分数无效");
 		this.db.transaction(() => {
 			this.db.query("DELETE FROM event_participants WHERE event_id = ?").run(eventId);
 			let index = 0;

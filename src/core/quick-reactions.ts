@@ -27,7 +27,6 @@ export class QuickReactions {
 	constructor(
 		private readonly jev: JevIntegration,
 		private readonly transports: ReadonlyMap<Platform, PlatformTransport>,
-		private readonly now: () => number = Date.now,
 	) {}
 
 	async react(
@@ -44,7 +43,7 @@ export class QuickReactions {
 		const reactor = addressed ? scopedPersonas.find((persona) => persona.id === route.personaId) : scopedPersonas[0];
 		if (!reactor) return;
 		const channelKey = `${message.spaceId}\0${message.channelId}`;
-		const limited = () => this.now() - (this.lastUnaddressed.get(channelKey) ?? -Infinity) < this.jev.minIntervalMs;
+		const limited = () => Date.now() - (this.lastUnaddressed.get(channelKey) ?? -Infinity) < this.jev.minIntervalMs;
 		// A rate-limited unaddressed message cannot react, so it does not spend a Jev call either.
 		if (!addressed && limited()) return;
 		const emojis = Object.fromEntries(
@@ -59,7 +58,7 @@ export class QuickReactions {
 		if (!addressed) {
 			// Re-check after the await: concurrent decisions in one channel share one slot.
 			if (limited()) return;
-			this.lastUnaddressed.set(channelKey, this.now());
+			this.lastUnaddressed.set(channelKey, Date.now());
 		}
 		await transport.addReaction(reactor.id, message.channelId, message.messageId, emoji);
 	}
