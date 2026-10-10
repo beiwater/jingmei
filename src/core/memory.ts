@@ -129,7 +129,7 @@ export class MemberMemory {
 	/** Record one message once, update profile activity, and maintain evidenced social edges. */
 	observe(message: InboundMessage, botUserIds: ReadonlySet<string> = new Set()): void {
 		if (message.isBot || botUserIds.has(message.authorId)) return;
-		const at = finiteTimestamp(message.timestamp);
+		const at = message.timestamp ?? Date.now();
 		this.db.transaction(() => {
 			const inserted =
 				this.db
@@ -184,7 +184,7 @@ export class MemberMemory {
 		const value = input.value.trim();
 		if (!value || value.length > MAX_FACT_VALUE_LENGTH || UNSAFE_FACT_VALUE.test(value))
 			throw new Error("invalid_memory_fact_value");
-		const at = finiteTimestamp(input.observedAt);
+		const at = input.observedAt ?? Date.now();
 		this.db.transaction(() => {
 			if (this.isOptedOut(input.spaceId, input.memberId)) throw new Error("memory_opted_out");
 			this.upsertProfile(
@@ -488,14 +488,14 @@ function cleanName(name: string): string {
 		.slice(0, 80);
 }
 
-function finiteTimestamp(value?: number): number {
-	return value !== undefined && Number.isFinite(value) ? Math.trunc(value) : Date.now();
+/** Round-trips through a leap year, so February 29 is valid and overflowing days or fractions are not. */
+function isValidBirthday(month: number, day: number): boolean {
+	const date = new Date(Date.UTC(2000, month - 1, day));
+	return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
 function assertBirthday(month: number, day: number): void {
-	const max = month === 2 ? 29 : [4, 6, 9, 11].includes(month) ? 30 : 31;
-	if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > max)
-		throw new Error("invalid_birthday");
+	if (!isValidBirthday(month, day)) throw new Error("invalid_birthday");
 }
 
 function extractOwnBirthday(text: string): { month: number; day: number } | null {
@@ -548,12 +548,7 @@ function monthNumber(value: string): number | null {
 }
 
 function validBirthday(month: number, day: number): { month: number; day: number } | null {
-	try {
-		assertBirthday(month, day);
-		return { month, day };
-	} catch {
-		return null;
-	}
+	return isValidBirthday(month, day) ? { month, day } : null;
 }
 
 /** Only called for members the adapter resolved as explicitly mentioned in this message. */

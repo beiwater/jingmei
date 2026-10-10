@@ -112,6 +112,8 @@ describe("MemberMemory", () => {
 		expect(birthday("My birthday is sep 3.", "66666666666666661")).toEqual({ month: 9, day: 3 });
 		expect(birthday("my birthday is Smarch 3", "66666666666666662")).toEqual({ month: 9, day: 3 });
 		expect(birthday("my birthday is February 30", "66666666666666663")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is April 31", "66666666666666664")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is Feb 29", "66666666666666665")).toEqual({ month: 2, day: 29 });
 		db.close();
 	});
 
