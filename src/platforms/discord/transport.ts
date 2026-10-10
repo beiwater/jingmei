@@ -64,7 +64,7 @@ const FATAL_CLOSE_HINTS: Readonly<Record<number, string>> = {
 	4010: "Discord rejected the gateway shard configuration.",
 	4011: "Discord requires sharding for this bot.",
 	4012: "Discord rejected the gateway API version.",
-	4013: "Discord rejected the requested intents. Enable Message Content Intent in the Discord Developer Portal (Bot > Privileged Gateway Intents).",
+	4013: "Discord rejected the intents value jingmei sends. This is a code problem; upgrade jingmei or report it.",
 	4014: "Message Content Intent is not enabled. Enable it in the Discord Developer Portal (Bot > Privileged Gateway Intents).",
 };
 

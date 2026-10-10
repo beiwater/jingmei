@@ -128,7 +128,7 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 - 启动即退出：stderr 会打印配置错误清单或模型问题（`unknown_model`、`unauthenticated_provider`、`unsupported_reasoning_effort`、`image_input_unsupported`）。
 - 启动失败且与模型缓存相关：macOS 确认已安装 Homebrew SQLite；检查 sqlite-vec 能否加载、首次模型下载网络。话题启动失败另查 `events.summaryModel` 认证与决策 key / `localJev` 配置。`jev.endpoint` 的运行时调用失败只在有本地包装器时回退；显式命名却缺失的环境变量仍会拒绝启动。
 - Discord 收不到普通消息：检查 Message Content Intent 和频道权限。
-- Discord Gateway 不可恢复的关闭码（日志 `transport_error` 带 `close_code`）：进程会向 stderr 打印提示、优雅关闭并以非零码退出，重连无法修复。`4014` / `4013` 在 Discord Developer Portal 的 Bot 页打开 Message Content Intent；`4004` 令牌无效，检查 `.env` 里该角色的令牌变量；`4010` / `4011` / `4012` 是分片或 API 版本被拒，通常是 Discord 侧变化，需升级代码。其他关闭码会自动重连。
+- Discord Gateway 不可恢复的关闭码（日志 `transport_error` 带 `close_code`）：进程会向 stderr 打印提示并优雅关闭，重连无法修复。退出码刻意为 0：服务是 `Restart=on-failure`，非零退出会每几秒重连一次并反复 IDENTIFY，Discord 每天超过 1000 次会重置令牌；所以修好后需手动重启服务。`4014` 在 Discord Developer Portal 的 Bot 页打开 Message Content Intent；`4013` 是 jingmei 发出的 intents 值被拒，属于代码问题，请升级或报告；`4004` 令牌无效，检查 `.env` 里该角色的令牌变量；`4010` / `4011` / `4012` 是分片或 API 版本被拒，通常是 Discord 侧变化，需升级代码。其他关闭码会自动重连。
 - Telegram 只对命令和 @ 有反应：privacy mode 未关闭，日志有 `privacy_mode_enabled`。
 - Telegram 群没反应：日志里的 `chat_ignored` 给出未列入 `telegram.chatIds` 的群 ID。
 - 某条消息为什么没回：按时间找该消息附近的 `event: "route"`。`stale: true` 表示收到或开始处理时已超过 3 分钟：只入库和写向量索引，明确点名也不回。`reason: "nobody"` 时看 `candidate`（没抽中为 `null`）、`gated`（冷却/占比挡住）、`decision`（`failed` 为接话判断调用失败）与 `chat_in`（低于 `replyThreshold`）；被路由但没发出则看同一角色的 `reply_withheld` / `turn_failed` / `turn_timeout`。重启的 `inbound_recovered { recovered, expired }` 表示补处理的 3 分钟内未完成消息与仅保留历史的过期消息数；没有积压则不记该事件。

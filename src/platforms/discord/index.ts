@@ -175,12 +175,15 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 	const guilds = config.discord?.guilds ?? [];
 	const clients = new Map<string, DiscordTransport>();
 	let failing = false;
-	/** Reconnecting cannot fix this: tell the operator what to change and shut down with a nonzero exit code. */
+	/**
+	 * Reconnecting cannot fix this: tell the operator what to change and shut down. The exit code stays 0 on
+	 * purpose: under `Restart=on-failure` a nonzero exit would re-IDENTIFY every few seconds and Discord
+	 * resets the token after 1000 IDENTIFYs a day.
+	 */
 	function failFatally(personaId: string, error: DiscordGatewayFatalError): void {
 		console.error(`[${personaId}] ${error.message}. ${error.hint}`.trim());
 		if (failing) return;
 		failing = true;
-		process.exitCode = 1;
 		process.kill(process.pid, "SIGTERM");
 	}
 	const commandsByClient: Array<{ client: DiscordTransport; persona: Persona }> = [];

@@ -204,7 +204,7 @@ describe("Discord transport primitives", () => {
 
 	test.each([
 		[4004, "token"],
-		[4013, "Message Content Intent"],
+		[4013, "intents value"],
 		[4014, "Message Content Intent"],
 	])("reports unrecoverable close code %d with an actionable hint and does not reconnect", async (code, hint) => {
 		const sockets: FakeSocket[] = [];
