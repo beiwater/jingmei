@@ -26,6 +26,7 @@ personas/*/
 !personas/README.md
 !personas/template.zh.md
 !personas/template.en.md
+!personas/lizhi.md
 
 docs/dev/req.md
 .DS_Store
