@@ -115,6 +115,10 @@ export class BotApi {
 		return this.call("getMe");
 	}
 
+	getChat(chatId: string): Promise<{ id: number; type: string; title?: string }> {
+		return this.call("getChat", { chat_id: chatId });
+	}
+
 	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
 		return this.call(
 			"getUpdates",

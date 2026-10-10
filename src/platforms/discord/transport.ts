@@ -134,6 +134,12 @@ export class DiscordTransport {
 		return { id: user.id, username: user.username };
 	}
 
+	/** Application flags; Message Content Intent shows as GATEWAY_MESSAGE_CONTENT (1 << 18) or, below verification, the LIMITED variant (1 << 19). */
+	async getApplicationFlags(): Promise<number | undefined> {
+		const application = await this.request<{ flags?: unknown }>("/applications/@me");
+		return typeof application.flags === "number" ? application.flags : undefined;
+	}
+
 	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
 		const headers = new Headers(init.headers);
 		headers.set("Authorization", `Bot ${this.options.token}`);

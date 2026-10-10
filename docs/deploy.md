@@ -124,6 +124,7 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 
 ## 排查
 
+- 先跑 `bun run jingmei doctor`：只读自检，逐项给出 OK / WARN / FAIL 和一行修复提示（配置、`run_js` 沙箱、模型与认证、Discord / Telegram token 与权限、ffmpeg / 字体 / sqlite-vec / embedding 缓存），有 FAIL 时退出码非 0；下面是 doctor 覆盖不到的现象。
 - 启动即退出：stderr 会打印配置错误清单或模型问题（`unknown_model`、`unauthenticated_provider`、`unsupported_reasoning_effort`、`image_input_unsupported`）。
 - 启动失败且与模型缓存相关：macOS 确认已安装 Homebrew SQLite；检查 sqlite-vec 能否加载、首次模型下载网络。话题启动失败另查 `events.summaryModel` 认证与决策 key / `localJev` 配置。`jev.endpoint` 的运行时调用失败只在有本地包装器时回退；显式命名却缺失的环境变量仍会拒绝启动。
 - Discord 收不到普通消息：检查 Message Content Intent 和频道权限。

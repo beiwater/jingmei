@@ -162,6 +162,16 @@ function showStats(): string {
 	return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
 }
 
+/** Print the self-check table; any failed check makes the command (and the process exit code) fail. */
+async function checkInstall(): Promise<string> {
+	const { defaultProbes, failureCount, formatReport, runDoctor } = await import("./doctor.ts");
+	const results = await runDoctor(defaultProbes(process.cwd()));
+	process.stdout.write(`${formatReport(results)}\n`);
+	const failed = failureCount(results);
+	if (failed) throw new Error(`${failed} ${failed === 1 ? "check" : "checks"} failed`);
+	return "All required checks passed";
+}
+
 async function signIn(provider?: string): Promise<string> {
 	const runtime = await openRuntime();
 	const providers = runtime
@@ -270,6 +280,7 @@ async function switchModel(ref?: string, personaId?: string): Promise<string> {
 
 const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
 	stats: showStats,
+	doctor: checkInstall,
 	model: () => switchModel(),
 	pause: pauseBot,
 	resume: resumeBot,
@@ -286,6 +297,7 @@ async function menu(): Promise<never> {
 			message: "What next?",
 			options: [
 				{ value: "stats", label: "Status", hint: "uptime and totals" },
+				{ value: "doctor", label: "Check install", hint: "config, tokens, models, dependencies" },
 				{ value: "model", label: "Switch model" },
 				paused ? { value: "resume", label: "Resume replies" } : { value: "pause", label: "Pause replies" },
 				{ value: "login", label: "Sign in to a provider" },
@@ -326,6 +338,11 @@ const stats = defineCommand({
 	run: () => operation("jingmei stats", showStats),
 });
 
+const doctor = defineCommand({
+	meta: { name: "doctor", description: "Check config, bot tokens, models and optional dependencies (read-only)" },
+	run: () => operation("jingmei doctor", checkInstall),
+});
+
 const model = defineCommand({
 	meta: { name: "model", description: "Show or switch a persona's chat model (picker when no model is given)" },
 	args: {
@@ -355,7 +372,7 @@ const logout = defineCommand({
 await runMain(
 	defineCommand({
 		meta: { name: "jingmei", description: "精魅 operator commands; run without a command for the interactive menu" },
-		subCommands: { start, login, logout, model, pause, resume, stats },
+		subCommands: { start, doctor, login, logout, model, pause, resume, stats },
 		// citty also calls this after a subcommand (only `start` returns), so act only on a bare invocation.
 		run: ({ rawArgs }) => (rawArgs.length ? undefined : menu()),
 	}),

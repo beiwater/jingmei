@@ -253,8 +253,9 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 | 命令 | 作用 |
 |---|---|
-| `bun run jingmei` | 交互菜单：状态、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei` | 交互菜单：状态、自检、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
+| `bun run jingmei doctor` | 只读自检：配置、`run_js` 沙箱、模型与凭据、Discord / Telegram token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg、字体、sqlite-vec、embedding 缓存；逐项 OK / WARN / FAIL，附一行修复提示，有 FAIL 时退出码非 0。不打印任何 token |
 | `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | 查看并切换角色的聊天模型；不带模型时刷新模型列表后弹出选择 |
 | `bun run jingmei pause` / `resume` | 暂停 / 恢复 |

@@ -255,6 +255,7 @@ Run them in the project directory as the same user that runs the bot. They read 
 |---|---|
 | `bun run jingmei` | Interactive menu: status, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
 | `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
+| `bun run jingmei doctor` | Read-only self-check: config, the `run_js` sandbox, models and credentials, Discord / Telegram tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg, fonts, sqlite-vec and the embedding cache for the features you enabled. One OK / WARN / FAIL line each with a one-line fix hint; exits non-zero on any FAIL. Never prints a token |
 | `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential; signing in refreshes that provider's model list |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | Show and switch a persona's chat model; without a model it refreshes the model lists and opens a picker |
 | `bun run jingmei pause` / `resume` | Pause / resume |
