@@ -317,9 +317,7 @@ export class MemberMemory {
 		);
 		if (!candidates.length || !relevance.query.trim()) return null;
 		try {
-			const scores = await relevance.score(relevance.query, candidates);
-			if (scores.length !== candidates.length || !scores.every(Number.isFinite)) throw new Error("score_shape");
-			return scores;
+			return await relevance.score(relevance.query, candidates);
 		} catch (error) {
 			log.warn("core", "memory_scoring_failed", { error_category: errorCategory(error) });
 			return null;

@@ -359,8 +359,6 @@ export class EventTracker {
 			transcript,
 			members: [...members.values()],
 		});
-		if (scores.length !== members.size || scores.some((score) => !Number.isFinite(score) || score < 0 || score > 1))
-			throw new Error("参与度分数无效");
 		this.db.transaction(() => {
 			this.db.query("DELETE FROM event_participants WHERE event_id = ?").run(eventId);
 			let index = 0;
