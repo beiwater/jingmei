@@ -11,12 +11,10 @@ import { Conversation, type ConversationOptions } from "../src/core/conversation
 import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import { useExtensibleSqlite } from "../src/core/db.ts";
 import { EventTracker } from "../src/core/events.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -160,16 +158,12 @@ function fixture(
 				summarize: async () => ({ title: "Topic", description: "Discussion" }),
 			})
 		: undefined;
-	const coreOptions: ConversationOptions = {
+	const coreOptions = conversationOptions({
 		db,
-		botState: new BotState(db),
-		memberMemory: new MemberMemory(db),
-		soulStore: new SoulStore({ db, personaIds: [persona.id] }),
 		dataDir,
-		routingSecret: "fixture",
 		personas: [persona],
 		modelRuntime: runtime,
-		transports: new Map([[platform, transport]]),
+		transports: [transport],
 		events,
 		...(options.jev
 			? {
@@ -188,7 +182,7 @@ function fixture(
 		...(options.textImage ? { textImage: options.textImage } : {}),
 		...(options.typing ? { typingMaxMs: options.typing.maxMs } : {}),
 		...(options.voice ? { voice: { apiKey: "fixture", referenceId: "fixture", model: "s2.1-pro-free" as const } } : {}),
-	};
+	});
 	const core = new Conversation(coreOptions);
 	const logs: LogRecord[] = [];
 	cleanups.push(setLogSink((line) => logs.push(JSON.parse(line))));

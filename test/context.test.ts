@@ -1,17 +1,13 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
-import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import type { EventTracker } from "../src/core/events.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Platform, SpaceId } from "../src/core/types.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, scriptedStream, seamOf } from "./support/pi.ts";
 
 type Block = AssistantMessage["content"][number];
@@ -58,19 +54,11 @@ function fixture(options: {
 	});
 	let sends = 0;
 	const transport = makeTransport({ platform, sendMessage: async () => ({ id: String(++sends) }) });
-	const db = new Database(":memory:");
-	const memory = new MemberMemory(db);
-	const botState = new BotState(db);
-	const core = new Conversation({
-		db,
-		botState,
-		memberMemory: memory,
-		soulStore: new SoulStore({ db, personaIds: [persona.id, observer.id] }),
+	const coreOptions = conversationOptions({
 		dataDir,
-		routingSecret: "fixture",
 		personas: options.observer ? [persona, observer] : [persona],
 		modelRuntime: runtime,
-		transports: new Map([[platform, transport]]),
+		transports: [transport],
 		...(options.vision ? { visionModel: { provider: "fixture", model: "vision" } } : {}),
 		...(options.events
 			? {
@@ -81,6 +69,8 @@ function fixture(options: {
 				}
 			: {}),
 	});
+	const { db, botState, memberMemory: memory } = coreOptions;
+	const core = new Conversation(coreOptions);
 	cleanups.push(() => {
 		void core.close();
 		db.close();

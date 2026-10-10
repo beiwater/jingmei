@@ -5,10 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
 import type { SpaceId } from "../src/core/types.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const SPACE: SpaceId = "discord:111";
@@ -49,17 +47,9 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	const used: string[] = [];
 	let messageId = 10;
 	const start = async () => {
-		const core = new Conversation({
-			db,
-			botState: new BotState(db),
-			memberMemory: new MemberMemory(db),
-			soulStore: new SoulStore({ db, personaIds: [persona.id] }),
-			dataDir,
-			routingSecret: "fixture",
-			personas: [persona],
-			modelRuntime: runtime,
-			transports: new Map([["discord", transport]]),
-		});
+		const core = new Conversation(
+			conversationOptions({ db, dataDir, personas: [persona], modelRuntime: runtime, transports: [transport] }),
+		);
 		const session = await seamOf(core).getSession(persona, SPACE, "222");
 		session.agent.streamFunction = (streamModel) => {
 			used.push(`${streamModel.provider}/${streamModel.id}`);

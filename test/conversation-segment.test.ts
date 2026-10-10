@@ -5,15 +5,13 @@ import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BotState } from "../src/core/bot-state.ts";
-import { Conversation, type ConversationOptions } from "../src/core/conversation.ts";
+import { Conversation } from "../src/core/conversation.ts";
 import { ensureSessionTables } from "../src/core/db.ts";
 import type { EventTracker } from "../src/core/events.ts";
-import { MemberMemory } from "../src/core/memory.ts";
 import type { MessageIndex, MessageKey } from "../src/core/message-index.ts";
-import { type SoulScope, SoulStore } from "../src/core/soul.ts";
+import type { SoulScope } from "../src/core/soul.ts";
 import type { InboundMessage, PlatformTransport, SpaceId } from "../src/core/types.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, onSession, scriptedStream } from "./support/pi.ts";
 
 const SPACE: SpaceId = "telegram:-100111";
@@ -84,26 +82,20 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 			return { id: String(1000 + sends.length) };
 		},
 	});
-	const db = new Database(":memory:");
-	const soul = new SoulStore({ db, personaIds: personas.map((persona) => persona.id) });
 	const index = options.index === false ? undefined : new FakeIndex();
-	const coreOptions: ConversationOptions = {
-		db,
-		botState: new BotState(db),
-		memberMemory: new MemberMemory(db),
-		soulStore: soul,
+	const coreOptions = conversationOptions({
 		dataDir,
-		routingSecret: "fixture",
 		personas,
 		modelRuntime: makeRuntime(model),
-		transports: new Map([["telegram", transport]]),
+		transports: [transport],
 		events: {
 			assign: async () => 7,
 			describe: () => ({ title: "Topic", description: "Chat", participants: [] }),
 		} as unknown as EventTracker,
 		turnTimeoutMs: options.timeoutMs ?? 5_000,
 		...(index ? { messageIndex: index as unknown as MessageIndex } : {}),
-	};
+	});
+	const { db, soulStore: soul } = coreOptions;
 	const captured: Captured[] = [];
 	const script: Array<AssistantMessage | StreamFn> = [];
 	const build = () => {

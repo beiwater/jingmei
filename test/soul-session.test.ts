@@ -4,11 +4,9 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
-import { MemberMemory } from "../src/core/memory.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const model = makeModel();
@@ -40,17 +38,16 @@ test("soul tool, compaction and restart retain the owning conversation without r
 	let db = new Database(join(dataDir, "jingmei.db"));
 	let soul = new SoulStore({ db, personaIds: personas.map((persona) => persona.id) });
 	const createCore = () =>
-		new Conversation({
-			db,
-			botState: new BotState(db),
-			dataDir,
-			routingSecret: "fixture",
-			personas,
-			soulStore: soul,
-			memberMemory: new MemberMemory(db),
-			modelRuntime: runtime,
-			transports: new Map([["discord", transport]]),
-		});
+		new Conversation(
+			conversationOptions({
+				db,
+				dataDir,
+				personas,
+				soulStore: soul,
+				modelRuntime: runtime,
+				transports: [transport],
+			}),
+		);
 	let core = createCore();
 	// Use real Pi sessions and tools; provider calls and the compaction result are deterministic fixtures.
 	const getSession = (target: SoulScope): Promise<AgentSession> => {

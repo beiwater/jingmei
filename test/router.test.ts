@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { BotState } from "../src/core/bot-state.ts";
 import { ensureMessagesTable } from "../src/core/db.ts";
 import {
 	Conversation,
@@ -8,12 +7,9 @@ import {
 	explicitVoiceRequest,
 	searchQueryForRoutedMessage,
 } from "../src/core/conversation.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
 import { participationGated, participationRoute, routeMessage } from "../src/core/router.ts";
 import type { InboundMessage, Persona } from "../src/core/types.ts";
-import { makePersona, makeTransport } from "./support/core.ts";
-import { makeRuntime } from "./support/pi.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 
 function persona(id: string, name: string, userId: string, overrides: Partial<Persona> = {}): Persona {
 	return makePersona({
@@ -211,18 +207,12 @@ describe("search and voice triggers", () => {
 
 describe("conversation guards", () => {
 	test("only a platform-qualified persona admin may inspect or compact channel context", async () => {
-		const db = new Database(":memory:");
-		const core = new Conversation({
-			db,
-			botState: new BotState(db),
-			memberMemory: new MemberMemory(db),
-			soulStore: new SoulStore({ db, personaIds: ["mio"] }),
-			dataDir: "/unused",
-			routingSecret: "secret",
-			personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],
-			modelRuntime: makeRuntime(),
-			transports: new Map([["discord", makeTransport()]]),
-		});
+		const core = new Conversation(
+			conversationOptions({
+				personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],
+				transports: [makeTransport()],
+			}),
+		);
 		for (const [platform, requester] of [
 			["discord", "33333333333333333"],
 			// The same raw id is a different person on another platform.
@@ -236,6 +226,5 @@ describe("conversation guards", () => {
 			);
 		}
 		await core.close();
-		db.close();
 	});
 });
