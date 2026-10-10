@@ -5,10 +5,14 @@ import type { InboundMessage, SpaceId } from "./types.ts";
 /** Scores each candidate's relevance to `query` in [0,1], same order; throws on failure. */
 export type RelevanceScorer = (query: string, candidates: readonly string[]) => Promise<number[]>;
 
+/** The only fact keys the model may save; the tool schema is built from this list. */
+export const FACT_KEYS = ["preference", "interest", "role", "project", "timezone", "language", "goal", "note"] as const;
+export type FactKey = (typeof FACT_KEYS)[number];
+
 export interface MemberFactInput {
 	spaceId: SpaceId;
 	memberId: string;
-	key: string;
+	key: FactKey;
 	value: string;
 	sourceChannelId: string;
 	sourceMessageId: string;
@@ -38,7 +42,6 @@ type ProfileRow = {
 	birthday_day: number | null;
 };
 
-const MAX_FACT_KEY_LENGTH = 32;
 const MAX_FACT_VALUE_LENGTH = 300;
 const MAX_RECALL_MEMBERS = 20;
 const MAX_RECALL_CHARS = 2_000;
@@ -46,16 +49,6 @@ const RECALL_FACTS = 5;
 const RECALL_RELATIONSHIPS = 4;
 /** With a scorer, fetch this many times the kept count as ranking candidates. */
 const SCORED_CANDIDATES = 4;
-const ALLOWED_FACT_KEYS = new Set([
-	"preference",
-	"interest",
-	"role",
-	"project",
-	"timezone",
-	"language",
-	"goal",
-	"note",
-]);
 const SENSITIVE_KEY = /password|secret|token|credential|medical|health|religion|politic|sexual|address|phone|email/i;
 const UNSAFE_FACT_VALUE =
 	/[\r\n\u0000-\u001f]|(?:ignore|disregard).{0,24}(?:instructions|prompt)|(?:忽略|无视).{0,12}(?:指令|提示词)|(?:api[_ -]?key|password|token|secret)\s*[:=]|\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,})\b|[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
@@ -188,10 +181,7 @@ export class MemberMemory {
 	}
 
 	rememberFact(input: MemberFactInput): void {
-		const key = input.key.trim().toLowerCase();
 		const value = input.value.trim();
-		if (!ALLOWED_FACT_KEYS.has(key) || key.length > MAX_FACT_KEY_LENGTH || SENSITIVE_KEY.test(key))
-			throw new Error("invalid_memory_fact_key");
 		if (!value || value.length > MAX_FACT_VALUE_LENGTH || UNSAFE_FACT_VALUE.test(value))
 			throw new Error("invalid_memory_fact_value");
 		const at = finiteTimestamp(input.observedAt);
@@ -213,7 +203,7 @@ export class MemberMemory {
 				value=excluded.value, source_channel_id=excluded.source_channel_id,
 				source_message_id=excluded.source_message_id, observed_at=excluded.observed_at
 			`)
-				.run(input.spaceId, input.memberId, key, value, input.sourceChannelId, input.sourceMessageId, at);
+				.run(input.spaceId, input.memberId, input.key, value, input.sourceChannelId, input.sourceMessageId, at);
 		})();
 	}
 

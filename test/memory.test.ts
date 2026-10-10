@@ -79,16 +79,6 @@ describe("MemberMemory", () => {
 			sourceChannelId: CHANNEL,
 			sourceMessageId: "66666666666666670",
 		});
-		expect(() =>
-			memory.rememberFact({
-				spaceId: GUILD_A,
-				memberId: ALICE,
-				key: "password",
-				value: "secret",
-				sourceChannelId: CHANNEL,
-				sourceMessageId: "66666666666666670",
-			}),
-		).toThrow("invalid_memory_fact_key");
 		db.close();
 	});
 
@@ -171,7 +161,7 @@ describe("MemberMemory", () => {
 	test("scored recall keeps the most relevant facts and falls back to recency when scoring fails", async () => {
 		const { db, memory } = setup();
 		memory.observe(message());
-		const keys = ["language", "role", "project", "timezone", "goal", "note", "interest"];
+		const keys = ["language", "role", "project", "timezone", "goal", "note", "interest"] as const;
 		for (const [index, key] of keys.entries())
 			memory.rememberFact({
 				spaceId: GUILD_A,

@@ -16,7 +16,7 @@ import { KLINE_INTERVALS, KLINE_MAX_LIMIT, KlineError, type KlineInterval } from
 import { runJs } from "../tools/run-js.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
 import { isRawId } from "./ids.ts";
-import type { MemberMemory, RelevanceScorer } from "./memory.ts";
+import { FACT_KEYS, type FactKey, type MemberMemory, type RelevanceScorer } from "./memory.ts";
 import type { HistoryHit, HistoryLine, MessageIndex } from "./message-index.ts";
 import type { SoulStore } from "./soul.ts";
 import {
@@ -165,21 +165,12 @@ export function createRememberMemberFactTool(scope: ToolScope, memberMemory: Mem
 			"Save one safe, stable fact explicitly stated by the author of the current message. You may only save facts about that author, never about another member. Use the narrowest allowed key; do not infer sensitive information. The source message is attached automatically.",
 		parameters: Type.Object(
 			{
-				key: Type.Union([
-					Type.Literal("preference"),
-					Type.Literal("interest"),
-					Type.Literal("role"),
-					Type.Literal("project"),
-					Type.Literal("timezone"),
-					Type.Literal("language"),
-					Type.Literal("goal"),
-					Type.Literal("note"),
-				]),
+				key: Type.Union(FACT_KEYS.map((key) => Type.Literal(key))),
 				value: Type.String({ minLength: 1, maxLength: 300 }),
 			},
 			{ additionalProperties: false },
 		),
-		execute: async (_toolCallId: string, params: { key: string; value: string }) => {
+		execute: async (_toolCallId: string, params: { key: FactKey; value: string }) => {
 			const turn = scope.getTurn();
 			if (!turn) return memoryFailure("no_active_turn");
 			try {
