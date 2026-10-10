@@ -175,8 +175,8 @@ async function main(): Promise<void> {
 		botState.stopRun();
 		db.close();
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
-	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
+	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
+	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
 
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.

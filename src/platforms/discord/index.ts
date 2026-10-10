@@ -24,6 +24,7 @@ import {
 	DISCORD_QUICK_REACTIONS,
 	type DiscordInteraction,
 	type DiscordMessage,
+	DiscordGatewayFatalError,
 	DiscordPlatformTransport,
 	DiscordTransport,
 } from "./transport.ts";
@@ -168,6 +169,15 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 	const { config, memberMemory } = deps;
 	const guilds = config.discord?.guilds ?? [];
 	const clients = new Map<string, DiscordTransport>();
+	let failing = false;
+	/** Reconnecting cannot fix this: tell the operator what to change and shut down with a nonzero exit code. */
+	function failFatally(personaId: string, error: DiscordGatewayFatalError): void {
+		console.error(`[${personaId}] ${error.message}. ${error.hint}`.trim());
+		if (failing) return;
+		failing = true;
+		process.exitCode = 1;
+		process.kill(process.pid, "SIGTERM");
+	}
 	const commandsByClient: Array<{ client: DiscordTransport; persona: Persona }> = [];
 
 	for (const persona of deps.personas) {
@@ -182,8 +192,14 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			token,
 			applicationId: identity.id,
 			allowedChannelIds: personaAllowed,
-			onError: (error) =>
-				log.error("discord", "transport_error", { persona_id: persona.id, error_category: errorCategory(error) }),
+			onError: (error) => {
+				log.error("discord", "transport_error", {
+					persona_id: persona.id,
+					error_category: errorCategory(error),
+					...(error instanceof DiscordGatewayFatalError ? { close_code: error.code } : {}),
+				});
+				if (error instanceof DiscordGatewayFatalError) failFatally(persona.id, error);
+			},
 			onMessage: async (message) => {
 				try {
 					await deps.getCore().handleMessage(await normalizeDiscordMessage(message));
