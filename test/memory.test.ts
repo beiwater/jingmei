@@ -102,6 +102,19 @@ describe("MemberMemory", () => {
 		db.close();
 	});
 
+	test("parses English self birthdays by month name or prefix and rejects impossible dates", () => {
+		const { db, memory } = setup();
+		const birthday = (content: string, id: string) => {
+			memory.observe(message({ content, messageId: id }));
+			return memory.getProfile(GUILD_A, ALICE)?.birthday;
+		};
+		expect(birthday("my birthday is December 25", "66666666666666660")).toEqual({ month: 12, day: 25 });
+		expect(birthday("My birthday is sep 3.", "66666666666666661")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is Smarch 3", "66666666666666662")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is February 30", "66666666666666663")).toEqual({ month: 9, day: 3 });
+		db.close();
+	});
+
 	test("birthday setter, clear, list, forget opt-out, and explicit re-enable", async () => {
 		const { db, memory } = setup();
 		memory.observe(message());

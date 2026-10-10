@@ -540,22 +540,12 @@ function extractOwnPreference(text: string): string | null {
 	return value;
 }
 
+const MONTH_NAMES = Array.from({ length: 12 }, (_, month) =>
+	new Date(Date.UTC(2000, month, 1)).toLocaleString("en", { month: "long", timeZone: "UTC" }).toLowerCase(),
+);
+
 function monthNumber(value: string): number | null {
-	const months = [
-		"january",
-		"february",
-		"march",
-		"april",
-		"may",
-		"june",
-		"july",
-		"august",
-		"september",
-		"october",
-		"november",
-		"december",
-	];
-	const index = months.findIndex((month) => month.startsWith(value.toLowerCase()));
+	const index = MONTH_NAMES.findIndex((month) => month.startsWith(value.toLowerCase()));
 	return index < 0 ? null : index + 1;
 }
 
