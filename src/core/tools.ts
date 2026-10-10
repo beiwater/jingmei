@@ -15,7 +15,6 @@ import { FishAudioTtsError, synthesizeFishAudioTts } from "../tools/fish-tts.ts"
 import { KLINE_INTERVALS, KLINE_MAX_LIMIT, KlineError, type KlineInterval } from "../tools/market-klines.ts";
 import { runJs } from "../tools/run-js.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
-import { isRawId } from "./ids.ts";
 import { FACT_KEYS, type FactKey, type MemberMemory, type RelevanceScorer } from "./memory.ts";
 import type { HistoryHit, HistoryLine, MessageIndex } from "./message-index.ts";
 import type { SoulStore } from "./soul.ts";
@@ -121,9 +120,7 @@ export function createReactionTool(scope: ToolScope, db: Database) {
 			const { transport, spaceId, channelId } = scope;
 			if (!turn) return failure("No active reply turn.", "no_active_turn");
 			if (!transport.isValidReaction(params.emoji)) return failure("Invalid reaction emoji.", "invalid_emoji");
-			if (!transport.addReaction) return failure("Reaction transport is unavailable.", "reaction_unavailable");
 			const target = params.message_id ?? turn.replyToMessageId;
-			if (!isRawId(target)) return failure("Invalid message id.", "invalid_message_id");
 			const row = db
 				.query(`
 				SELECT is_bot FROM messages
@@ -142,7 +139,7 @@ export function createReactionTool(scope: ToolScope, db: Database) {
 				return failure("A reaction was already applied this turn.", "reaction_already_sent");
 			turn.reply = { status: "sending" };
 			try {
-				await transport.addReaction(scope.personaId, channelId, target, params.emoji);
+				await transport.addReaction!(scope.personaId, channelId, target, params.emoji);
 				turn.reply = { status: "sent" };
 			} catch (error) {
 				turn.reply = { status: "idle" };
