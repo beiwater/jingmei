@@ -81,7 +81,7 @@ Full data flow, schema and the run_js threat model: [docs/architecture.md](docs/
 
 You need Linux, [Bun](https://bun.sh/) 1.3 or newer, a working bubblewrap (the `run_js` sandbox; startup fails without it, see [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)), at least one Discord or Telegram bot, and credentials for a model provider. Video frames additionally need `ffmpeg` (including `ffprobe`) on the host; without it everything else works and videos become a `[视频]` placeholder.
 
-macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. The first startup downloads the default Chinese embedding model (about 96 MB) into `data/models` (under your custom `dataDir` if set), requiring network access; later starts reuse that cache. The vector part of message search (related counts, semantic search) always uses this model; topics share it when `events` is enabled.
+macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. The first startup downloads the default Chinese embedding model (about 96 MB) into `data/models` (under your custom `dataDir` if set), requiring network access; later starts reuse that cache; neither is needed with `features.history` set to `false`. The vector part of message search (related counts, semantic search) always uses this model; topics share it when `events` is enabled.
 
 ```bash
 git clone https://github.com/beiwater/jingmei.git
@@ -180,6 +180,22 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 "textImage": { "enabled": true, "thresholdChars": 300 }
 ```
 
+**Feature switches** (`features`): everything is on by default. Each of these can be turned off alone, which removes the tools and prompt lines and stops loading dependencies nothing uses.
+
+```json
+"features": { "history": false, "memory": false, "soul": false, "search": false, "audit": false }
+```
+
+| Switch | When `false` |
+|---|---|
+| `history` | No message index, no `related_messages` / `search_history`, no "（相关 N 条）" on context lines; the ~96 MB embedding model is not downloaded and fastembed and sqlite-vec are not loaded. Combining it with `events` is a configuration error |
+| `memory` | No `remember_member_fact` / `recall_member_memory`, and no passive collection of member profiles, preferences, relationships or birthdays stated in chat. Kept: `/memory` and `/forget` still show and delete existing data, and `/birthday` still records a birthday by hand (which `celebrations` birthday greetings rely on) |
+| `soul` | No `update_soul`, and stored private soul notes are no longer injected into the system prompt; stored data stays in the database |
+| `search` | No `search_web` and no prefetched search results; `DEEPSEEK_API_KEY` remains the default model's credential |
+| `audit` | No natural-tone audit of final text (the leak-marker check still runs); reply decisions are controlled separately by `jev.replyDecision` |
+
+`run_js` is always on. Switches are read once at startup; restart after changing them.
+
 **Jev** (quick reactions, memory ranking; participation decisions use it too): remote Jev needs `TYPESAFE_API_KEY`; omit `apiKeyEnv` to use only the in-process wrapper, which then requires `DEEPSEEK_API_KEY` (or a `localJev` section), otherwise startup fails with a configuration error. See [Jev](#jev).
 
 ```json
@@ -267,13 +283,14 @@ There are exactly two sources: `jingmei.config.json` for settings and `.env` for
 | `imageGeneration` | Optional `{ model }`: the Antigravity model ID used for drawing, default `gemini-3.1-flash-image`. The drawing tool is enabled only when the `antigravity` provider is signed in, see [Drawing](#drawing) |
 | `kline` | Optional `{ enabled }`: `enabled` defaults to `false`, see [Candlestick charts](#candlestick-charts) |
 | `textImage` | Optional `{ enabled, thresholdChars }`: `enabled` defaults to `false`; `thresholdChars` is the length limit of a text reply (integer 50–8000, default `300`), see [Long text as an image](#long-text-as-an-image) |
+| `features` | Optional; boolean switches `history`, `memory`, `soul`, `search`, `audit`, all `true` by default; see [Optional features](#optional-features) |
 | `jev` | Optional, see [Jev](#jev) |
 | `localJev` | Optional in-process LLM→Jev wrapper: required `baseUrl` (http(s)) and `model`, optional `apiKeyEnv` (omit for unauthenticated local services). Requires an OpenAI-compatible endpoint with logprobs. If the section is absent and `DEEPSEEK_API_KEY` resolves, defaults to DeepSeek / `deepseek-flash` |
 | `events` | Optional; presence enables topics. Required `summaryModel`: `"provider/model"` (first slash splits; model and authentication checked at startup). `embeddingModel` defaults to `fast-bge-small-zh-v1.5` (512 dimensions), and must be supported by fastembed; it also supplies the message-search vectors (without topics, message search uses the default model). Requires a remote Jev or local LLM decision client |
 | `celebrations[]` | Optional greeting targets, see below |
 | `personas[]` | Characters, at least one |
 
-Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
+Web search has no section of its own: it is on whenever `DEEPSEEK_API_KEY` is present, and `features.search: false` turns it off.
 
 ### `personas[]`
 

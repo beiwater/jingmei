@@ -10,7 +10,7 @@
 - 可选：`ffmpeg` 与 `ffprobe`（Debian/Ubuntu：`sudo apt install ffmpeg`）。缺少任一工具时启动日志有一条 `video_frames_unavailable` 警告，视频只以 `[视频]` 占位进入上下文，其他功能不受影响；安装后重启即可。
 - 可选：开启 `textImage`（长文转图）需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会联网下载并缓存两个固定版本的 Typst 包。字体缺失时图里的汉字会变成方框；启动时检测到会记一条 `text_image_font_missing` 警告（功能仍保持开启），装好字体后重启即可。
 - 可选：开启 `kline`（K 线图）不需要额外下载，只需出站访问 `data-api.binance.vision`，并有系统字体 DejaVu Sans（Debian/Ubuntu：`fonts-dejavu-core`，通常已安装）；试渲染失败会记 `kline_unavailable` 并关闭该功能。
-- 需要可加载 sqlite-vec 的 SQLite（消息检索向量总是需要；macOS 开发机执行 `brew install sqlite`）。首次启动下载约 96 MB 的默认 embedding 模型到 `${dataDir}/models`，允许外网下载并保留缓存；更换 `events.embeddingModel` 时需相应模型资源。可选话题层 `events`：`summaryModel` 必须已在 Pi 中配置且认证，决策来源必须是远程 Jev 或 `localJev`（默认可用 `DEEPSEEK_API_KEY` 的 DeepSeek 包装器）。
+- `features.history` 开启（默认）时需要可加载 sqlite-vec 的 SQLite（macOS 开发机执行 `brew install sqlite`），首次启动下载约 96 MB 的默认 embedding 模型到 `${dataDir}/models`，允许外网下载并保留缓存；更换 `events.embeddingModel` 时需相应模型资源。设 `features.history: false` 则两者都不需要。可选话题层 `events`：`summaryModel` 必须已在 Pi 中配置且认证，决策来源必须是远程 Jev 或 `localJev`（默认可用 `DEEPSEEK_API_KEY` 的 DeepSeek 包装器）。
 - 按 [README](../README.md#快速开始) 准备 `jingmei.config.json`、`.env` 和模型凭据。
 
 ## run_js 操作系统沙箱
@@ -100,7 +100,7 @@ systemctl --user restart pi-discord-agent
 | `jingmei.db` | SQLite：消息、消息检索索引（关键词与向量）、话题/参与者/向量、会话索引与对话段状态、带图消息的图片引用、成员记忆、soul、祝福发送记录、运行记录与暂停状态（表结构见 [architecture.md](architecture.md#sqlite)） |
 | `sessions/<personaId>/` | Pi 会话文件；每个角色 × 空间 × 频道的当前对话段一个，开新段时新建文件，旧文件保留在磁盘上 |
 | `media/` | 进入上下文的图片与视频帧（`img-*.jpg` / `img-*.png`） |
-| `models/` | fastembed 模型下载缓存（消息检索向量与话题共用，默认模型约 96 MB） |
+| `models/` | fastembed 模型下载缓存（消息检索向量与话题共用，默认模型约 96 MB；`features.history` 关闭时不创建） |
 | `pi-agent/models.json` | 启动时生成的 DeepSeek 模型目录，不含密钥 |
 | `pi-agent/auth.json` | `bun run jingmei login` 保存的 OAuth 凭据（权限 0600，勿入库） |
 

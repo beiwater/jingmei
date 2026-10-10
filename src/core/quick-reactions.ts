@@ -6,6 +6,8 @@ export interface JevIntegration {
 	quickReactions: boolean;
 	memoryScoring: boolean;
 	replyDecision: boolean;
+	/** Defaults to on; false skips the final-text audit (leak patterns are still checked). */
+	audit?: boolean;
 	/** Minimum reply-worthiness probability for an ungated HMAC-sampled candidate. */
 	replyThreshold: number;
 	/** Minimum max(strongEmotion, funny) for reacting to an unaddressed message. */

@@ -52,6 +52,11 @@ export interface JevSettings {
 	emojis?: Partial<Record<Platform, Record<string, string>>>;
 }
 
+export const FEATURE_NAMES = ["history", "memory", "soul", "search", "audit"] as const;
+export type FeatureName = (typeof FEATURE_NAMES)[number];
+/** Install-time switches for optional capabilities; all default to on. */
+export type Features = Record<FeatureName, boolean>;
+
 export interface AppConfig {
 	rootDir: string;
 	dataDir: string;
@@ -66,7 +71,8 @@ export interface AppConfig {
 	textImage?: { thresholdChars: number };
 	/** Present when `kline.enabled`: personas may send live Binance candlestick charts. */
 	kline?: Record<string, never>;
-	/** DEEPSEEK_API_KEY, used by server-side web search. */
+	features: Features;
+	/** DEEPSEEK_API_KEY: server-side web search (unless `features.search` is off) and the default model's credential. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
 	visionModel?: { provider: string; model: string };
@@ -610,6 +616,18 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		else if (input.kline.enabled === true) kline = {};
 	}
 
+	const features = Object.fromEntries(FEATURE_NAMES.map((name) => [name, true])) as Features;
+	if (input.features !== undefined) {
+		if (!isObject(input.features)) errors.push("features must be an object");
+		else
+			for (const [name, value] of Object.entries(input.features)) {
+				if (!(FEATURE_NAMES as readonly string[]).includes(name))
+					errors.push(`features.${name} is not a feature; expected ${FEATURE_NAMES.join(", ")}`);
+				else if (typeof value !== "boolean") errors.push(`features.${name} must be a boolean`);
+				else features[name as FeatureName] = value;
+			}
+	}
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -699,6 +717,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			if (summaryModel && typeof embeddingModel === "string") events = { summaryModel, embeddingModel };
 		}
 		if (!jev?.apiKey && !localJev) errors.push("events requires a Jev API key or a localJev LLM");
+		if (!features.history) errors.push("events requires features.history, which supplies the embedding index");
 	}
 
 	if (errors.length > 0) throw new ConfigError(errors);
@@ -709,6 +728,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(discord ? { discord } : {}),
 		...(telegram ? { telegram } : {}),
 		...(voice ? { voice } : {}),
+		features,
 		imageModel,
 		...(textImage ? { textImage } : {}),
 		...(kline ? { kline } : {}),

@@ -71,6 +71,8 @@ async function main(): Promise<void> {
 	if (config.events) assertBotModelConfigured({ ...config.events.summaryModel, purpose: "events" }, modelRuntime);
 
 	const jev = config.jev;
+	// The key stays in the environment as the default model's credential; `features.search` only gates the tool.
+	const searchApiKey = config.features.search ? config.webSearchApiKey : undefined;
 	const remoteDecision = jev?.apiKey
 		? createJevClient({ endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
 		: undefined;
@@ -78,21 +80,26 @@ async function main(): Promise<void> {
 	const decision =
 		remoteDecision && localDecision ? withFallback(remoteDecision, localDecision) : (remoteDecision ?? localDecision);
 	// The message index always has vectors; topic tracking, when enabled, shares the same local model.
-	const embedder = await createFastEmbedder({
-		model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
-		cacheDir: join(config.dataDir, "models"),
-	});
+	// `features.history` off skips the model download, sqlite-vec and the index; config rejects `events` without it.
 	let events: EventTracker | undefined;
-	if (config.events) {
-		events = new EventTracker({
-			db,
-			decision: decision!,
-			embedder,
-			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
+	let messageIndex: MessageIndex | undefined;
+	if (config.features.history) {
+		const embedder = await createFastEmbedder({
+			model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
+			cacheDir: join(config.dataDir, "models"),
 		});
+		if (config.events) {
+			events = new EventTracker({
+				db,
+				decision: decision!,
+				embedder,
+				summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
+			});
+		}
+		const index = new MessageIndex({ db, embedder });
+		memberMemory.onForget((spaceId, userId) => index.forgetAuthor(spaceId, userId));
+		messageIndex = index;
 	}
-	const messageIndex = new MessageIndex({ db, embedder });
-	memberMemory.onForget((spaceId, userId) => messageIndex.forgetAuthor(spaceId, userId));
 	// Reuses the pi-provider-antigravity login; Pi refreshes the token under its auth.json lock.
 	const imageGenerator: ImageGenerator | undefined = modelRuntime.hasConfiguredAuth(ANTIGRAVITY_PROVIDER_ID)
 		? async (prompt, aspectRatio) => {
@@ -132,11 +139,13 @@ async function main(): Promise<void> {
 		personas,
 		transports,
 		modelRuntime,
-		memberMemory,
-		soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }),
-		messageIndex,
+		...(config.features.memory ? { memberMemory } : {}),
+		...(config.features.soul
+			? { soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }) }
+			: {}),
+		...(messageIndex ? { messageIndex } : {}),
 		...(events ? { events } : {}),
-		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
+		...(searchApiKey ? { webSearchApiKey: searchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
 		...(imageGenerator ? { imageGenerator } : {}),
 		...(textImage ? { textImage } : {}),
@@ -149,6 +158,7 @@ async function main(): Promise<void> {
 						quickReactions: jev?.quickReactions ?? false,
 						memoryScoring: jev?.memoryScoring ?? false,
 						replyDecision: jev?.replyDecision ?? true,
+						audit: config.features.audit,
 						replyThreshold: jev?.replyThreshold ?? 0.7,
 						threshold: jev?.threshold ?? 0.8,
 						minIntervalMs: jev?.minIntervalMs ?? 60_000,
@@ -176,7 +186,7 @@ async function main(): Promise<void> {
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
 		await core.close();
 		await events?.idle();
-		await messageIndex.idle();
+		await messageIndex?.idle();
 		clearInterval(heartbeat);
 		botState.stopRun();
 		db.close();
@@ -198,7 +208,11 @@ async function main(): Promise<void> {
 	log.info("core", "ready", {
 		platforms: [...transports.keys()].join(","),
 		persona_count: personas.length,
-		search_enabled: !!config.webSearchApiKey,
+		search_enabled: !!searchApiKey,
+		history_enabled: !!messageIndex,
+		memory_enabled: config.features.memory,
+		soul_enabled: config.features.soul,
+		audit_enabled: config.features.audit && !!decision,
 		voice_enabled: !!config.voice,
 		image_generation_enabled: !!imageGenerator,
 		text_image_enabled: !!textImage,

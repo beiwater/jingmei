@@ -81,7 +81,7 @@ flowchart LR
 
 需要 Linux、[Bun](https://bun.sh/) 1.3 以上、可用的 bubblewrap（`run_js` 沙箱，缺少则启动报错，见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)）、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
 
-macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。消息检索的向量部分（相关条数、语义检索）总是使用这个模型；开启 `events` 时话题也共用它。
+macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。`features.history` 设为 `false` 时两者都不需要。消息检索的向量部分（相关条数、语义检索）总是使用这个模型；开启 `events` 时话题也共用它。
 
 ```bash
 git clone https://github.com/beiwater/jingmei.git
@@ -180,6 +180,22 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 "textImage": { "enabled": true, "thresholdChars": 300 }
 ```
 
+**功能开关**（`features`）：默认全部开启。下面几项可以单独关掉，工具和提示词随之去掉，用不到的依赖也不再加载。
+
+```json
+"features": { "history": false, "memory": false, "soul": false, "search": false, "audit": false }
+```
+
+| 开关 | 关闭后 |
+|---|---|
+| `history` | 不建消息索引，没有 `related_messages` / `search_history`，上下文行不再带“（相关 N 条）”；不下载约 96 MB 的 embedding 模型，不加载 fastembed 与 sqlite-vec。与 `events` 同时配置会报配置错误 |
+| `memory` | 没有 `remember_member_fact` / `recall_member_memory`，也不再被动收集成员档案、偏好、关系和聊天里自述的生日。保留：`/memory`、`/forget` 仍可查看和删除已有数据，`/birthday` 仍可手动登记生日（`celebrations` 的生日祝福靠它） |
+| `soul` | 没有 `update_soul`，不再把已存的私人 soul 备忘注入 system prompt；已存数据保留在数据库中 |
+| `search` | 没有 `search_web`，也不预取搜索结果；`DEEPSEEK_API_KEY` 仍是默认模型的凭据 |
+| `audit` | 不再对最终文字做自然度审查（泄漏标记检查仍在）；接话判断由 `jev.replyDecision` 单独控制 |
+
+`run_js` 始终启用。开关在启动时读取一次，改动后需重启。
+
 **Jev**（秒回表情、记忆排序，接话判断也会使用）：远程 Jev 需要 `TYPESAFE_API_KEY`；省略 `apiKeyEnv` 则只用进程内包装器，此时必须有 `DEEPSEEK_API_KEY`（或写 `localJev`），否则启动报配置错误。详见 [Jev](#jev)。
 
 ```json
@@ -267,13 +283,14 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `imageGeneration` | 可选，`{ model }`：画图用的 Antigravity 模型 ID，默认 `gemini-3.1-flash-image`。只有登录了 `antigravity` provider 时画图工具才会启用，见[画图](#画图) |
 | `kline` | 可选，`{ enabled }`：`enabled` 默认 `false`，见[K 线图](#k-线图) |
 | `textImage` | 可选，`{ enabled, thresholdChars }`：`enabled` 默认 `false`；`thresholdChars` 是文字回复的字数上限（50–8000 的整数，默认 `300`），见[长文转图](#长文转图) |
+| `features` | 可选，`history`、`memory`、`soul`、`search`、`audit` 五个布尔开关，默认全为 `true`，见[可选功能](#可选功能) |
 | `jev` | 可选，见 [Jev](#jev) |
 | `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
 | `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型，同时用于消息检索向量（不开话题时消息检索用默认模型）。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
 | `celebrations[]` | 可选，节日与生日祝福目标，见下 |
 | `personas[]` | 角色列表，至少一个 |
 
-联网搜索没有配置项：环境里有 `DEEPSEEK_API_KEY` 就启用。
+联网搜索没有单独的配置段：环境里有 `DEEPSEEK_API_KEY` 就启用，可用 `features.search: false` 关闭。
 
 ### `personas[]`
 
