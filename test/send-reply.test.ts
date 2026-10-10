@@ -13,6 +13,7 @@ import {
 import type { PlatformTransport } from "../src/core/types.ts";
 import { TextImageError } from "../src/media/text-image.ts";
 import { AntigravityImageError } from "../src/tools/antigravity-image.ts";
+import { KlineError } from "../src/tools/market-klines.ts";
 
 type Send = Parameters<PlatformTransport["sendMessage"]>[0];
 
@@ -395,6 +396,58 @@ describe("send_reply", () => {
 		const bare = setup({ sources: { textImage: { render: rendered, thresholdChars: 300 } } });
 		await bare.run([{ type: "text_image", markdown: "$$$$" }]);
 		expect([...f.recorded, ...bare.recorded].map((row) => row.content)).toEqual(["📄 勾股定理 的证明", "📄"]);
+	});
+
+	test("a kline part is drawn from the live renderer and stored under its data-derived caption", async () => {
+		const requests: unknown[] = [];
+		const kline: NonNullable<ReplySources["kline"]> = async (request) => {
+			requests.push(request);
+			return { data: new Uint8Array([3]), contentType: "image/png", caption: "📈 BTCUSDT 日线 · 最新 100.00" };
+		};
+		const f = setup({ sources: { kline } });
+		const result = await f.run([
+			{ type: "kline_image", symbol: "BTCUSDT", interval: "1d", limit: 30 },
+			{ type: "text", text: "冲冲冲" },
+		]);
+		expect(result).toMatchObject({ terminate: true });
+		expect(requests).toEqual([{ symbol: "BTCUSDT", interval: "1d", limit: 30 }]);
+		expect(f.sends[0]).toMatchObject({
+			content: "📈 BTCUSDT 日线 · 最新 100.00",
+			attachments: [{ name: "kline.png", contentType: "image/png" }],
+			replyToMessageId: "42",
+		});
+		expect(f.recorded[0]?.content).toBe("📈 BTCUSDT 日线 · 最新 100.00");
+		// Only the model's own words are audited; the chart's numbers come from the market feed.
+		expect(f.audits).toEqual(["冲冲冲"]);
+	});
+
+	test("a kline part is offered only when enabled, takes known intervals only, and at most once", async () => {
+		const call = (tool: { name: string; description: string; parameters: unknown }, parts: unknown[]) =>
+			validateToolArguments(tool as Tool, { type: "toolCall", id: "call", name: tool.name, arguments: { parts } });
+		const part = { type: "kline_image", symbol: "BTCUSDT", interval: "1d" };
+		expect(() => call(setup().tool, [part])).toThrow();
+		const f = setup({
+			sources: {
+				kline: async () => {
+					throw new KlineError("fetch_failed");
+				},
+			},
+		});
+		expect(call(f.tool, [part]).parts).toHaveLength(1);
+		for (const bad of [
+			{ ...part, interval: "3m" },
+			{ ...part, limit: 5000 },
+			{ ...part, symbol: "BTC" },
+		])
+			expect(() => call(f.tool, [bad])).toThrow();
+		expect(await f.run([part as ReplyPart, part as ReplyPart])).toMatchObject({ details: { error: "too_many_parts" } });
+
+		// A failed fetch sends nothing and reports the stable code so the model can fall back to text.
+		const failed = await f.run([part as ReplyPart]);
+		expect(failed).toMatchObject({ isError: true, details: { error: "fetch_failed" } });
+		expect(JSON.stringify(failed.content)).toContain("Part 1 (kline_image) failed: fetch_failed");
+		expect(f.sends).toEqual([]);
+		expect(f.turn.reply).toEqual({ status: "idle" });
 	});
 
 	test("media-only replies skip the naturalness audit", async () => {

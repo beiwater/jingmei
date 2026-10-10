@@ -33,6 +33,8 @@ export interface PromptTools {
 	search: boolean;
 	voice: boolean;
 	image: boolean;
+	/** `send_reply` may carry a live candlestick chart. */
+	kline: boolean;
 	events: boolean;
 	history: boolean;
 	/** Text longer than this many characters must go out as a `send_reply` text image. */
@@ -104,6 +106,11 @@ export function buildSystemPrompt(
 		...(tools.image
 			? [
 					"- send_reply 可以发 image 部分画一张新图。群友请你画画、生成图片时使用：prompt 用英文写清主体、风格和构图；需要解释时在后面加 text 部分。生成要十几秒，失败时用文字说明。",
+				]
+			: []),
+		...(tools.kline
+			? [
+					"- send_reply 可以发 kline_image 部分：Binance 现货交易对的实时 K 线图（含成交量），数据由系统拉取。群友想看某个币的 K 线、走势图、行情图时使用；symbol 写成 BTCUSDT 这样的交易对，interval 按问题选（看短线用 15m/1h，看趋势用 1d/1w）。不要自己编价格；需要点评时在后面加 text 部分。拉取失败时用文字说明。",
 				]
 			: []),
 		...(tools.textImageChars

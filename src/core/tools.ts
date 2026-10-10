@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
+import type { KlineRenderer } from "../media/kline-image.ts";
 import { TEXT_IMAGE_MAX_CHARS, TextImageError, type TextImageRenderer } from "../media/text-image.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import {
@@ -11,6 +12,7 @@ import {
 	type ImageAspectRatio,
 } from "../tools/antigravity-image.ts";
 import { FishAudioTtsError, synthesizeFishAudioTts } from "../tools/fish-tts.ts";
+import { KLINE_INTERVALS, KLINE_MAX_LIMIT, KlineError, type KlineInterval } from "../tools/market-klines.ts";
 import { runJs } from "../tools/run-js.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
 import { isRawId } from "./ids.ts";
@@ -500,6 +502,7 @@ export interface ReplySources {
 	reactionImages?: { catalog?: ReactionImageCatalog };
 	generateImage?: ImageGenerator;
 	textImage?: { render: TextImageRenderer; thresholdChars: number };
+	kline?: KlineRenderer;
 }
 
 export type ReplyPart =
@@ -507,7 +510,8 @@ export type ReplyPart =
 	| { type: "voice"; text: string }
 	| { type: "image"; prompt: string; aspect_ratio?: ImageAspectRatio; caption?: string }
 	| { type: "reaction_image"; asset_id: string; caption?: string }
-	| { type: "text_image"; markdown: string; caption?: string };
+	| { type: "text_image"; markdown: string; caption?: string }
+	| { type: "kline_image"; symbol: string; interval: KlineInterval; limit?: number };
 
 /** One reply holds at most this many messages; every kind but text at most once (each is slow or loud). */
 const REPLY_MAX_PARTS = 4;
@@ -517,6 +521,7 @@ const REPLY_PART_LIMITS: Record<ReplyPart["type"], number> = {
 	image: 1,
 	reaction_image: 1,
 	text_image: 1,
+	kline_image: 1,
 };
 /** One chat bubble; longer text belongs in a text image (or is split by the platform when that is off). */
 const TEXT_PART_MAX_CHARS = 2000;
@@ -552,6 +557,11 @@ function sendReplyDescription(sources: ReplySources): string {
 		...(sources.textImage
 			? [
 					`- text_image (at most 1): ${TEXT_IMAGE_PART_DESCRIPTION}${sources.generateImage ? " New pictures inside it (up to 2, about 15 s each): a fenced block with language `image` holding an English description of subject, style and composition is replaced by a freshly drawn picture." : ""}`,
+				]
+			: []),
+		...(sources.kline
+			? [
+					`- kline_image (at most 1): a candlestick chart with volume of a Binance spot pair, drawn from live market data (the numbers are fetched, never written by you): \`symbol\` like BTCUSDT or ETHUSDT, \`interval\` one of ${KLINE_INTERVALS.join(", ")}, optional \`limit\` of candles (default 60, at most ${KLINE_MAX_LIMIT}). The caption states the latest price and the change over the window; add a text part for commentary. Only for crypto pairs listed on Binance.`,
 				]
 			: []),
 		"Slow parts are prepared together before anything is sent; if any part cannot be prepared, nothing is sent.",
@@ -607,6 +617,19 @@ function replyPartSchema(sources: ReplySources) {
 					),
 				]
 			: []),
+		...(sources.kline
+			? [
+					Type.Object(
+						{
+							type: Type.Literal("kline_image"),
+							symbol: Type.String({ minLength: 5, maxLength: 24 }),
+							interval: Type.Union(KLINE_INTERVALS.map((interval) => Type.Literal(interval))),
+							limit: Type.Optional(Type.Integer({ minimum: 10, maximum: KLINE_MAX_LIMIT })),
+						},
+						strict,
+					),
+				]
+			: []),
 	];
 	return variants.length === 1 ? variants[0]! : Type.Union(variants);
 }
@@ -618,7 +641,10 @@ interface PreparedPart {
 }
 
 function partError(error: unknown): string {
-	return error instanceof TextImageError || error instanceof AntigravityImageError || error instanceof FishAudioTtsError
+	return error instanceof TextImageError ||
+		error instanceof AntigravityImageError ||
+		error instanceof FishAudioTtsError ||
+		error instanceof KlineError
 		? error.code
 		: "prepare_failed";
 }
@@ -629,7 +655,7 @@ function partError(error: unknown): string {
  * sent strictly in order and a send failure stops the rest without resending what already went out.
  */
 export function createSendReplyTool(scope: ToolScope, sources: ReplySources) {
-	const { voice, generateImage, textImage } = sources;
+	const { voice, generateImage, textImage, kline } = sources;
 	const generatePicture = generateImage
 		? async (prompt: string) => (await generateImage(prompt, "4:3")).data
 		: undefined;
@@ -670,6 +696,13 @@ export function createSendReplyTool(scope: ToolScope, sources: ReplySources) {
 				return {
 					content: textImageCaption(part.markdown, part.caption),
 					attachments: [{ name: "text.png", data: image.data, contentType: image.contentType }],
+				};
+			}
+			case "kline_image": {
+				const image = await kline!({ symbol: part.symbol, interval: part.interval, limit: part.limit });
+				return {
+					content: image.caption,
+					attachments: [{ name: "kline.png", data: image.data, contentType: image.contentType }],
 				};
 			}
 		}
