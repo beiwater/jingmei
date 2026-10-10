@@ -125,9 +125,6 @@ export class EventTracker {
 		this.now = options.now ?? Date.now;
 		ensureMessagesTable(this.db);
 		loadVectorExtension(this.db);
-		if (!Number.isInteger(this.embedder.dimensions) || this.embedder.dimensions <= 0) {
-			throw new Error("事件向量维度必须为正整数");
-		}
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS events (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -298,8 +295,7 @@ export class EventTracker {
 			)
 			.get(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS);
 		if (!closed) return [];
-		const [vector] = await this.embedder.embed([message.content]);
-		if (!vector) throw new Error("事件召回未返回向量");
+		const vector = (await this.embedder.embed([message.content]))[0]!;
 		const matches = this.db
 			.query(
 				"SELECT rowid, distance FROM event_vectors WHERE embedding MATCH ? AND k = 2 AND rowid IN (SELECT id FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at < ?) ORDER BY distance",
@@ -348,8 +344,7 @@ export class EventTracker {
 			.query("UPDATE events SET title = ?, description = ? WHERE id = ?")
 			.run(summary.title, summary.description, eventId);
 		// 向量只依赖摘要，先写入：参与度打分失败不应让该事件无法被召回。
-		const [vector] = await this.embedder.embed([`${summary.title}\n${summary.description}`]);
-		if (!vector) throw new Error("事件摘要未返回向量");
+		const vector = (await this.embedder.embed([`${summary.title}\n${summary.description}`]))[0]!;
 		this.db.transaction(() => {
 			this.db.query("DELETE FROM event_vectors WHERE rowid = ?").run(eventId);
 			this.db.query("INSERT INTO event_vectors(rowid, embedding) VALUES (?, ?)").run(eventId, vector);
