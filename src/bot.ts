@@ -74,7 +74,7 @@ async function main(): Promise<void> {
 	// The key stays in the environment as the default model's credential; `features.search` only gates the tool.
 	const searchApiKey = config.features.search ? config.webSearchApiKey : undefined;
 	const remoteDecision = jev?.apiKey
-		? createJevClient({ endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
+		? createJevClient({ provider: jev.provider, endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
 		: undefined;
 	const localDecision = config.localJev ? createLocalJevClient(config.localJev) : undefined;
 	const decision =

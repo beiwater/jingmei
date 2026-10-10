@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { validateConfig } from "../src/config.ts";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation, type ConversationOptions } from "../src/core/conversation.ts";
-import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
+import { AUDIT_GATE_MESSAGE_TYPE, WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import { useExtensibleSqlite } from "../src/core/db.ts";
 import { EventTracker } from "../src/core/events.ts";
 import type { InboundMessage, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
@@ -39,6 +39,7 @@ function fixture(
 		replyDecision?: boolean;
 		participation?: JevClient["decideParticipation"];
 		audit?: JevClient["auditNatural"];
+		classify?: JevClient["classifyAuditIssue"];
 		typing?: { refreshMs: number; maxMs: number };
 		quickReactions?: boolean;
 		textImage?: NonNullable<ConversationOptions["textImage"]>;
@@ -126,6 +127,7 @@ function fixture(
 	let decisions = 0;
 	const participationRequests: Array<Parameters<JevClient["decideParticipation"]>[0]> = [];
 	const auditRequests: Array<Parameters<JevClient["auditNatural"]>[0]> = [];
+	const classifyRequests: Array<Parameters<JevClient["classifyAuditIssue"]>[0]> = [];
 	const quickReactionRequests: Array<Parameters<JevClient["decideQuickReaction"]>[0]> = [];
 	const decision: JevClient = {
 		chooseEvent: async () => {
@@ -145,6 +147,10 @@ function fixture(
 		auditNatural: async (input) => {
 			auditRequests.push(input);
 			return options.audit?.(input) ?? 1;
+		},
+		classifyAuditIssue: async (input) => {
+			classifyRequests.push(input);
+			return options.classify?.(input) ?? "other";
 		},
 	};
 	const events = options.events
@@ -232,6 +238,7 @@ function fixture(
 		quickReactionRequests,
 		restart,
 		auditRequests,
+		classifyRequests,
 		typingAt,
 		calls: () => calls,
 		decisions: () => decisions,
@@ -406,6 +413,7 @@ test("a persona catalog image is sent with its default caption and ends the turn
 	});
 });
 
+const WITHHELD_NOTICE = "(系统提示：说了不该说的东西被捂嘴了)";
 const LONG_TEXT = "这是一段很长的回复。".repeat(40);
 const textImage = (render?: NonNullable<ConversationOptions["textImage"]>["render"]) => ({
 	thresholdChars: 300,
@@ -483,19 +491,53 @@ test("a multi-part reply is one model call; the text beside the tool call is not
 	]);
 });
 
-test("a send_reply the audit withholds sends nothing, not even the text beside the call", async () => {
+test("a send_reply the audit withholds twice sends only the notice, not even the text beside the call", async () => {
 	const f = fixture({ jev: true, audit: async () => 0 });
-	f.script.push(sendReply(f, [{ type: "text", text: "我先列个回答计划" }], "顺便说一句"));
-	expect((await f.send()).responseMessageId).toBeUndefined();
-	expect(f.calls()).toBe(1);
-	expect(f.sends).toEqual([]);
-	expect(f.auditRequests.map((request) => request.reply)).toEqual(["我先列个回答计划"]);
-	expect(f.logs).toContainEqual(
+	f.script.push(
+		sendReply(f, [{ type: "text", text: "我先列个回答计划" }], "顺便说一句"),
+		sendReply(f, [{ type: "text", text: "我再列个回答计划" }]),
+	);
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.calls()).toBe(2);
+	expect(f.sends.map((send) => [send.content, send.replyToMessageId])).toEqual([[WITHHELD_NOTICE, "10"]]);
+	expect(f.auditRequests.map((request) => request.reply)).toEqual(["我先列个回答计划", "我再列个回答计划"]);
+	expect(f.classifyRequests).toHaveLength(1);
+	expect(f.logs.filter((record) => record.event === "reply_rewrite" || record.event === "reply_withheld")).toEqual([
+		expect.objectContaining({
+			event: "reply_rewrite",
+			fields: { persona_id: "luna", platform: "telegram", reason: "audit" },
+		}),
 		expect.objectContaining({
 			event: "reply_withheld",
 			fields: { persona_id: "luna", platform: "telegram", reason: "audit" },
 		}),
+	]);
+});
+
+test("a rejected text reply is rewritten once with Jev's reason and the rewrite is sent", async () => {
+	const f = fixture({
+		jev: true,
+		audit: async ({ reply }) => (reply.startsWith("三条问") ? 0.1 : 0.9),
+		classify: async () => "recap",
+	});
+	f.script.push(
+		f.reply([{ type: "text", text: "三条问时间线，我应该按日期复述" }]),
+		f.reply([{ type: "text", text: "你问的时间线大致是这样" }]),
 	);
+	const session = await f.seam.getSession(f.persona, f.space, "222");
+	const custom = spyOn(session, "sendCustomMessage");
+	cleanups.push(() => {
+		custom.mockRestore();
+	});
+	expect((await f.send()).responseMessageId).toBe("1001");
+	expect(f.calls()).toBe(2);
+	expect(f.sends.map((send) => send.content)).toEqual(["你问的时间线大致是这样"]);
+	expect(f.classifyRequests.map((request) => request.reply)).toEqual(["三条问时间线，我应该按日期复述"]);
+	expect(custom).toHaveBeenCalledWith(
+		expect.objectContaining({ customType: AUDIT_GATE_MESSAGE_TYPE, display: false }),
+		{ triggerTurn: true },
+	);
+	expect(f.logs.some((record) => record.event === "reply_withheld")).toBe(false);
 });
 
 for (const mode of ["tool", "explicit"] as const) {
@@ -825,19 +867,20 @@ test("explicit mention, reply and name bypass participation decisions and gates"
 	}
 });
 
-test("deterministic event leaks are withheld before Jev and persisted as non-triggering hidden markers", async () => {
-	for (const text of ["oops §E7 leaked", "oops [当前事件 leaked"]) {
+test("deterministic event leaks are rewritten, then withheld before Jev and persisted as non-triggering hidden markers", async () => {
+	for (const text of ["oops §E7 leaked", "oops [当前事件 leaked", "oops [本轮要回应的消息] leaked"]) {
 		const f = fixture({ jev: true, voice: true });
 		const session = await f.seam.getSession(f.persona, f.space, "222");
 		const custom = spyOn(session, "sendCustomMessage");
 		cleanups.push(() => {
 			custom.mockRestore();
 		});
-		f.script.push(f.reply([{ type: "text", text }]));
+		f.script.push(f.reply([{ type: "text", text }]), f.reply([{ type: "text", text }]));
 		const dispatch = await f.send({ content: "Luna 用语音回复我" });
-		expect(dispatch.responseMessageId).toBeUndefined();
-		expect(f.sends).toEqual([]);
+		expect(dispatch.responseMessageId).toBe("1001");
+		expect(f.sends.map((send) => send.content)).toEqual([WITHHELD_NOTICE]);
 		expect(f.auditRequests).toEqual([]);
+		expect(f.classifyRequests).toEqual([]);
 		expect(custom).toHaveBeenLastCalledWith(
 			{ customType: WITHHELD_MESSAGE_TYPE, content: "", display: false },
 			{ triggerTurn: false },
@@ -855,10 +898,10 @@ test("natural audit withholds below one half and accepts the exact boundary", as
 	for (const score of [0.499, 0.5]) {
 		const f = fixture({ jev: true, audit: async () => score });
 		const dispatch = await f.send();
-		expect(f.auditRequests).toHaveLength(1);
+		expect(f.auditRequests).toHaveLength(score < 0.5 ? 2 : 1);
 		expect(f.auditRequests[0]).toMatchObject({ reply: "hello", message: "hi Luna" });
-		expect(f.sends).toHaveLength(score < 0.5 ? 0 : 1);
-		expect(dispatch.responseMessageId === undefined).toBe(score < 0.5);
+		expect(f.sends.map((send) => send.content)).toEqual([score < 0.5 ? WITHHELD_NOTICE : "hello"]);
+		expect(dispatch.responseMessageId).toBe("1001");
 		if (score < 0.5)
 			expect(f.logs).toContainEqual(
 				expect.objectContaining({
@@ -886,7 +929,9 @@ test("audit failure opens addressed turns but closes directed and probability tu
 		});
 		expect(dispatch.route.reason).toBe(reason);
 		expect(f.auditRequests).toHaveLength(1);
+		expect(f.classifyRequests).toEqual([]);
 		const closed = reason === "directed" || reason === "probability";
+		// A failed audit call judged nothing: closed turns stay silent, without the withheld notice.
 		expect(f.sends).toHaveLength(closed ? 0 : 1);
 		if (closed)
 			expect(f.logs).toContainEqual(
@@ -946,4 +991,23 @@ test("event assignment and participation decisions start concurrently in the sam
 		await pending;
 	}
 	expect(f.sends).toHaveLength(1);
+});
+
+test("the trigger line is marked and quotes the message it replies to", async () => {
+	const f = fixture();
+	const session = await f.seam.getSession(f.persona, f.space, "222");
+	const custom = spyOn(session, "sendCustomMessage");
+	cleanups.push(() => {
+		custom.mockRestore();
+	});
+	await f.send();
+	await f.send({ content: "对", mentionedUserIds: [], replyToMessageId: "1001", replyToAuthorId: "900" });
+	const triggers = custom.mock.calls
+		.filter(([message, options]) => message.customType === "discord_context_v1" && options?.triggerTurn)
+		.map(([message]) => String(message.content));
+	expect(triggers).toHaveLength(2);
+	expect(triggers[0]).toMatch(/^\[本轮要回应的消息\] \[[^\]]+\] #10 Alice: hi Luna$/);
+	expect(triggers[1]).toMatch(
+		/^\[本轮要回应的消息\] \[[^\]]+\] #11 ↪ 1001 Alice: 对\n↳ 它回复的 #1001 luna_bot · bot: hello$/,
+	);
 });

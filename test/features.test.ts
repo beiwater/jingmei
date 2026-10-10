@@ -229,13 +229,19 @@ test("features.audit off skips the final-text audit but still blocks leaks", asy
 	const audit = (c: Conversation, reply: string) =>
 		(
 			c as unknown as {
-				auditReply(reply: string, message: InboundMessage, route: Route, recent: string[]): Promise<string | null>;
+				auditReply(
+					reply: string,
+					message: InboundMessage,
+					route: Route,
+					recent: string[],
+					offerRewrite: boolean,
+				): Promise<{ reason: string } | null>;
 			}
-		).auditReply(reply, message, route, []);
-	expect(await audit(core(allOn, { audit: true, client }).conversation, "hello")).toBe("audit");
+		).auditReply(reply, message, route, [], false);
+	expect(await audit(core(allOn, { audit: true, client }).conversation, "hello")).toEqual({ reason: "audit" });
 	expect(audits).toBe(1);
 	const off = core({ ...allOn, audit: false }, { audit: false, client }).conversation;
 	expect(await audit(off, "hello")).toBeNull();
-	expect(await audit(off, "§E3 leaked")).toBe("leak_pattern");
+	expect(await audit(off, "§E3 leaked")).toEqual({ reason: "leak_pattern" });
 	expect(audits).toBe(1);
 });
