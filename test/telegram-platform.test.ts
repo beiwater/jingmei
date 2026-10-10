@@ -5,6 +5,7 @@ import type { ConversationCore, InboundMessage, Persona } from "../src/core/type
 import { BotApi, isReactionEmoji, TelegramApiError } from "../src/platforms/telegram/api.ts";
 import { parseCommand, runCommand } from "../src/platforms/telegram/commands.ts";
 import { createTelegramPlatform, type PlatformHandle } from "../src/platforms/telegram/index.ts";
+import { setLogSink } from "../src/observability/log.ts";
 import { formatTelegramMarkdown } from "../src/platforms/telegram/markdown.ts";
 import {
 	normalizeTelegramMessage,
@@ -232,18 +233,24 @@ describe("Telegram adapter", () => {
 			if (firstPoll) {
 				firstPoll = false;
 				const ignoredChat = { id: -100999 };
+				// Updates queued before `allowed_updates` was set can be of another kind and carry no message.
 				return [
-					message({ chat: ignoredChat, text: "ignored" }),
-					message({ chat: ignoredChat, text: "/help", entities: [{ type: "bot_command", offset: 0, length: 5 }] }),
-					message({ chat: ignoredChat, photo: [{ file_id: "ignored" }] }),
-					message({ text: "accepted" }),
-				].map((message, index) => ({ update_id: index + 1, message }));
+					{ update_id: 100 } as TelegramUpdate,
+					...[
+						message({ chat: ignoredChat, text: "ignored" }),
+						message({ chat: ignoredChat, text: "/help", entities: [{ type: "bot_command", offset: 0, length: 5 }] }),
+						message({ chat: ignoredChat, photo: [{ file_id: "ignored" }] }),
+						message({ text: "accepted" }),
+					].map((message, index) => ({ update_id: index + 1, message })),
+				];
 			}
 			const { promise, reject } = Promise.withResolvers<TelegramUpdate[]>();
 			signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
 			return promise;
 		});
 		let platform: PlatformHandle | undefined;
+		const records: string[] = [];
+		const restoreLog = setLogSink((line) => records.push(line));
 		try {
 			platform = await createTelegramPlatform({
 				config: {
@@ -269,7 +276,9 @@ describe("Telegram adapter", () => {
 			]);
 			expect(send).not.toHaveBeenCalled();
 			expect(getFile).not.toHaveBeenCalled();
+			expect(records.filter((line) => JSON.parse(line).level === "error")).toEqual([]);
 		} finally {
+			restoreLog();
 			await platform?.stop();
 			for (const spy of [getMe, setCommands, send, getFile, getUpdates]) spy.mockRestore();
 		}

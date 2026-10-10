@@ -234,6 +234,8 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 	}
 
 	function onUpdate(bot: TelegramBot, { message }: TelegramUpdate): void {
+		// `allowed_updates` does not apply to updates queued before it was set, so other kinds can still arrive.
+		if (!message) return;
 		const chatId = String(message.chat.id);
 		if (!allowedChatIds.has(chatId)) {
 			// Chat ids are not secret; logging the first sighting lets operators allow-list a group.

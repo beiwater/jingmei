@@ -53,10 +53,10 @@ export interface TelegramMessage {
 	document?: TelegramFileRef;
 }
 
-/** `getUpdates` is called with `allowed_updates: ["message"]`, so every update carries a message. */
+/** `getUpdates` asks for `message` only, but updates queued before that request can be of other kinds. */
 export interface TelegramUpdate {
 	update_id: number;
-	message: TelegramMessage;
+	message?: TelegramMessage;
 }
 
 export interface TelegramNormalizeDeps {
