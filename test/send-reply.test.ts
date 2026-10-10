@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { type Tool, validateToolArguments } from "@earendil-works/pi-ai";
 import {
@@ -13,24 +13,12 @@ import type { PlatformTransport } from "../src/core/types.ts";
 import { TextImageError } from "../src/media/text-image.ts";
 import { AntigravityImageError } from "../src/tools/antigravity-image.ts";
 import { KlineError } from "../src/tools/market-klines.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { mockFishTts } from "./support/fish.ts";
 
 type Send = Parameters<PlatformTransport["sendMessage"]>[0];
 
-const restores: Array<() => void> = [];
-afterEach(() => {
-	for (const restore of restores.splice(0)) restore();
-});
-
-/** Fish Audio is the only network the tool may touch; every request is answered with three MP3 bytes. */
-function fakeTts(onRequest: () => void | Promise<void> = () => {}) {
-	const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
-		if (String(input) !== "https://api.fish.audio/v1/tts") throw new Error("unexpected network request");
-		await onRequest();
-		return new Response(new Uint8Array([73, 68, 51]), { headers: { "content-type": "audio/mpeg" } });
-	}) as unknown as typeof globalThis.fetch);
-	restores.push(() => fetch.mockRestore());
-	return fetch;
-}
+const cleanups = useCleanups();
 
 function setup(
 	options: {
@@ -87,7 +75,7 @@ const rendered = async () => ({ data: new Uint8Array([2]), contentType: "image/p
 
 describe("send_reply", () => {
 	test("sends every part in order; only the first replies to the trigger; all are recorded", async () => {
-		fakeTts();
+		mockFishTts(cleanups);
 		const f = setup({ sources: { voice, generateImage: generated } });
 		const result = await f.run([
 			{ type: "image", prompt: "a paraboloid z = x^2 + y^2", caption: "抛物面" },
@@ -121,7 +109,7 @@ describe("send_reply", () => {
 			ttsStarted = resolve;
 		});
 		const events: string[] = [];
-		fakeTts(() => {
+		mockFishTts(cleanups, () => {
 			events.push("tts");
 			ttsStarted();
 		});
@@ -260,7 +248,7 @@ describe("send_reply", () => {
 			if (String(path).endsWith("/assets/reactions/hello.png")) throw new Error("fixture missing image");
 			return read(path, ...args);
 		}) as typeof fs.readFileSync);
-		restores.push(() => missing.mockRestore());
+		cleanups.push(() => missing.mockRestore());
 		for (const _attempt of ["first", "retry"]) {
 			expect(await f.run([{ type: "reaction_image", asset_id: "hello" }])).toMatchObject({
 				isError: true,
@@ -427,6 +415,15 @@ describe("send_reply", () => {
 		expect(JSON.stringify(failed.content)).toContain("Part 1 (kline_image) failed: fetch_failed");
 		expect(f.sends).toEqual([]);
 		expect(f.turn.reply).toEqual({ status: "idle" });
+	});
+
+	test("a reaction image goes out as the original file under its own caption and is recorded as sent", async () => {
+		const f = setup({ sources: { reactionImages: {} } });
+		await f.run([{ type: "reaction_image", asset_id: "hello", caption: "wave" }]);
+		expect(f.sends).toMatchObject([
+			{ content: "wave", replyToMessageId: "42", attachments: [{ contentType: "image/png" }] },
+		]);
+		expect(f.recorded).toEqual([{ id: "101", content: "wave", source: "42", replyTo: "42" }]);
 	});
 
 	test("media-only replies skip the naturalness audit", async () => {

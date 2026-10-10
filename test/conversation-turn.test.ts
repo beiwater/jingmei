@@ -15,6 +15,7 @@ import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
 import { useCleanups } from "./support/cleanup.ts";
 import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
+import { mockFishTts } from "./support/fish.ts";
 import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
 const cleanups = useCleanups();
@@ -382,20 +383,6 @@ function sendReply(f: ReturnType<typeof fixture>, parts: unknown[], text?: strin
 	);
 }
 
-test("reaction-image parts are stored with their caption and source topic", async () => {
-	const f = fixture({ events: true });
-	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "hello", caption: "wave" }]));
-	expect((await f.send()).responseMessageId).toBe("1001");
-	expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("image/png");
-	expect(
-		f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
-	).toEqual({
-		content: "wave",
-		reply_to_message_id: "10",
-		event_id: eventId(f.db, "10"),
-	});
-});
-
 test("a persona catalog image is sent with its default caption and ends the turn", async () => {
 	const f = fixture({ events: true, reactionImages: true });
 	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "innocent" }]));
@@ -466,7 +453,9 @@ test("replies within the limit, and every reply without the feature, are not gat
 	expect(off.sends[0]).toMatchObject({ content: LONG_TEXT });
 });
 
-test("a multi-part reply goes out in order in one model call; later parts are stored unthreaded", async () => {
+// Part order, which part replies to the trigger and what the tool records are covered in send-reply.test.ts;
+// this is what only a real turn shows: one model call, no second send, and the stored rows' threading and topic.
+test("a multi-part reply is one model call; the text beside the tool call is not sent and every row keeps the topic", async () => {
 	const f = fixture({ events: true });
 	f.script.push(
 		sendReply(
@@ -481,22 +470,16 @@ test("a multi-part reply goes out in order in one model call; later parts are st
 	);
 	expect((await f.send()).responseMessageId).toBe("1001");
 	expect(f.calls()).toBe(1);
-	expect(f.sends.map((send) => [send.content, send.replyToMessageId])).toEqual([
-		["🤔", "10"],
-		["第一段", undefined],
-		["第二段", undefined],
-	]);
+	expect(f.sends.map((send) => send.content)).toEqual(["🤔", "第一段", "第二段"]);
 	const topic = eventId(f.db, "10");
 	expect(
 		f.db
-			.query(
-				"SELECT message_id, content, reply_to_message_id, event_id FROM messages WHERE is_bot = 1 ORDER BY message_id",
-			)
+			.query("SELECT message_id, reply_to_message_id, event_id FROM messages WHERE is_bot = 1 ORDER BY message_id")
 			.all(),
 	).toEqual([
-		{ message_id: "1001", content: "🤔", reply_to_message_id: "10", event_id: topic },
-		{ message_id: "1002", content: "第一段", reply_to_message_id: null, event_id: topic },
-		{ message_id: "1003", content: "第二段", reply_to_message_id: null, event_id: topic },
+		{ message_id: "1001", reply_to_message_id: "10", event_id: topic },
+		{ message_id: "1002", reply_to_message_id: null, event_id: topic },
+		{ message_id: "1003", reply_to_message_id: null, event_id: topic },
 	]);
 });
 
@@ -518,27 +501,20 @@ test("a send_reply the audit withholds sends nothing, not even the text beside t
 for (const mode of ["tool", "explicit"] as const) {
 	test(`${mode} voice replies store the transcript and source topic on non-echoing transports`, async () => {
 		const f = fixture({ events: true, voice: true });
-		const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
-			if (String(input) !== "https://api.fish.audio/v1/tts") throw new Error("unexpected network request");
-			return new Response(new Uint8Array([73, 68, 51]), { headers: { "content-type": "audio/mpeg" } });
-		}) as unknown as typeof globalThis.fetch);
-		try {
-			if (mode === "tool") {
-				f.script.push(sendReply(f, [{ type: "voice", text: "hello" }]));
-			}
-			const sent = await f.send({ content: mode === "explicit" ? "Luna 用语音回复" : "hi Luna" });
-			expect(sent.responseMessageId).toBe("1001");
-			expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("audio/mpeg");
-			expect(
-				f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
-			).toEqual({
-				content: "🎙️ hello",
-				reply_to_message_id: "10",
-				event_id: eventId(f.db, "10"),
-			});
-		} finally {
-			fetch.mockRestore();
+		mockFishTts(cleanups);
+		if (mode === "tool") {
+			f.script.push(sendReply(f, [{ type: "voice", text: "hello" }]));
 		}
+		const sent = await f.send({ content: mode === "explicit" ? "Luna 用语音回复" : "hi Luna" });
+		expect(sent.responseMessageId).toBe("1001");
+		expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("audio/mpeg");
+		expect(
+			f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
+		).toEqual({
+			content: "🎙️ hello",
+			reply_to_message_id: "10",
+			event_id: eventId(f.db, "10"),
+		});
 	});
 }
 
