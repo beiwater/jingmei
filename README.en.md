@@ -370,18 +370,6 @@ journalctl --user -u pi-discord-agent -f
 
 The unit assumes the code lives in `~/apps/pi-extension-discord` and Bun at `~/.local/share/pi-discord-bun/node_modules/.bin/bun`; adjust those two lines if yours differ. Data directory, logs and updates are covered in [docs/deploy.md](docs/deploy.md).
 
-## Migrating from the old version
-
-The old version was Discord-only, configured by `discord.config.json`, with its database at `data/discord-agent.db`.
-
-```bash
-bun scripts/migrate-config.ts
-```
-
-The script converts `discord.config.json` in the project root into `jingmei.config.json` (refusing to overwrite an existing one): `token_env` becomes `discord.tokenEnv`, `guildIds` becomes `spaces`, a celebration's `guildId` becomes `space`, and unknown fields are dropped. Afterwards check that persona `id`s use only `a-z 0-9 _ -`, then add `telegram` and `jev` sections as needed. Existing `.env` variable names keep working.
-
-The database needs no manual step: on first start, if `data/jingmei.db` does not exist but `data/discord-agent.db` does, it is renamed together with its `-wal`/`-shm` files, the old `discord_*` tables are migrated to the new names, and server IDs are rewritten as `discord:<guildId>`. The migration runs in one transaction and is safe to repeat; existing Pi session files stay on disk but carry no segment state, so each character's first trigger starts a new segment.
-
 ## Development
 
 ```bash

@@ -369,18 +369,6 @@ journalctl --user -u pi-discord-agent -f
 
 服务文件假定代码在 `~/apps/pi-extension-discord`、Bun 在 `~/.local/share/pi-discord-bun/node_modules/.bin/bun`，不同的话改这两行即可。数据目录、日志和更新流程见 [docs/deploy.md](docs/deploy.md)。
 
-## 从旧版迁移
-
-旧版只有 Discord，配置叫 `discord.config.json`，数据库叫 `data/discord-agent.db`。
-
-```bash
-bun scripts/migrate-config.ts
-```
-
-脚本把项目根的 `discord.config.json` 转成 `jingmei.config.json`（已存在则拒绝覆盖）：`token_env` 变成 `discord.tokenEnv`，`guildIds` 变成 `spaces`，节日目标的 `guildId` 变成 `space`，其余未知字段丢弃。转完后检查角色 `id` 只含 `a-z 0-9 _ -`，再按需加上 `telegram` 和 `jev` 段落。`.env` 里原有的变量名保持不变即可。
-
-数据库无需手动处理：首次启动时，若没有 `data/jingmei.db` 而有 `data/discord-agent.db`，会连同 `-wal`/`-shm` 一起改名，并把旧的 `discord_*` 表迁移成新表名、把服务器 ID 改写为 `discord:<guildId>`。迁移在一个事务里完成，可重复执行；已有的 Pi 会话文件保留在磁盘上，但没有对话段状态，每个角色被触发时先开一个新对话段。
-
 ## 开发
 
 ```bash

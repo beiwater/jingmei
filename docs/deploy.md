@@ -121,12 +121,6 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 - 向量使用 `events.embeddingModel`（未开话题时用默认模型）与 `data/models` 里的模型缓存。已 `/forget` 的成员的消息不会被索引。
 - 回填与 bot 共用同一个 `data/jingmei.db`，部署新版本后运行一次即可，之后无需再跑。
 
-## 从旧版迁移
-
-1. 停止服务。
-2. 在项目根运行 `bun scripts/migrate-config.ts`，由 `discord.config.json` 生成 `jingmei.config.json`，检查后按需补 `telegram`、`jev` 段落（见 [README](../README.md#从旧版迁移)）。
-3. 启动服务。首次启动时 `data/discord-agent.db`（连同 `-wal`/`-shm`）自动改名为 `data/jingmei.db`，旧的 `discord_*` 表在一个事务里迁移为新表，服务器 ID 改写为 `discord:<guildId>`。如果 `jingmei.db` 已存在，旧文件不会被动。
-
 ## 排查
 
 - 启动即退出：stderr 会打印配置错误清单或模型问题（`unknown_model`、`unauthenticated_provider`、`unsupported_reasoning_effort`、`image_input_unsupported`）。

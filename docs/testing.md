@@ -41,10 +41,9 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 |---|---|
 | `network-isolation.test.ts` | 有真实凭据时仍拒绝 Discord / Telegram（含 Discord 子域名） |
 | `log.test.ts` | `persona_id` 原样保留以区分多角色；token/key/prompt/content/url/path 字段仍脱敏；字符串中的 Telegram token、`sk-` key、URL、绝对路径被替换 |
-| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
+| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
 | `events.test.ts` | 人类消息话题归属、人与 bot 回复直接继承且不决策、空间/频道隔离；裸媒体/低内容继承及十分钟边界、视觉描述/Unicode 正文保留决策；`new` 概率低于 0.6 选最佳旧话题、达到阈值或无概率保留新话题；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
-| `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、平台账号与角色作用域、bot 不触发、HMAC 抽样稳定；30 秒冷却与 10 分钟/30 条/3 条/多于 1 个其他作者/25% 占比门控边界；directed 绕过门控与抽样，chat-in 不绕过；搜索预取与语音请求识别；平台限定管理员的上下文权限 |
 | `context.test.ts` | 已完成轮次丢弃 thinking、工具循环保留 thinking；暂停入库但不回复，恢复计数；图片输入与 `visionModel`/Pi 降级；当前事件说明写入时固化为 `turnNote`，投影对每条带它的消息都拼接；`jingmei_withheld_v1` 持久且隐藏，投影只移除被扣留轮次 assistant 与标记、保留正常历史；成员记忆不自动注入 |
 | `conversation-turn.test.ts` | 真实 Pi 会话总期限释放 lane、后续消息继续；error/aborted 不发半截文字、日志不泄漏、重试成功不误报；接话单次请求、门控只省 chat-in、directed 绕过门控/无候选、阈值与失败及关闭回退；每条人类消息的 `route` 日志字段（候选、门控、决策、分数、暂停）且无正文，bot 消息不记；最终文字泄漏/自然度扣留、审查失败按路由区分、明确语音审查与无客户端泄漏检查、不入库/不计数；“正在输入”在模型运行期间按周期刷新、回复发出后停止、不超过上限；无回声平台发送入库继承话题，有回声平台不预先入库；角色本地图库按 id 发送原文件并结束本轮；`send_reply` 多部分一次模型调用按序发出、只有首条回复原消息、各条入库且后续条无 `reply_to` 但继承话题、工具旁的文字不再发；被审查扣留时一条不发 |

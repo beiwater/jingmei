@@ -129,10 +129,7 @@ function loadEnv(rootDir: string): Record<string, string> {
 function readConfigFile(rootDir: string): unknown {
 	const configPath = join(rootDir, CONFIG_FILE);
 	if (!existsSync(configPath)) {
-		const legacy = existsSync(join(rootDir, "discord.config.json"))
-			? "; run `bun scripts/migrate-config.ts` to convert discord.config.json"
-			: "; copy jingmei.config.example.json";
-		throw new ConfigError([`Missing ${configPath}${legacy}`]);
+		throw new ConfigError([`Missing ${configPath}; copy jingmei.config.example.json`]);
 	}
 	try {
 		return JSON.parse(readFileSync(configPath, "utf8"));
@@ -277,8 +274,6 @@ function parseSpace(value: unknown): { platform: Platform; rawId: string } | nul
 export function validateConfig(input: unknown, rootDir: string, env: Readonly<Record<string, string>>): AppConfig {
 	const errors: string[] = [];
 	if (!isObject(input)) throw new ConfigError([`${CONFIG_FILE} must be a JSON object`]);
-	if ("guilds" in input)
-		errors.push("top-level guilds is the old discord.config.json shape; run `bun scripts/migrate-config.ts`");
 
 	const secret = (field: string, envName: unknown): string | undefined => {
 		if (typeof envName !== "string" || !ENV_NAME.test(envName)) {
@@ -391,10 +386,6 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				continue;
 			}
 			const before = errors.length;
-			if ("token_env" in entry || "guildIds" in entry || "adminUserIds" in entry)
-				errors.push(
-					`${field} uses old discord.config.json fields (token_env/guildIds/adminUserIds); run \`bun scripts/migrate-config.ts\``,
-				);
 			const id = entry.id;
 			if (typeof id !== "string" || !PERSONA_ID.test(id)) errors.push(`${field}.id must match [a-z0-9_-]+`);
 			else if (seenIds.has(id)) errors.push(`Duplicate persona id: ${id}`);

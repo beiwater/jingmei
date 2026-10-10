@@ -65,7 +65,7 @@ flowchart LR
 
 1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
 2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。
-3. 开启 `events` 时先 `useExtensibleSqlite()`（macOS 使用 Homebrew SQLite），再 `openDatabase()` 并加载 sqlite-vec。没有 `jingmei.db` 而有 `discord-agent.db` 时连同 `-wal`/`-shm` 改名，再迁移 `discord_*` 表。
+3. 开启 `events` 时先 `useExtensibleSqlite()`（macOS 使用 Homebrew SQLite），再 `openDatabase()` 并加载 sqlite-vec。
 4. 按配置创建 Discord/Telegram 平台：每个 token 先验证身份（Discord `/users/@me`，Telegram `getMe`），填入 `persona.accounts`。
 5. `createInstalledPiModelRuntime()`：整个进程一个 Pi `ModelRuntime`，agent 目录是 `data/pi-agent`（`models.json`、`auth.json` 都在这里）。provider 扩展只从 agent 目录加载，项目 `.pi/` 扩展不被信任、不加载。每个角色的模型、reasoning 档位和认证逐一 `assertBotModelConfigured`；`visionModel` 另需支持图片输入。
 6. 在 `${dataDir}/models` 准备 fastembed 模型缓存（`events.embeddingModel`，未开话题时用默认 `fast-bge-small-zh-v1.5`；首次下载约 96 MB），创建 `MessageIndex`，并把 `MemberMemory.onForget` 接到它的 `forgetAuthor`。开启话题时另外校验 `summaryModel`，用同一个 embedder 和共享决策客户端创建 `EventTracker`。创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。关闭时先等待核心 lane，再依次等待 `events.idle()` 与消息索引 `idle()` 后关数据库。
@@ -255,8 +255,6 @@ flowchart TD
 | `bot_runs` | `id` 自增；`started_at`、心跳 `last_seen_at`、可空 `stopped_at`、本次 `replies` |
 | `bot_pause` | 单行（`id = 1`）`paused_at`；存在即暂停 |
 | `persona_models` | `persona_id` 主键 → `jingmei model` 选择的 `provider`、`model`、`updated_at`；无记录即用配置模型 |
-
-**旧库迁移**（`migrateLegacyTables`）：每张 `discord_*` 表改名为去掉前缀的名字（`discord_core_` 连同 `core_` 一起去掉），`guild_id` 列改名为 `space_id` 并加 `discord:` 前缀。整个迁移一个事务、可重复执行；目标表已存在则报错而不是覆盖。
 
 ## 平台适配器
 

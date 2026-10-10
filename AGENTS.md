@@ -18,7 +18,6 @@
 - `src/decision/jev.ts` — TypeSafe Jev 客户端
 - `src/media/` — 图片准备、视频抽帧；`src/tools/` — run_js、DeepSeek 搜索、Fish TTS、Antigravity 画图；`src/net/` — 公网 URL 过滤、有界读取
 - `src/observability/log.ts` — 结构化日志
-- `scripts/migrate-config.ts` — 旧配置迁移
 - `docs/architecture.md` — 架构、数据流、表结构、上下文投影、Jev、run_js 威胁模型
 - `docs/testing.md` — 测试清单与验证漏斗
 - `docs/deploy.md` — 部署、数据目录、迁移
