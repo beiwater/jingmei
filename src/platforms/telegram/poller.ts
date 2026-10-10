@@ -80,10 +80,7 @@ export class Poller {
 
 	/** Backoff that aborts early on stop() so shutdown never waits out a sleep. */
 	private async sleep(ms: number): Promise<void> {
-		try {
-			await setTimeout(ms, undefined, { signal: this.abort.signal });
-		} catch (error) {
-			if (!(this.abort.signal.aborted && error instanceof Error && error.name === "AbortError")) throw error;
-		}
+		// Only an AbortError can reject.
+		await setTimeout(ms, undefined, { signal: this.abort.signal }).catch(() => {});
 	}
 }
