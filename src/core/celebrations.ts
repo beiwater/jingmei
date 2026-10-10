@@ -24,7 +24,6 @@ export interface CelebrationSchedulerOptions {
 	transports: ReadonlyMap<Platform, PlatformTransport>;
 	/** A paused bot sends nothing; greetings due today go out after resume. */
 	isPaused: () => boolean;
-	now?: () => Date;
 	onError?: (error: unknown) => void;
 }
 
@@ -112,10 +111,8 @@ export class CelebrationScheduler {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private stopped = true;
 	private running: Promise<void> | undefined;
-	private readonly now: () => Date;
 
 	constructor(private readonly options: CelebrationSchedulerOptions) {
-		this.now = options.now ?? (() => new Date());
 		for (const target of options.targets) {
 			// Fail during startup on an unserved platform, not on the first birthday.
 			if (!options.transports.has(platformOf(target.spaceId)))
@@ -152,9 +149,9 @@ export class CelebrationScheduler {
 		await this.running;
 	}
 
-	async tick(now: Date = this.now()): Promise<void> {
+	async tick(): Promise<void> {
 		if (this.running) return this.running;
-		const task = this.deliverForDate(now);
+		const task = this.deliverForDate(new Date());
 		this.running = task;
 		try {
 			await task;
