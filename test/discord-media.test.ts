@@ -62,13 +62,9 @@ describe("Discord image attachments", () => {
 		expect(result).toBeNull();
 	});
 
-	test("rejects an oversize original when resizing fails", async () => {
-		const prepared = await prepareImage(new Uint8Array(IMAGE_LIMITS.maxBytes + 1), "image/png", {
-			resize: async () => {
-				throw new Error("resize failed");
-			},
-		});
-		expect(prepared.ok).toBe(false);
+	test("rejects an oversize original that cannot be resized", async () => {
+		const prepared = await prepareImage(new Uint8Array(IMAGE_LIMITS.maxBytes + 1), "image/png");
+		expect(prepared).toEqual({ ok: false, reason: "oversize" });
 	});
 
 	test("applies CDN and size protections to video downloads", async () => {
