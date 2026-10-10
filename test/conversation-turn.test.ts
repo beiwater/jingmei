@@ -1113,5 +1113,7 @@ test("the trigger line is marked and quotes the message it replies to", async ()
 		.map(([message]) => String(message.content));
 	expect(triggers).toHaveLength(2);
 	expect(triggers[0]).toMatch(/^\[本轮要回应的消息\] \[[^\]]+\] #10 Alice: hi Luna$/);
-	expect(triggers[1]).toMatch(/^\[本轮要回应的消息\] \[[^\]]+\] #11 ↪ 1001 Alice: 对\n↳ 它回复的 #1001 luna_bot · bot: hello$/);
+	expect(triggers[1]).toMatch(
+		/^\[本轮要回应的消息\] \[[^\]]+\] #11 ↪ 1001 Alice: 对\n↳ 它回复的 #1001 luna_bot · bot: hello$/,
+	);
 });
