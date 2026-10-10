@@ -64,7 +64,6 @@ export function isSnowflake(value: unknown): value is Snowflake {
 
 /** Split without discarding whitespace; prefer a newline, then a word boundary. */
 export function splitDiscordMessage(content: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
-	if (!Number.isInteger(maxLength) || maxLength < 1) throw new Error("maxLength must be a positive integer");
 	if (!content) return [];
 	const parts: string[] = [];
 	let rest = content;
@@ -105,17 +104,14 @@ export class DiscordTransport {
 	private readonly threadParents = new Map<Snowflake, Snowflake>();
 
 	constructor(private readonly options: DiscordTransportOptions) {
-		if (!options.token) throw new Error("Discord bot token is required");
-		if (!isSnowflake(options.applicationId)) throw new Error("applicationId must be a Discord Snowflake string");
 		this.fetchImpl = options.fetch ?? fetch;
 		this.wsFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
 		this.allowedChannels = options.allowedChannelIds ? new Set(options.allowedChannelIds) : undefined;
 	}
 
 	async getCurrentUser(): Promise<{ id: Snowflake; username: string }> {
-		const user = await this.request<{ id: unknown; username?: unknown }>("/users/@me");
-		if (!isSnowflake(user.id)) throw new Error("Discord current user response did not include a valid id");
-		return { id: user.id, username: typeof user.username === "string" ? user.username : "" };
+		const user = await this.request<{ id: Snowflake; username: string }>("/users/@me");
+		return { id: user.id, username: user.username };
 	}
 
 	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -328,12 +324,7 @@ export class DiscordTransport {
 		switch (payload.op) {
 			case 10: {
 				this.heartbeatAck = true;
-				const interval = Number(payload.d?.heartbeat_interval);
-				if (!Number.isFinite(interval) || interval < 1000) {
-					this.options.onError?.(new Error("Invalid Gateway heartbeat interval"));
-					this.socket?.close(4000);
-					return;
-				}
+				const interval: number = payload.d.heartbeat_interval;
 				this.clearHeartbeat();
 				this.heartbeatInterval = setInterval(() => {
 					if (!this.heartbeatAck) {
@@ -484,8 +475,6 @@ export class DiscordPlatformTransport implements PlatformTransport {
 		mention?: readonly PersonaAccount[];
 	}): Promise<{ id: string }> {
 		const users = [...new Set(input.mention?.map((user) => user.userId) ?? [])];
-		if (users.length > 100) throw new Error("mention cannot include more than 100 users");
-		for (const userId of users) if (!isSnowflake(userId)) throw new Error("mention ids must be Discord Snowflakes");
 		const messages = await this.client(input.personaId).sendMessage(input.channelId, input.content, {
 			replyTo: input.replyToMessageId,
 			allowedMentions: users.length ? { ...DEFAULT_ALLOWED_MENTIONS, users } : DEFAULT_ALLOWED_MENTIONS,
