@@ -1,10 +1,5 @@
-import {
-	type AssistantMessage,
-	type AssistantMessageEventStream,
-	createAssistantMessageEventStream,
-	type Model,
-} from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -18,16 +13,13 @@ import { MemberMemory } from "../src/core/memory.ts";
 import type { MessageIndex, MessageKey } from "../src/core/message-index.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { assistantMessage, IMAGE, makeModel, makeRuntime, onSession, scriptedStream } from "./support/pi.ts";
 
 const SPACE: SpaceId = "telegram:-100111";
 const CHANNEL = "222";
 const T0 = Date.UTC(2026, 0, 1, 12, 0, 0);
 const MINUTE = 60_000;
-const IMAGE = { mimeType: "image/png" as const, base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" };
 
-interface SessionSeam {
-	getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession>;
-}
 interface Captured {
 	persona: string;
 	systemPrompt: string;
@@ -68,35 +60,8 @@ class FakeIndex {
 }
 
 function fixture(options: { personas?: number; timeoutMs?: number; index?: boolean; imageInput?: boolean } = {}) {
-	const model: Model<"openai-responses"> = {
-		id: "fixture",
-		name: "fixture",
-		api: "openai-responses",
-		provider: "fixture",
-		baseUrl: "http://unused",
-		reasoning: false,
-		input: options.imageInput ? ["text", "image"] : ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 1_048_576,
-		maxTokens: 4096,
-	};
-	const reply = (text = "hello"): AssistantMessage => ({
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
+	const model = makeModel({ input: options.imageInput ? ["text", "image"] : ["text"], contextWindow: 1_048_576 });
+	const reply = (text = "hello"): AssistantMessage => assistantMessage(text, { model });
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-segment-"));
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
@@ -140,11 +105,7 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 		dataDir,
 		routingSecret: "fixture",
 		personas,
-		modelRuntime: {
-			getModel: () => model,
-			hasConfiguredAuth: () => true,
-			getAuth: async () => ({ auth: { apiKey: "fixture" } }),
-		} as unknown as ModelRuntime,
+		modelRuntime: makeRuntime(model),
 		transports: new Map([["telegram", transport]]),
 		events: {
 			assign: async () => 7,
@@ -154,31 +115,18 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 		...(index ? { messageIndex: index as unknown as MessageIndex } : {}),
 	};
 	const captured: Captured[] = [];
-	const script: Array<AssistantMessage | (() => AssistantMessageEventStream)> = [];
+	const script: Array<AssistantMessage | StreamFn> = [];
 	const build = () => {
 		const core = new Conversation(coreOptions);
-		const seam = core as unknown as SessionSeam;
-		const original = seam.getSession.bind(core);
-		const attached = new Set<AgentSession>();
-		seam.getSession = async (...args) => {
-			const session = await original(...args);
-			if (!attached.has(session)) {
-				attached.add(session);
-				session.agent.streamFunction = (_model, context) => {
-					captured.push({
-						persona: args[0].id,
-						systemPrompt: context.systemPrompt ?? "",
-						messages: JSON.parse(JSON.stringify(context.messages)),
-					});
-					const next = script.shift() ?? reply();
-					if (typeof next === "function") return next();
-					const stream = createAssistantMessageEventStream();
-					stream.push({ type: "done", reason: "stop", message: next });
-					return stream;
-				};
-			}
-			return session;
-		};
+		const seam = onSession(core, (session, persona) => {
+			session.agent.streamFunction = scriptedStream(script, reply, (context) =>
+				captured.push({
+					persona: persona.id,
+					systemPrompt: context.systemPrompt ?? "",
+					messages: JSON.parse(JSON.stringify(context.messages)),
+				}),
+			);
+		});
 		cleanups.push(() => core.close());
 		return { core, seam };
 	};

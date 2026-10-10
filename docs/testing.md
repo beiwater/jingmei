@@ -74,7 +74,9 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `kline.test.ts` | K 线：交易对写法归一（`btc/usdt`→`BTCUSDT`），带参数拼接或过短的写法不发请求；只请求固定公开主机、查询参数正确、`redirect: "error"`，返回按时间升序的数值 K 线；HTTP 400 → `invalid_symbol`，5xx、网络错误、非 JSON、行数不足或字段非数字 → `fetch_failed`；渲染出 1600×1000 的合法 PNG，配文由数据生成（最新价、窗口涨跌）；涨红跌绿、平盘与极小价格仍可渲染；渲染器先取数再画图，坏交易对在请求前失败 |
 | `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
 
-`test/network-guard.ts` 是预加载文件，不是测试。
+`test/network-guard.ts` 是预加载文件，不是测试。`test/support/` 是共享测试夹具，同样不是测试：
+
+- `pi.ts`：`makeModel`、`makeRuntime`（`ModelRuntime` 的模型/鉴权桩）、`assistantMessage`、`streamOf`/`scriptedStream`（确定性 provider 流）、`IMAGE`，以及驱动真实 Pi 会话的私有接缝 `seamOf`/`onSession`。
 
 ## 写测试的规则
 

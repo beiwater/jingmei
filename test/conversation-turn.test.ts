@@ -1,6 +1,5 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, spyOn, test, vi } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -17,10 +16,7 @@ import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
-
-interface SessionSeam {
-	getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession>;
-}
+import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -54,43 +50,12 @@ function fixture(
 	useExtensibleSqlite();
 	const platform = options.platform ?? "telegram";
 	const space: SpaceId = platform === "telegram" ? "telegram:-100111" : "discord:111";
-	const model: Model<"openai-responses"> = {
-		id: "fixture",
-		name: "fixture",
-		api: "openai-responses",
-		provider: "fixture",
-		baseUrl: "http://unused",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 65536,
-		maxTokens: 4096,
-	};
+	const model = makeModel();
 	const reply = (
 		content: AssistantMessage["content"] = [{ type: "text", text: "hello" }],
 		stopReason: AssistantMessage["stopReason"] = "stop",
-	): AssistantMessage => ({
-		role: "assistant",
-		content,
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason,
-		timestamp: Date.now(),
-	});
-	const runtime = {
-		getModel: () => model,
-		hasConfiguredAuth: () => true,
-		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
-	} as unknown as ModelRuntime;
+	): AssistantMessage => assistantMessage(content, { model, stopReason });
+	const runtime = makeRuntime(model);
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-turn-"));
 	const db = new Database(":memory:");
 	const personaPath = join(dataDir, "persona.md");
@@ -245,41 +210,16 @@ function fixture(
 	});
 	const script: Array<AssistantMessage | StreamFn> = [];
 	let calls = 0;
-	const attached = new Set<AgentSession>();
-	const seam = core as unknown as SessionSeam;
-	const getSession = seam.getSession.bind(core);
-	seam.getSession = async (...args) => {
-		const session = await getSession(...args);
-		if (!attached.has(session)) {
-			attached.add(session);
-			session.agent.streamFunction = (...streamArgs) => {
-				calls++;
-				const next = script.shift() ?? reply();
-				if (typeof next === "function") return next(...streamArgs);
-				const stream = createAssistantMessageEventStream();
-				if (next.stopReason === "error" || next.stopReason === "aborted") {
-					stream.push({ type: "error", reason: next.stopReason, error: next });
-				} else {
-					stream.push({ type: "done", reason: next.stopReason as "stop", message: next });
-				}
-				return stream;
-			};
-		}
-		return session;
-	};
+	const seam = onSession(core, (session) => {
+		session.agent.streamFunction = scriptedStream(script, reply, () => {
+			calls++;
+		});
+	});
 	const restart = () => {
 		const recovered = new Conversation(coreOptions);
-		const recoveredSeam = recovered as unknown as SessionSeam;
-		const original = recoveredSeam.getSession.bind(recovered);
-		recoveredSeam.getSession = async (...args) => {
-			const session = await original(...args);
-			session.agent.streamFunction = () => {
-				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: "stop", message: reply() });
-				return stream;
-			};
-			return session;
-		};
+		onSession(recovered, (session) => {
+			session.agent.streamFunction = () => streamOf(reply());
+		});
 		cleanups.push(() => recovered.close());
 		return recovered;
 	};
@@ -783,7 +723,7 @@ test("startup replays an interrupted turn exactly once and discards expired pend
 	const recovered = f.restart();
 	await recovered.recoverPending();
 	expect(f.sends).toHaveLength(1);
-	const recoveredSession = await (recovered as unknown as SessionSeam).getSession(f.persona, f.space, "222");
+	const recoveredSession = await seamOf(recovered).getSession(f.persona, f.space, "222");
 	expect(
 		recoveredSession.messages.some(
 			(message) => message.role === "custom" && JSON.stringify(message).includes("图片在崩溃恢复后不可用"),

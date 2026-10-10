@@ -1,5 +1,3 @@
-import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -10,8 +8,7 @@ import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
 import type { Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
-
-type SessionSeam = { getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession> };
+import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const SPACE: SpaceId = "discord:111";
 const cleanups: Array<() => void> = [];
@@ -19,36 +16,20 @@ afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-const model = (provider: string, id: string): Model<"openai-responses"> => ({
-	id,
-	name: id,
-	api: "openai-responses",
-	provider,
-	baseUrl: "http://unused",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 65536,
-	maxTokens: 4096,
-});
-
 test("a model chosen by the CLI connection switches the running bot's open session, survives restart and resets", async () => {
 	// beta advertises a 1M window; the session uses the whole model window.
-	const models = [model("fixture", "alpha"), { ...model("fixture", "beta"), contextWindow: 1_048_576 }];
+	const models = [makeModel({ id: "alpha" }), makeModel({ id: "beta", contextWindow: 1_048_576 })];
 	// A provider whose catalog the CLI caches only after this process started (e.g. after `jingmei login`).
-	const late = model("live", "delta");
+	const late = makeModel({ provider: "live", id: "delta" });
 	let refreshes = 0;
-	const runtime = {
-		getModel: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
-		hasConfiguredAuth: () => true,
+	const runtime = makeRuntime((provider, id) => models.find((m) => m.provider === provider && m.id === id), {
 		checkAuth: async () => ({ ok: true }),
-		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
 		refresh: async () => {
 			refreshes++;
 			if (!models.includes(late)) models.push(late);
 			return { aborted: false, errors: new Map() };
 		},
-	} as unknown as ModelRuntime;
+	});
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-model-"));
 	const db = new Database(join(dataDir, "test.db"));
 	cleanups.push(() => {
@@ -96,29 +77,10 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 			modelRuntime: runtime,
 			transports: new Map([["discord", transport]]),
 		});
-		const session = await (core as unknown as SessionSeam).getSession(persona, SPACE, "222");
+		const session = await seamOf(core).getSession(persona, SPACE, "222");
 		session.agent.streamFunction = (streamModel) => {
 			used.push(`${streamModel.provider}/${streamModel.id}`);
-			const stream = createAssistantMessageEventStream();
-			const message: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "ok" }],
-				api: streamModel.api,
-				provider: streamModel.provider,
-				model: streamModel.id,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-			};
-			stream.push({ type: "done", reason: "stop", message });
-			return stream;
+			return streamOf(assistantMessage("ok", { model: streamModel }));
 		};
 		return core;
 	};

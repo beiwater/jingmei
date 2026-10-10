@@ -1,5 +1,4 @@
-import { type AssistantMessage, type Context, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -12,12 +11,11 @@ import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { assistantMessage, IMAGE, makeModel, makeRuntime, scriptedStream, seamOf } from "./support/pi.ts";
 
-type SessionSeam = { getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession> };
 type Block = AssistantMessage["content"][number];
 
 const SPACE: SpaceId = "discord:111";
-const IMAGE = { mimeType: "image/png" as const, base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" };
 const cleanups: Array<() => void> = [];
 afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
@@ -32,45 +30,16 @@ function fixture(options: {
 }) {
 	const platform = options.platform ?? "discord";
 	const space: SpaceId = platform === "discord" ? SPACE : "telegram:-100111";
-	const model = {
-		id: "fixture",
-		name: "fixture",
-		api: "openai-responses" as const,
-		provider: "fixture",
-		baseUrl: "http://unused",
-		reasoning: false,
-		input: options.imageInput ? (["text", "image"] as const) : (["text"] as const),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 65536,
-		maxTokens: 4096,
-	};
-	const reply = (content: Block[], stopReason: "stop" | "toolUse" = "stop"): AssistantMessage => ({
-		role: "assistant",
-		content,
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason,
-		timestamp: Date.now(),
-	});
+	const model = makeModel({ input: options.imageInput ? ["text", "image"] : ["text"] });
+	const reply = (content: Block[], stopReason: "stop" | "toolUse" = "stop"): AssistantMessage =>
+		assistantMessage(content, { model, stopReason });
 	let visionCalls = 0;
-	const runtime = {
-		getModel: () => model,
-		hasConfiguredAuth: () => true,
-		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
+	const runtime = makeRuntime(model, {
 		completeSimple: async () => {
 			visionCalls++;
 			return reply([{ type: "text", text: "一只橘猫\n趴在键盘上" }]);
 		},
-	} as unknown as ModelRuntime;
+	});
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-context-"));
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
@@ -138,21 +107,18 @@ function fixture(options: {
 	const observerContexts: Context[] = [];
 	const script: AssistantMessage[] = [];
 	const ready = (async () => {
-		// Private seam: attach a deterministic provider stream to the real Pi session.
-		const seam = core as unknown as SessionSeam;
+		const seam = seamOf(core);
 		for (const [target, captured] of [
 			[persona, contexts],
 			...(options.observer ? [[observer, observerContexts] as const] : []),
 		] as const) {
 			const session = await seam.getSession(target, space, "222");
-			session.agent.streamFunction = (_model, context) => {
+			session.agent.streamFunction = scriptedStream(
+				script,
+				() => reply([{ type: "text", text: "ok" }]),
 				// Snapshot only the messages: the live context also carries non-cloneable tool handlers.
-				captured.push({ messages: JSON.parse(JSON.stringify(context.messages)) });
-				const stream = createAssistantMessageEventStream();
-				const message = script.shift() ?? reply([{ type: "text", text: "ok" }]);
-				stream.push({ type: "done", reason: message.stopReason as "stop", message });
-				return stream;
-			};
+				(context) => captured.push({ messages: JSON.parse(JSON.stringify(context.messages)) }),
+			);
 		}
 	})();
 	let id = 10;
@@ -310,7 +276,7 @@ test("withheld markers persist but projection removes only their turn's assistan
 	);
 	await f.send({ content: "input-withheld" });
 	expect(f.sends()).toBe(1);
-	const session = await (f.core as unknown as SessionSeam).getSession(f.persona, f.space, "222");
+	const session = await seamOf(f.core).getSession(f.persona, f.space, "222");
 	const marker = session.messages.find(
 		(message) => message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE,
 	);
