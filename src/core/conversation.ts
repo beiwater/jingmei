@@ -11,6 +11,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { KlineRenderer } from "../media/kline-image.ts";
 import type { TextImageRenderer } from "../media/text-image.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import {
@@ -79,6 +80,7 @@ export interface ConversationOptions {
 	imageGenerator?: ImageGenerator;
 	/** Text replies longer than `thresholdChars` are refused and must be sent as a `send_reply` text image. */
 	textImage?: { render: TextImageRenderer; thresholdChars: number };
+	kline?: KlineRenderer;
 	memberMemory: MemberMemory;
 	soulStore: SoulStore;
 	jev?: JevIntegration;
@@ -175,6 +177,7 @@ export class Conversation implements ConversationCore {
 	private readonly voice?: VoiceConfig;
 	private readonly imageGenerator?: ImageGenerator;
 	private readonly textImage?: ConversationOptions["textImage"];
+	private readonly kline?: ConversationOptions["kline"];
 	private readonly memberMemory: MemberMemory;
 	private readonly soulStore: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
@@ -209,6 +212,7 @@ export class Conversation implements ConversationCore {
 		this.voice = options.voice;
 		this.imageGenerator = options.imageGenerator;
 		this.textImage = options.textImage;
+		this.kline = options.kline;
 		this.memberMemory = options.memberMemory;
 		this.soulStore = options.soulStore;
 		this.visionModel = options.visionModel;
@@ -1033,6 +1037,7 @@ export class Conversation implements ConversationCore {
 					search: !!this.webSearchApiKey,
 					voice: !!voice,
 					image: !!imageGenerator,
+					kline: !!this.kline,
 					events: !!this.events,
 					history: !!this.messageIndex,
 					...(this.textImage ? { textImageChars: this.textImage.thresholdChars } : {}),
@@ -1105,6 +1110,7 @@ export class Conversation implements ConversationCore {
 						: {}),
 					...(imageGenerator ? { generateImage: imageGenerator } : {}),
 					...(this.textImage ? { textImage: this.textImage } : {}),
+					...(this.kline ? { kline: this.kline } : {}),
 				}),
 				...(this.messageIndex ? createHistoryTools(scope, this.messageIndex) : []),
 				createCalculationTool(),
