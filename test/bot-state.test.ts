@@ -31,10 +31,12 @@ test("runtime sums finished runs, counts a live run up to now, and stops countin
 	const state = new BotState(db);
 	expect(state.summary(0)).toMatchObject({ current: null, lastSeenAt: null, runs: 0, runtimeMs: 0, messages: 0 });
 
-	setSystemTime(new Date(0));
+	// Not 0: Bun before 1.4 treats setSystemTime(new Date(0)) as "reset to the real clock".
+	const first = MINUTE;
+	setSystemTime(new Date(first));
 	state.startRun();
 	state.recordReply();
-	setSystemTime(new Date(10 * MINUTE));
+	setSystemTime(new Date(first + 10 * MINUTE));
 	state.stopRun();
 
 	const t = 100 * MINUTE;
@@ -48,7 +50,7 @@ test("runtime sums finished runs, counts a live run up to now, and stops countin
 		current: { startedAt: t, replies: 2 },
 		lastSeenAt: null,
 		runs: 2,
-		firstStartedAt: 0,
+		firstStartedAt: first,
 		runtimeMs: 15 * MINUTE + 30_000,
 		replies: 3,
 	});
