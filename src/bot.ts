@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
 	const jev = config.jev;
 	const remoteDecision = jev?.apiKey
-		? createJevClient({ endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
+		? createJevClient({ provider: jev.provider, endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
 		: undefined;
 	const localDecision = config.localJev ? createLocalJevClient(config.localJev) : undefined;
 	const decision =

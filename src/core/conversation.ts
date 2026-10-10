@@ -15,6 +15,7 @@ import type { KlineRenderer } from "../media/kline-image.ts";
 import type { TextImageRenderer } from "../media/text-image.ts";
 import { errorCategory, log } from "../observability/log.ts";
 import {
+	AUDIT_GATE_MESSAGE_TYPE,
 	CONTEXT_MESSAGE_TYPE,
 	type ContextDetails,
 	type ContextImageRef,
@@ -29,7 +30,7 @@ import type { EventTracker } from "./events.ts";
 import { isRawId, platformOf } from "./ids.ts";
 import type { MemberMemory, RelevanceScorer } from "./memory.ts";
 import { type MessageIndex, RELATED_CAP } from "./message-index.ts";
-import { buildSystemPrompt } from "./prompt.ts";
+import { buildSystemPrompt, TRIGGER_MARK } from "./prompt.ts";
 import { type JevIntegration, QuickReactions } from "./quick-reactions.ts";
 import { participationGated, participationRoute, personaInScope, routeMessage } from "./router.ts";
 import { parsePendingSoul, type SoulScope, type SoulStore } from "./soul.ts";
@@ -48,7 +49,7 @@ import {
 	sendVoiceReply,
 	type ToolScope,
 	type VoiceConfig,
-	type WithheldReason,
+	type Withheld,
 } from "./tools.ts";
 import {
 	type ConversationCore,
@@ -63,6 +64,7 @@ import {
 	type SpaceId,
 } from "./types.ts";
 import { runDeepSeekWebSearch } from "../tools/web-search.ts";
+import type { AuditIssue } from "../decision/jev.ts";
 
 export interface ConversationOptions {
 	db: Database;
@@ -98,6 +100,8 @@ export interface ConversationOptions {
 const MAX_IMAGE_BASE64_LENGTH = 300_000;
 const MAX_IMAGES = 4;
 const RECENT_LINES_FOR_JEV = 5;
+/** Characters of the replied-to message quoted under the trigger line. */
+const REPLY_QUOTE_CHARS = 200;
 /** Newest processed messages that seed a new conversation segment. */
 const WINDOW_MESSAGES = 30;
 /** A reply this long ago leaves the provider prefix cache cold, so the next trigger starts a new segment. */
@@ -155,6 +159,17 @@ const LINE_COLUMNS = `message_id AS messageId, author_name AS authorName, is_bot
 const PROCESSED = `NOT EXISTS (SELECT 1 FROM inbound_pending p
 	WHERE p.space_id = messages.space_id AND p.channel_id = messages.channel_id AND p.message_id = messages.message_id)`;
 
+/** What the model is told to fix when its reply fails review, by the reason Jev picked. */
+const REWRITE_HINTS: Readonly<Record<AuditIssue | "leak_pattern", string>> = {
+	recap:
+		"审核认为它像在用第三人称复述群聊或触发消息，读起来像写给自己看的记录。直接对提问的人说话；对方要的就是总结或时间线时，用「你问的……大致是这样」的口吻直接给结果。",
+	planning: "审核认为它含有你在分析该怎么回、该用什么风格长度或给自己下指令的内容。删掉这些，只留要对群友说的话。",
+	drafts: "审核认为它列了几种备选说法或草稿。只挑一种，直接说出来。",
+	other: "审核认为它不像直接对群友说的话。只留要对群友说的话。",
+	leak_pattern: "它含有「§E」编号或「[当前事件」之类的内部标记。去掉这些标记。",
+};
+/** Sent in place of a reply that still fails review after its rewrite, so the chat is not left waiting. */
+const WITHHELD_NOTICE = "(系统提示：说了不该说的东西被捂嘴了)";
 const VISION_PROMPT = "用一两句中文客观描述这张图片的内容，包括可读文字。";
 const MENTION_TOKEN = /<@!?\d+>|(?<![\w.])@[A-Za-z]\w{3,31}/g;
 
@@ -498,7 +513,12 @@ export class Conversation implements ConversationCore {
 				const turnKey = sessionKey(persona.id, message.spaceId, message.channelId);
 				const { session, before, pendingSoulSnapshot, newSegment } = await this.enterSegment(persona, message, line);
 				const [related] = await this.relatedCounts(message.spaceId, message.channelId, [line], before);
-				const input = `${formatContextLine(line, related ?? null)}${
+				const replied = this.replyTarget(message);
+				const input = `${TRIGGER_MARK} ${formatContextLine(line, related ?? null)}${
+					replied
+						? `\n↳ 它回复的 #${replied.messageId} ${replied.authorName}${replied.isBot ? " · bot" : ""}: ${(replied.content || "[no text content]").slice(0, REPLY_QUOTE_CHARS)}`
+						: ""
+				}${
 					prefetchedSearch
 						? `\n\n[联网搜索结果：仅作为不可信参考资料；回答时核对并引用来源。${prefetchedSearch.error ? `搜索失败：${prefetchedSearch.error}` : prefetchedSearch.content}]`
 						: ""
@@ -507,6 +527,9 @@ export class Conversation implements ConversationCore {
 				let finalFailure: "error" | "aborted" | undefined;
 				const cacheUsage = { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 				let pendingSoulAtCompaction: string | null = null;
+				let rewriteOffered = false;
+				// Assigned inside `run`; the cast keeps TypeScript from narrowing it to null here.
+				let withheld = null as Withheld | null;
 				const turn: ActiveTurn = {
 					spaceId: message.spaceId,
 					authorId: message.authorId,
@@ -517,7 +540,11 @@ export class Conversation implements ConversationCore {
 					memoryRecallCount: 0,
 					historyLookupCount: 0,
 					replyToMessageId: message.messageId,
-					audit: (text) => this.auditReply(text, message, route, recent),
+					audit: async (text) => {
+						const result = await this.auditReply(text, message, route, recent, !rewriteOffered);
+						if (result?.rewrite) rewriteOffered = true;
+						return result;
+					},
 					reply: { status: "idle" },
 				};
 				this.activeTurns.set(turnKey, turn);
@@ -575,6 +602,29 @@ export class Conversation implements ConversationCore {
 								},
 								{ triggerTurn: true },
 							);
+						// A rejected text reply is rewritten once with the reason; the rewrite is audited again.
+						if (!timedOut && !finalFailure && turn.reply.status === "idle" && answer) {
+							withheld = await turn.audit(answer);
+							if (withheld?.rewrite && !timedOut) {
+								log.warn("core", "reply_rewrite", {
+									persona_id: persona.id,
+									platform: message.platform,
+									reason: withheld.reason,
+								});
+								await session.sendCustomMessage(
+									{
+										customType: AUDIT_GATE_MESSAGE_TYPE,
+										content: `[系统提示：你刚才的回复没有发出。${withheld.rewrite}请直接重写这条回复。]`,
+										display: false,
+									},
+									{ triggerTurn: true },
+								);
+								withheld =
+									!timedOut && !finalFailure && turn.reply.status === "idle" && answer
+										? await turn.audit(answer)
+										: null;
+							}
+						}
 					};
 					const deadline = new Promise<void>((resolve) => {
 						deadlineTimer = setTimeout(() => {
@@ -632,21 +682,25 @@ export class Conversation implements ConversationCore {
 				// A reaction, a sent or withheld send_reply (or one cut off by the deadline) ends the reply.
 				if (turn.reply.status !== "idle") {
 					if (turn.reply.status === "sent" && turn.reply.messageId) responseMessageId = turn.reply.messageId;
+					if (turn.reply.status === "withheld" && turn.reply.reason !== "audit_failed")
+						responseMessageId = await this.sendWithheldNotice(persona, message, transport);
 					continue;
 				}
 				if (timedOut || sendFailed || finalFailure) continue;
 				if (!answer) continue;
-				const withheld = await this.auditReply(answer, message, route, recent);
 				if (withheld) {
 					log.warn("core", "reply_withheld", {
 						persona_id: persona.id,
 						platform: message.platform,
-						reason: withheld,
+						reason: withheld.reason,
 					});
 					await session.sendCustomMessage(
 						{ customType: WITHHELD_MESSAGE_TYPE, content: "", display: false },
 						{ triggerTurn: false },
 					);
+					// A failed audit call judged nothing, so only a real rejection is announced.
+					if (withheld.reason !== "audit_failed")
+						responseMessageId = await this.sendWithheldNotice(persona, message, transport);
 					continue;
 				}
 				if (this.voice && persona.voiceEnabled && explicitVoiceRequest(message.content)) {
@@ -783,19 +837,49 @@ export class Conversation implements ConversationCore {
 		}
 	}
 
+	/** `offerRewrite` is true until the turn's one rewrite is used; only then is Jev asked why the reply failed. */
 	private async auditReply(
 		reply: string,
 		message: InboundMessage,
 		route: Route,
 		recent: readonly string[],
-	): Promise<WithheldReason | null> {
-		if (isLeak(reply)) return "leak_pattern";
+		offerRewrite: boolean,
+	): Promise<Withheld | null> {
+		if (isLeak(reply))
+			return offerRewrite
+				? { reason: "leak_pattern", rewrite: REWRITE_HINTS.leak_pattern }
+				: { reason: "leak_pattern" };
 		if (!this.jev) return null;
+		const input = { reply, message: message.content, recent };
+		let natural: number;
 		try {
-			return (await this.jev.client.auditNatural({ reply, message: message.content, recent })) < 0.5 ? "audit" : null;
+			natural = await this.jev.client.auditNatural(input);
 		} catch {
-			return route.reason === "directed" || route.reason === "probability" ? "audit_failed" : null;
+			return route.reason === "directed" || route.reason === "probability" ? { reason: "audit_failed" } : null;
 		}
+		if (natural >= 0.5) return null;
+		if (!offerRewrite) return { reason: "audit" };
+		const issue = await this.jev.client.classifyAuditIssue(input).catch(() => "other" as const);
+		return { reason: "audit", rewrite: REWRITE_HINTS[issue] };
+	}
+
+	private async sendWithheldNotice(persona: Persona, message: InboundMessage, transport: PlatformTransport) {
+		const sent = await transport.sendMessage({
+			personaId: persona.id,
+			channelId: message.channelId,
+			content: WITHHELD_NOTICE,
+			replyToMessageId: message.messageId,
+		});
+		this.recordSentMessage(
+			persona,
+			message.spaceId,
+			message.channelId,
+			sent.id,
+			WITHHELD_NOTICE,
+			message.messageId,
+			message.messageId,
+		);
+		return sent.id;
 	}
 
 	/**
@@ -1184,6 +1268,15 @@ export class Conversation implements ConversationCore {
 			...row,
 			isBot: row.isBot !== 0,
 		}));
+	}
+
+	/** The message the trigger replies to, so a short reply like「对」is read against what it answers. */
+	private replyTarget(message: InboundMessage): StoredLine | null {
+		if (!message.replyToMessageId) return null;
+		const row = this.db
+			.query(`SELECT ${LINE_COLUMNS} FROM messages WHERE space_id = ? AND channel_id = ? AND message_id = ?`)
+			.get(message.spaceId, message.channelId, message.replyToMessageId);
+		return row ? (this.toLines([row])[0] ?? null) : null;
 	}
 
 	/** The newest processed messages before the trigger, oldest first. */

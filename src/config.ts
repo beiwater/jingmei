@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
-import { JEV_ENDPOINT } from "./decision/jev.ts";
+import { JEV_ENDPOINT, type JevProvider, OPENAI_DECISIONS_ENDPOINT, OPENAI_DECISIONS_MODEL } from "./decision/jev.ts";
 import { TEXT_IMAGE_MAX_CHARS } from "./media/text-image.ts";
 import { DEFAULT_IMAGE_MODEL } from "./tools/antigravity-image.ts";
 import {
@@ -39,6 +39,7 @@ export interface CelebrationTarget {
 }
 
 export interface JevSettings {
+	provider: JevProvider;
 	endpoint: string;
 	apiKey?: string;
 	model: string;
@@ -71,7 +72,7 @@ export interface AppConfig {
 	/** Optional image describer for personas whose main model is text-only. */
 	visionModel?: { provider: string; model: string };
 	jev?: JevSettings;
-	/** In-process Jev wrapper over an OpenAI-compatible LLM with logprobs. */
+	/** In-process Jev wrapper over an OpenAI-compatible LLM with logprobs; the remote Jev's fallback when both exist. */
 	localJev?: { baseUrl: string; model: string; apiKey?: string };
 	events?: { summaryModel: { provider: string; model: string }; embeddingModel: string };
 	celebrations: CelebrationTarget[];
@@ -637,7 +638,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				input.localJev.apiKeyEnv === undefined ? undefined : secret("localJev.apiKeyEnv", input.localJev.apiKeyEnv);
 			if (baseUrl && nonEmptyString(model)) localJev = { baseUrl, model: model.trim(), ...(apiKey ? { apiKey } : {}) };
 		}
-	} else if (webSearchApiKey) {
+	} else if (webSearchApiKey && !(isObject(input.jev) && input.jev.apiKeyEnv !== undefined)) {
+		// The DeepSeek default stands in only when no remote decision API is configured; it is never a silent fallback.
 		localJev = { baseUrl: "https://api.deepseek.com", model: "deepseek-flash", apiKey: webSearchApiKey };
 	}
 
@@ -647,9 +649,15 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		if (!isObject(input.jev)) errors.push("jev must be an object");
 		else {
 			const value = input.jev;
+			const provider = value.provider ?? "typesafe";
+			if (provider !== "typesafe" && provider !== "openai") errors.push('jev.provider must be "typesafe" or "openai"');
+			const openai = provider === "openai";
 			const apiKey = value.apiKeyEnv === undefined ? undefined : secret("jev.apiKeyEnv", value.apiKeyEnv);
-			const endpoint = httpUrl("jev.endpoint", value.endpoint === undefined ? JEV_ENDPOINT : value.endpoint);
-			const model = value.model ?? DEFAULT_JEV_MODEL;
+			const endpoint = httpUrl(
+				"jev.endpoint",
+				value.endpoint === undefined ? (openai ? OPENAI_DECISIONS_ENDPOINT : JEV_ENDPOINT) : value.endpoint,
+			);
+			const model = value.model ?? (openai ? OPENAI_DECISIONS_MODEL : DEFAULT_JEV_MODEL);
 			if (!nonEmptyString(model)) errors.push("jev.model must be a nonempty string");
 			for (const key of ["quickReactions", "memoryScoring", "replyDecision"] as const)
 				if (value[key] !== undefined && typeof value[key] !== "boolean") errors.push(`jev.${key} must be a boolean`);
@@ -687,6 +695,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			}
 			if (apiKey || localJev)
 				jev = {
+					provider: openai ? "openai" : "typesafe",
 					endpoint: endpoint ?? JEV_ENDPOINT,
 					...(apiKey ? { apiKey } : {}),
 					model: String(model).trim(),

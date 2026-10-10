@@ -7,7 +7,8 @@ import {
 	type ReplyPart,
 	type ReplySources,
 	type ToolScope,
-	type WithheldReason,
+	isLeak,
+	type Withheld,
 } from "../src/core/tools.ts";
 import type { PlatformTransport } from "../src/core/types.ts";
 import { TextImageError } from "../src/media/text-image.ts";
@@ -36,7 +37,7 @@ function setup(
 	options: {
 		sources?: ReplySources;
 		send?: (input: Send, attempt: number) => Promise<{ id: string }>;
-		audit?: (text: string) => Promise<WithheldReason | null>;
+		audit?: (text: string) => Promise<Withheld | null>;
 	} = {},
 ) {
 	const sends: Send[] = [];
@@ -350,22 +351,42 @@ describe("send_reply", () => {
 			draws++;
 			return generated();
 		};
-		const audited = setup({ sources: { generateImage: drawing }, audit: async () => "audit" });
+		const audited = setup({ sources: { generateImage: drawing }, audit: async () => ({ reason: "audit" }) });
 		const result = await audited.run([
 			{ type: "image", prompt: "a cat" },
 			{ type: "text", text: "我先规划一下怎么回答" },
 		]);
 		expect(result).toMatchObject({ terminate: true, details: { error: "withheld" } });
-		expect(audited.turn.reply).toEqual({ status: "withheld" });
+		expect(audited.turn.reply).toEqual({ status: "withheld", reason: "audit" });
 
-		// Internal markers anywhere visible (here a caption) are withheld without asking the audit.
-		const leaked = setup({ sources: { generateImage: drawing } });
+		// Internal markers anywhere visible (here a caption) go to the audit even without spoken text.
+		const leaked = setup({
+			sources: { generateImage: drawing },
+			audit: async (text) => (isLeak(text) ? { reason: "leak_pattern" } : null),
+		});
 		await leaked.run([{ type: "image", prompt: "a cat", caption: "§E3 的图" }]);
-		expect(leaked.audits).toEqual([]);
-		expect(leaked.turn.reply).toEqual({ status: "withheld" });
+		expect(leaked.audits).toEqual(["§E3 的图"]);
+		expect(leaked.turn.reply).toEqual({ status: "withheld", reason: "leak_pattern" });
 
 		expect(draws).toBe(0);
 		expect([...audited.sends, ...leaked.sends]).toEqual([]);
+	});
+
+	test("a rejection with a rewrite hint keeps the turn open so a second send_reply goes out", async () => {
+		let rejections = 1;
+		const f = setup({
+			audit: async () => (rejections-- > 0 ? { reason: "audit", rewrite: "只留要对群友说的话。" } : null),
+		});
+		const first = await f.run([{ type: "text", text: "我先列个计划" }]);
+		expect(first).toMatchObject({ isError: true, details: { error: "withheld" } });
+		expect(first).not.toHaveProperty("terminate");
+		expect(JSON.stringify(first.content)).toContain("只留要对群友说的话。");
+		expect(f.turn.reply).toEqual({ status: "idle" });
+		expect(f.sends).toEqual([]);
+
+		await f.run([{ type: "text", text: "火锅！" }]);
+		expect(f.audits).toEqual(["我先列个计划", "火锅！"]);
+		expect(f.sends.map((send) => send.content)).toEqual(["火锅！"]);
 	});
 
 	test("a text image without a caption is stored under a one-line title taken from its Markdown", async () => {
@@ -430,7 +451,7 @@ describe("send_reply", () => {
 	});
 
 	test("media-only replies skip the naturalness audit", async () => {
-		const f = setup({ sources: { reactionImages: {} }, audit: async () => "audit" });
+		const f = setup({ sources: { reactionImages: {} }, audit: async () => ({ reason: "audit" }) });
 		await f.run([{ type: "reaction_image", asset_id: "hello" }]);
 		expect(f.audits).toEqual([]);
 		expect(f.sends).toMatchObject([{ content: "👋", replyToMessageId: "42" }]);

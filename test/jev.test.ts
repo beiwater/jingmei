@@ -7,6 +7,8 @@ import {
 	JevError,
 	type JevErrorCode,
 	NEW_EVENT_OPTION,
+	OPENAI_DECISIONS_ENDPOINT,
+	OPENAI_DECISIONS_MODEL,
 	shouldQuickReact,
 	withFallback,
 } from "../src/decision/jev.ts";
@@ -295,6 +297,31 @@ describe("Jev natural reply audit", () => {
 		}
 	});
 
+	test("asks the reason for a failed audit as one choice over the fixed issue menu", async () => {
+		const { impl, calls } = fakeFetch(() =>
+			Response.json({ answers: { issue: { type: "choice", choice: "recap", confidence: 0.8 } } }),
+		);
+		expect(
+			await createJevClient(config, impl).classifyAuditIssue({
+				reply: "雨夹雪说了X",
+				message: "梳理时间线",
+				recent: [],
+			}),
+		).toBe("recap");
+		expect(calls[0]?.body.state).toEqual({ reply: "雨夹雪说了X", message: "梳理时间线" });
+		expect(calls[0]?.body.questions.issue?.type).toBe("choice");
+		expect(Object.keys(calls[0]?.body.questions.issue?.criteria as object)).toEqual([
+			"recap",
+			"planning",
+			"drafts",
+			"other",
+		]);
+		const unknown = createJevClientWithTransport(async () => ({
+			answers: { issue: { type: "choice", choice: "rude", confidence: 1 } },
+		}));
+		await expectJevError(unknown.classifyAuditIssue({ reply: "好", message: "嗯" }), "invalid_response");
+	});
+
 	test("rejects missing, mistyped and non-unit audit answers", async () => {
 		for (const natural of [
 			undefined,
@@ -512,6 +539,74 @@ describe("Jev fallback", () => {
 		);
 		expect(primary.calls).toHaveLength(1);
 		expect(fallback.calls).toHaveLength(1);
+	});
+});
+
+describe("OpenAI Decisions API", () => {
+	const openai = { provider: "openai" as const, apiKey: "secret-key", model: "" };
+
+	test("sends predicates and choices with string input and maps answers back by name", async () => {
+		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+		const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+			return Response.json({
+				model: OPENAI_DECISIONS_MODEL,
+				answers: [
+					{
+						type: "choice",
+						name: "reaction",
+						choice: "😂",
+						probabilities: [
+							{ value: "😂", probability: 0.9 },
+							{ value: "none", probability: 0.1 },
+						],
+						confidence: 0.7,
+					},
+					{ type: "predicate", name: "strong_emotion", probability: 0.2 },
+					{ type: "predicate", name: "funny", probability: 0.95 },
+				],
+			});
+		}) as typeof fetch;
+		const decision = await createJevClient(openai, impl).decideQuickReaction({
+			text: "哈哈哈笑死",
+			recent: ["a"],
+			emojis: EMOJIS,
+		});
+
+		expect(decision).toEqual({ emoji: "😂", confidence: 0.7, strongEmotion: 0.2, funny: 0.95 });
+		expect(calls[0]?.url).toBe(OPENAI_DECISIONS_ENDPOINT);
+		const body = calls[0]?.body as {
+			model: string;
+			input: string;
+			questions: Array<Record<string, unknown>>;
+		};
+		expect(body.model).toBe(OPENAI_DECISIONS_MODEL);
+		expect(JSON.parse(body.input)).toEqual({ message: "哈哈哈笑死", recent: ["a"] });
+		expect(body.questions.map((question) => [question.type, question.name])).toEqual([
+			["choice", "reaction"],
+			["predicate", "strong_emotion"],
+			["predicate", "funny"],
+		]);
+		expect(body.questions[0]?.choices).toEqual([
+			{ value: "👍", description: "赞同、收到" },
+			{ value: "😂", description: "好笑" },
+			{ value: "none", description: expect.any(String) },
+		]);
+		// OpenAI rejects unknown fields: a predicate carries only type, name and instructions.
+		expect(Object.keys(body.questions[1] ?? {}).sort()).toEqual(["instructions", "name", "type"]);
+	});
+
+	test("treats a refusal or an answer outside the menu as an invalid response", async () => {
+		for (const answer of [
+			{ type: "refusal", name: "natural" },
+			{ type: "predicate", name: "natural", probability: 1.5 },
+		]) {
+			const impl = (async () => Response.json({ answers: [answer] })) as unknown as typeof fetch;
+			await expectJevError(
+				createJevClient(openai, impl).auditNatural({ reply: "好", message: "嗯" }),
+				"invalid_response",
+			);
+		}
 	});
 });
 

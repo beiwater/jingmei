@@ -276,14 +276,20 @@ Turn it on with `"textImage": { "enabled": true }`; no browser is needed. Render
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. Jingmei shares one decision client across participation decisions, final-text audits, reactions, memory ranking, and optional event assignment and participation scoring.
+[Jev](https://docs.typesafe.ai/models) is TypeSafe's “System One” decision model: instead of text it returns calibrated probabilities for structured questions. The remote decision API can instead be the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`jev.provider: "openai"`, model `gpt-6-luna`): the questions are identical, yes/no questions go out as `predicate` and choices as `choice`, a yes/no question's criteria are folded into its instructions, and a refusal counts as a failed call. Jingmei shares one decision client across participation decisions, final-text audits, reactions, memory ranking, and optional event assignment and participation scoring.
 
 **Participation decisions** (`replyDecision`, default `true`). Explicit mentions, replies and name/alias matches route directly without a participation request. Every other human message gets one request when enabled and a client exists: given the speaker, choose among all scoped characters and `none`. Without explicit addressing, only an obvious response to what the character just said counts (the character having just spoken does not), and uncertain cases choose `none`. A selected character with winning probability ≥ 0.5 routes directly, bypassing sampling and gates, and counts as addressed for quick reactions.
 
 - Ordinary candidates still come from cumulative `routingP` HMAC sampling. Any message from the character's current-platform account in the last 30 seconds puts it on cooldown. It also stays silent when, among at most 30 latest messages in the last 10 minutes, its account has at least 3 messages, there are more than 1 distinct other authors, and its share is ≥ 25%.
 - Only a sampled, ungated candidate adds the `chat_in` noul scoring question to that same request; it needs a score ≥ `replyThreshold` (default `0.7`). Directed-content detection still runs when there is no candidate or a gate blocks it. Failure logs `participation_failed` with an error category and routes nobody. Disabled or without a client, routing uses only HMAC sampling and gates.
 
-**Final-text audit**. Before sending final text (or converting it to explicitly requested voice), a deterministic check withholds `§E` followed by a digit or `[当前事件`; no audit request is made for these internal-marker leaks. With a client, a noul naturalness score < 0.5 also withholds the reply. Audit failures withhold content-directed and probability replies, but allow explicit mention/reply/name routes. Without a client, only the marker check runs. Withholding sends no error notice, records no platform message and adds no reply count: it logs text-free `reply_withheld` and persists a hidden `jingmei_withheld_v1` marker. Subsequent provider projections omit that marker and the withheld turn's assistant messages so unsent text cannot become chat history. `send_reply` runs the same audit before preparing any part: all its text parts and voice transcripts are scored together, and captions and text-image Markdown also get the marker check; a withheld reply sends none of its parts and ends the turn (also logging `reply_withheld`; the tool result stays in the session so the character knows nothing was sent). Media-only replies (pictures, reaction images) skip the naturalness score.
+**Final-text audit**. Before sending final text (or converting it to explicitly requested voice), a deterministic check rejects `§E` followed by a digit or `[当前事件`; no audit request is made for these internal-marker leaks. With a client, a noul naturalness score < 0.5 also rejects the reply; a recap the user explicitly asked for (a summary or timeline) counts as natural.
+
+- **One rewrite**: a turn's first rejection does not go silent. For a failed naturalness score the decision model is asked once more for the reason (recapping the chat, planning, listing drafts, other), and the character gets a concrete hint for that reason (a marker leak gets a hint to drop the markers) and rewrites; `reply_rewrite` is logged. Final text learns it through a hidden `jingmei_audit_gate_v1` message that triggers the rewrite; `send_reply` learns it from its tool result and the turn stays open, so the character can call it again or answer in text. The rewrite is audited as usual.
+- **Rejected again**: nothing of the reply is sent; instead the fixed line `(系统提示：说了不该说的东西被捂嘴了)` goes out (replying to the message, stored), with text-free `reply_withheld`; final text also persists a hidden `jingmei_withheld_v1` marker. Later provider projections drop the rejected draft, the rewrite hint and the withheld reply so unsent text cannot become chat history.
+- **Failed audit call**: content-directed and probability replies are withheld silently without a rewrite (`audit_failed`; nothing was judged, so no notice), while explicit mention/reply/name routes are allowed. Without a client, only the marker check runs.
+
+`send_reply` runs the same audit before preparing any part: all its text parts and voice transcripts are scored together, and captions and text-image Markdown also get the marker check. Media-only replies (pictures, reaction images) skip the naturalness score.
 
 **Quick reactions** (`quickReactions`). Every human message with text gets one Jev request asking three things at once: pick an emoji from the table (or `none`), is the message strongly emotional, is it funny.
 
@@ -293,7 +299,7 @@ Turn it on with `"textImage": { "enabled": true }`; no browser is needed. Render
 
 **Memory ranking** (`memoryScoring`). When a character explicitly calls `recall_member_memory`, candidate facts and relationships (per member: the 20 newest facts and 16 strongest relationships) are scored against the current message in a single Jev request, keeping the 5 most relevant facts and 4 relationships per member. If Jev is unavailable it falls back to recency and interaction count.
 
-**Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` defaults to `https://api.deepseek.com` / `deepseek-flash`. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
+**Local wrapper and fallback**. When `jev.apiKeyEnv` resolves, requests go to `jev.endpoint` first. If a local LLM is configured, any remote error retries once through the in-process `notjev` wrapper. Without a remote key, the wrapper is used directly; no extra HTTP server is started. “Local” describes the wrapper, not necessarily its LLM: absent `localJev` plus a resolved `DEEPSEEK_API_KEY` and no remote key defaults to `https://api.deepseek.com` / `deepseek-flash`. With a remote key that default does not apply, so there is no fallback unless `localJev` is written out. An explicit `localJev` replaces that default completely; omitting its `apiKeyEnv` sends no authentication.
 
 The wrapper has a 30-second default timeout and disables DeepSeek thinking (`thinking.type=disabled`). Its LLM must return logprobs; missing logprobs become an `invalid_response` call failure. When the model abstains, the wrapper takes the highest-probability option (argmax).
 
@@ -301,9 +307,9 @@ Quick reactions and memory ranking still require an explicit `jev` section; `eve
 
 **Cost**. Remote Jev bills input tokens only; output is free (`jev-1.13` was $0.042 per million tokens at the time of writing — see the [official pricing](https://docs.typesafe.ai/models)). A reaction request carries just the message, up to 5 recent chat lines (each cut to 200 characters) and three questions — typically a few hundred tokens — and the remote request times out after 3 seconds. It uses none of the main model's tokens; the local wrapper consumes tokens from its configured LLM.
 
-With participation enabled and a client available, each human message without an explicit addressee adds **+1 decision request** (directed detection plus optional participation score combined), and each final-text reply adds **+1 naturalness audit**. Explicit addressing skips participation; marker leaks skip the audit. These calls do not use the main reply model, but the local wrapper incurs its LLM's cost; remote fallback can add one local LLM call.
+With participation enabled and a client available, each human message without an explicit addressee adds **+1 decision request** (directed detection plus optional participation score combined), and each final-text reply adds **+1 naturalness audit** (a rejection adds +1 reason request and the rewrite +1 audit). Explicit addressing skips participation; marker leaks skip the audit. These calls do not use the main reply model, but the local wrapper incurs its LLM's cost; remote fallback can add one local LLM call.
 
-**Configuration**. Put `TYPESAFE_API_KEY: …` in `.env` and add to `jingmei.config.json`:
+**Configuration**. Put `TYPESAFE_API_KEY: …` in `.env` and add to `jingmei.config.json` (for OpenAI use `"provider": "openai"` and `"apiKeyEnv": "OPENAI_API_KEY"`, and omit `endpoint` and `model` to get its defaults):
 
 ```json
 "jev": {
@@ -321,9 +327,10 @@ With participation enabled and a client available, each human message without an
 
 | Field | Default | Meaning |
 |---|---|---|
-| `endpoint` | `https://api.typesafe.ai/v1/systemone` | Remote Jev http(s) URL |
+| `provider` | `typesafe` | Remote wire format: `typesafe` or `openai` |
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | Remote Jev http(s) URL; `openai` defaults to `https://api.openai.com/v1/decisions` |
 | `apiKeyEnv` | none | Env var for the remote key; omit to use only the local wrapper |
-| `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0` |
+| `model` | `jev-latest` | Can be pinned, e.g. `jev-1.13.0`; `openai` defaults to `gpt-6-luna` |
 | `quickReactions` | `true` | Quick reactions |
 | `memoryScoring` | `true` | Memory ranking |
 | `replyDecision` | `true` | Content-aware participation; disabling it retains deterministic candidate gates and final-text audits |

@@ -38,6 +38,9 @@ function setup() {
 		async auditNatural() {
 			return 1;
 		},
+		async classifyAuditIssue() {
+			return "other";
+		},
 		async scoreRelevance(_query, candidates) {
 			return candidates.map(() => 0);
 		},

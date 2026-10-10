@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
-import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
+import { AUDIT_GATE_MESSAGE_TYPE, WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
@@ -306,10 +306,12 @@ test("withheld markers persist but projection removes only their turn's assistan
 	await f.send({ content: "input-before" });
 	f.script.push(
 		f.reply([{ type: "toolCall", id: "withheld-calc", name: "run_js", arguments: { code: "1 + 1" } }], "toolUse"),
+		f.reply([{ type: "text", text: "withheld-draft §E7" }]),
 		f.reply([{ type: "text", text: "withheld-answer §E7" }]),
 	);
 	await f.send({ content: "input-withheld" });
-	expect(f.sends()).toBe(1);
+	// The rewrite also leaked, so only the withheld notice went out.
+	expect(f.sends()).toBe(2);
 	const session = await (f.core as unknown as SessionSeam).getSession(f.persona, f.space, "222");
 	const marker = session.messages.find(
 		(message) => message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE,
@@ -334,6 +336,8 @@ test("withheld markers persist but projection removes only their turn's assistan
 	]);
 	expect(assistants.flatMap((message) => message.content.filter((part) => part.type === "toolCall"))).toEqual([]);
 	expect(JSON.stringify(projected)).not.toContain(WITHHELD_MESSAGE_TYPE);
+	expect(JSON.stringify(projected)).not.toContain("withheld-draft");
+	expect(JSON.stringify(projected)).not.toContain(AUDIT_GATE_MESSAGE_TYPE);
 	for (const text of ["input-before", "input-withheld", "input-after", "input-final"])
 		expect(JSON.stringify(projected)).toContain(text);
 	expect(projected.filter((message) => JSON.stringify(message.content).includes("[当前事件"))).toHaveLength(4);

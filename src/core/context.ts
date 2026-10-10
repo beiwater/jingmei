@@ -13,6 +13,11 @@ export const PENDING_SOUL_TYPE = "discord_pending_soul_v1";
 export const WITHHELD_MESSAGE_TYPE = "jingmei_withheld_v1";
 /** Tells the model its over-long text reply was not sent and must go out as a `send_reply` text image. */
 export const LENGTH_GATE_MESSAGE_TYPE = "jingmei_length_gate_v1";
+/**
+ * Tells the model why its reply failed review so it can rewrite it. Once the turn is over, the gate and the
+ * rejected draft just before it leave the projection.
+ */
+export const AUDIT_GATE_MESSAGE_TYPE = "jingmei_audit_gate_v1";
 
 export interface ContextImageRef {
 	/** File name inside the private media dir; never a path. */
@@ -65,6 +70,7 @@ export interface ProjectionOptions {
  * Provider-context projection (rebuilt per request, never persisted):
  * - pending-soul notes already promoted into the formal soul are dropped;
  * - withheld-turn markers and the assistant messages after their preceding input are dropped;
+ * - audit gates of finished turns are dropped with the rejected draft right before them;
  * - thinking blocks of completed turns (assistant messages before the last user/custom message)
  *   are dropped, keeping those of the in-progress tool loop;
  * - chat messages expand to text + image blocks; for text-only models an image with a vision
@@ -74,22 +80,30 @@ export interface ProjectionOptions {
 function projectContext(messages: readonly AgentMessage[], options: ProjectionOptions): AgentMessage[] {
 	let lastInput = -1;
 	let withheld = false;
-	const withheldAssistants = new Set<number>();
+	const dropped = new Set<number>();
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index]!;
 		if (message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE) {
 			withheld = true;
+		} else if (message.role === "custom" && message.customType === AUDIT_GATE_MESSAGE_TYPE) {
+			// A gate is part of its turn: a withheld marker after it still reaches back to the turn's input.
+			if (lastInput === -1) lastInput = index;
 		} else if (message.role === "user" || message.role === "custom") {
 			if (lastInput === -1) lastInput = index;
 			withheld = false;
 		} else if (withheld && message.role === "assistant") {
-			withheldAssistants.add(index);
+			dropped.add(index);
 		}
 	}
+	messages.forEach((message, index) => {
+		if (index === lastInput || message.role !== "custom" || message.customType !== AUDIT_GATE_MESSAGE_TYPE) return;
+		dropped.add(index);
+		if (messages[index - 1]?.role === "assistant") dropped.add(index - 1);
+	});
 	const projected: AgentMessage[] = [];
 	messages.forEach((message, index) => {
 		if (message.role === "custom" && message.customType === WITHHELD_MESSAGE_TYPE) return;
-		if (withheldAssistants.has(index)) return;
+		if (dropped.has(index)) return;
 		if (isPromotedSoulNote(message, options.personaId, options.formalSoul)) return;
 		if (message.role === "assistant") {
 			projected.push(

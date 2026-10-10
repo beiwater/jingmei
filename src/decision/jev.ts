@@ -1,16 +1,25 @@
 import { readBoundedBody } from "../net/read-bounded-body.ts";
 import { errorCategory, log } from "../observability/log.ts";
 
-/** TypeSafe Jev decision model client (https://docs.typesafe.ai/api.md). Never logs text, state or key. */
+/**
+ * Decision model client: TypeSafe Jev (https://docs.typesafe.ai/api.md) or the OpenAI Decisions API
+ * (https://developers.openai.com/api/docs/guides/decisions), behind one question model. Never logs text, state or key.
+ */
 
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const OPENAI_DECISIONS_ENDPOINT = "https://api.openai.com/v1/decisions";
+export const OPENAI_DECISIONS_MODEL = "gpt-6-luna";
 export const NEW_EVENT_OPTION = "new";
 const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_RECENT_LINES = 5;
 const NONE_OPTION = "none";
 
+export type JevProvider = "typesafe" | "openai";
+
 export interface JevConfig {
+	/** Wire format of `endpoint`; default `typesafe`. */
+	provider?: JevProvider;
 	endpoint?: string;
 	apiKey?: string;
 	model: string;
@@ -57,6 +66,8 @@ export interface JevClient {
 	}): Promise<ParticipationDecision>;
 	/** Probability that the reply is natural chat text ready to post, not internal planning. */
 	auditNatural(input: { reply: string; message: string; recent?: readonly string[] }): Promise<number>;
+	/** Asked only after a failed audit: which kind of planning the reply leaks, so the model can rewrite it. */
+	classifyAuditIssue(input: { reply: string; message: string; recent?: readonly string[] }): Promise<AuditIssue>;
 	/** Relevance of each candidate to the query in [0,1], same order; throws on failure. */
 	scoreRelevance(query: string, candidates: readonly string[]): Promise<number[]>;
 	chooseEvent(input: {
@@ -71,6 +82,16 @@ export interface JevClient {
 		members: readonly string[];
 	}): Promise<number[]>;
 }
+
+/** Why a reply failed the natural audit; `other` when none of the named kinds fits. */
+export type AuditIssue = "recap" | "planning" | "drafts" | "other";
+
+const AUDIT_ISSUE_CRITERIA: Readonly<Record<AuditIssue, string>> = {
+	recap: "`reply` 用第三人称复述群里谁说了什么，或复述事件、触发消息，像写给自己看的记录",
+	planning: "`reply` 在分析自己该怎么回、该用什么风格或长度，或者对自己下指令",
+	drafts: "`reply` 列出几种备选说法或草稿，没有定下要发的那一句",
+	other: "以上都不是",
+};
 
 export type JevErrorCode = "timeout" | "network" | "invalid_response" | `http_${number}`;
 
@@ -134,6 +155,7 @@ const NATURAL_INSTRUCTIONS =
 	"内部计划、元叙述、重述事件或触发消息（如「当前事件」「触发消息」标签）、对自己的指令、" +
 	"分析应采用的风格或长度、列出备选说法或草稿、讨论接下来要说什么，均不是自然正文。" +
 	"自然正文不论长短都可以：简短回答、接梗、情绪表达、追问，以及直接讲给群友的长篇讲解、解题步骤、分点、公式或代码。" +
+	"`message` 明确要求总结、梳理、复述或列时间线时，直接回答提问者的复述也是自然正文。" +
 	"是否需要接话已由路由决定，不重新判断；只检查正文是否泄漏规划，不审核安全、事实准确性、长度格式或是否有新信息。";
 
 function isUnit(value: unknown): value is number {
@@ -200,19 +222,21 @@ function noulOf(answers: Record<string, Answer>, id: string): number {
 
 export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fetch): JevClient {
 	const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const model = config.model || "jev-latest";
+	const openai = config.provider === "openai";
+	const model = config.model || (openai ? OPENAI_DECISIONS_MODEL : "jev-latest");
+	const endpoint = config.endpoint ?? (openai ? OPENAI_DECISIONS_ENDPOINT : JEV_ENDPOINT);
 
 	return createJevClientWithTransport(async (state, questions) => {
 		const signal = AbortSignal.timeout(timeoutMs);
 		let bytes: Uint8Array | null;
 		try {
-			const response = await fetchImpl(config.endpoint ?? JEV_ENDPOINT, {
+			const response = await fetchImpl(endpoint, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
 					...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
 				},
-				body: JSON.stringify({ state, model, questions }),
+				body: JSON.stringify(openai ? toOpenAiRequest(model, state, questions) : { state, model, questions }),
 				signal,
 			});
 			if (!response.ok) {
@@ -232,8 +256,64 @@ export function createJevClient(config: JevConfig, fetchImpl: typeof fetch = fet
 		} catch {
 			throw new JevError("invalid_response");
 		}
-		return payload;
+		return openai ? fromOpenAiResponse(payload) : payload;
 	});
+}
+
+function text(value: unknown): string {
+	return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/** OpenAI has no `criteria` on a predicate: the true/false descriptions join its instructions. */
+function toOpenAiRequest(model: string, state: unknown, questions: Readonly<Record<string, Question>>) {
+	return {
+		model,
+		input: text(state),
+		questions: Object.entries(questions).map(([name, question]) =>
+			question.type === "noul"
+				? {
+						type: "predicate",
+						name,
+						instructions: question.criteria
+							? `${text(question.instructions)}\n是：${question.criteria.true}\n否：${question.criteria.false}`
+							: text(question.instructions),
+					}
+				: {
+						type: "choice",
+						name,
+						instructions: text(question.instructions),
+						choices: Object.entries(question.criteria).map(([value, description]) => ({ value, description })),
+					},
+		),
+	};
+}
+
+/** Re-keys OpenAI answers by name in the TypeSafe shape; a refusal or unknown type fails `parseAnswers`. */
+function fromOpenAiResponse(payload: unknown) {
+	const list = typeof payload === "object" && payload !== null && "answers" in payload ? payload.answers : undefined;
+	if (!Array.isArray(list)) throw new JevError("invalid_response");
+	const answers: Record<string, unknown> = {};
+	for (const answer of list) {
+		if (typeof answer !== "object" || answer === null || typeof answer.name !== "string") continue;
+		if (answer.type === "predicate") answers[answer.name] = { type: "noul", noul: answer.probability };
+		else if (answer.type === "choice")
+			answers[answer.name] = {
+				type: "choice",
+				choice: answer.choice,
+				confidence: answer.confidence,
+				...(Array.isArray(answer.probabilities)
+					? {
+							probabilities: Object.fromEntries(
+								answer.probabilities.map((entry: { value?: unknown; probability?: unknown }) => [
+									entry.value,
+									entry.probability,
+								]),
+							),
+						}
+					: {}),
+			};
+	}
+	return { answers };
 }
 
 export function createJevClientWithTransport(
@@ -328,13 +408,29 @@ export function createJevClientWithTransport(
 					// Without criteria the model withheld ~12% of real chat replies on security/crypto topics; with the
 					// earlier short-reply wording it withheld every long step-by-step answer (e.g. worked maths solutions).
 					criteria: {
-						true: "`reply` 从头到尾都是直接对群友说的话（长篇讲解、解题步骤、分点或公式也算），可以原样发到群里。",
+						true: "`reply` 从头到尾都是直接对群友说的话（长篇讲解、解题步骤、分点或公式，以及应 `message` 要求做的总结、时间线也算），可以原样发到群里。",
 						false:
 							"`reply` 含有机器人写给自己的规划：用第三人称复述群里谁说了什么、分析自己该怎么回或该用什么风格长度、列出几种备选说法或草稿、复述事件或触发消息、对自己下指令。",
 					},
 				},
 			});
 			return noulOf(answers, "natural");
+		},
+
+		async classifyAuditIssue({ reply, message, recent }) {
+			const state: { reply: string; message: string; recent?: string[] } = { reply, message };
+			if (recent && recent.length > 0) state.recent = recent.slice(-MAX_RECENT_LINES);
+			const answers = await evaluate(state, {
+				issue: {
+					type: "choice",
+					instructions:
+						"`reply` 是机器人准备回复 `message` 的草稿，已被判定不像直接对群友说的话。判断它主要犯了哪一类问题。",
+					criteria: AUDIT_ISSUE_CRITERIA,
+				},
+			});
+			const answer = answers.issue;
+			if (answer?.type !== "choice") throw new JevError("invalid_response");
+			return answer.choice as AuditIssue;
 		},
 
 		async scoreRelevance(query, candidates) {
@@ -425,6 +521,12 @@ export function withFallback(primary: JevClient, fallback: JevClient): JevClient
 				"auditNatural",
 				() => primary.auditNatural(input),
 				() => fallback.auditNatural(input),
+			),
+		classifyAuditIssue: (input) =>
+			attempt(
+				"classifyAuditIssue",
+				() => primary.classifyAuditIssue(input),
+				() => fallback.classifyAuditIssue(input),
 			),
 		scoreRelevance: (query, candidates) =>
 			attempt(

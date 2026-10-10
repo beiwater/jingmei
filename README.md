@@ -275,14 +275,20 @@ personas/
 
 ## Jev
 
-[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。精魅用同一个决策客户端做接话判断、最终文字审查、表情、记忆排序，以及可选的话题归属与参与度判断。
+[Jev](https://docs.typesafe.ai/models) 是 TypeSafe 的“System One”决策模型：不生成文字，只对结构化问题返回校准过的概率。远程决策接口也可以换成 [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)（`jev.provider: "openai"`，模型 `gpt-6-luna`）：问题完全相同，是非题以 `predicate` 发送、选择题以 `choice` 发送，是非题的判断标准并入说明文字，拒答按调用失败处理。精魅用同一个决策客户端做接话判断、最终文字审查、表情、记忆排序，以及可选的话题归属与参与度判断。
 
 **接话判断**（`replyDecision`，默认 `true`）。明确 @、回复、名字/别名命中时直接路由，不请求接话判断。其他人类消息在启用且有客户端时各发一次请求：带上发言者，从当前空间的全部角色与 `none` 中判断是否在对某个角色说话。没有点名时只有明显在回应角色刚说的话才算（角色刚发过言不算），拿不准选 `none`；选中角色的概率 ≥ 0.5 时直接路由，不受抽样与门控限制，秒回表情也视它为被点名。
 
 - 普通接话候选仍按累积 `routingP` 的 HMAC 抽样产生。角色当前平台账号最近 30 秒发过任何消息则冷却；最近 10 分钟最多 30 条消息中，该账号至少 3 条、其他不同作者多于 1 人且该账号占比 ≥ 25% 时也不主动接话。
 - 只有抽样且未被门控的候选才在同一次请求中附带 `chat_in` 的 noul 评分问题，评分 ≥ `replyThreshold`（默认 `0.7`）才接话。即使没有候选或被门控，仍判断内容指向；调用失败记 `participation_failed` 和错误类别，不让任何角色接话。关闭或没有客户端时，只用 HMAC 抽样与门控。
 
-**最终文字审查**。发送最终文字（或把它转换成明确要求的语音）前，先检查 `§E` 后跟数字、`[当前事件` 等内部标记，命中直接扣留，不请求审查。有客户端时再用 noul 评分自然度：分数 < 0.5 扣留；审查失败时，内容指向和概率接话扣留，明确 @、回复、名字路由则放行。没有客户端时只做标记检查。扣留不发错误提示、不写平台消息或增加回复数，只记不含正文的 `reply_withheld`，并持久保存隐藏的 `jingmei_withheld_v1` 标记；下轮 provider 投影排除该标记和被扣留轮次的 assistant 消息，避免把未发送内容当历史。`send_reply` 在准备任何部分前做同样的审查：所有文字部分与语音稿合在一起审查自然度，配文与长文图 Markdown 也做内部标记检查；被扣留时整条回复一条不发、本轮结束（同样记 `reply_withheld`，工具结果留在会话里告诉角色没发出）。只有图片、表情图的纯媒体回复不请求自然度审查。
+**最终文字审查**。发送最终文字（或把它转换成明确要求的语音）前，先检查 `§E` 后跟数字、`[当前事件` 等内部标记，命中直接判为不通过，不请求审查。有客户端时再用 noul 评分自然度：分数 < 0.5 不通过；用户明确要求总结、梳理或列时间线时，应要求做的复述算自然正文。
+
+- **重写一次**：每轮第一次不通过不会直接沉默。自然度不过时再问一次决策模型原因（复述群聊、写作规划、列草稿、其他），按原因给角色一句具体的修改提示（标记泄漏则提示去掉标记），让它重写；记 `reply_rewrite`。最终文字通过隐藏的 `jingmei_audit_gate_v1` 消息告知并触发重写；`send_reply` 则在工具结果里告知，本轮不结束，角色可以再调一次或改发文字。重写照常审查。
+- **仍不通过**：整条回复不发，改发固定的一句 `(系统提示：说了不该说的东西被捂嘴了)`（回复原消息、入库），记不含正文的 `reply_withheld`；最终文字还会持久保存隐藏的 `jingmei_withheld_v1` 标记。下轮 provider 投影去掉被拒的草稿、重写提示与被扣留的回复，避免把未发送内容当历史。
+- **审查调用失败**：内容指向和概率接话不重写、静默扣留（`audit_failed`，没有判断就不说“说了不该说的”），明确 @、回复、名字路由则放行。没有客户端时只做标记检查。
+
+`send_reply` 在准备任何部分前做同样的审查：所有文字部分与语音稿合在一起审查自然度，配文与长文图 Markdown 也做内部标记检查。只有图片、表情图的纯媒体回复不请求自然度审查。
 
 **秒回表情**（`quickReactions`）。每条有文字的人类消息发一次 Jev 请求，同时问三件事：从表情表里选一个（或 `none`）、这条消息情绪是否强烈、是否好笑。
 
@@ -292,7 +298,7 @@ personas/
 
 **记忆排序**（`memoryScoring`）。角色按需调用 `recall_member_memory` 时，把候选事实和关系（每人最近 20 条事实、最强 16 条关系）一次性交给 Jev 与当前消息比对相关度，每人保留最相关的 5 条事实和 4 条关系。Jev 不可用时退回按时间和互动次数排序。
 
-**本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev` 且有 `DEEPSEEK_API_KEY` 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
+**本地包装与回退**。`jev.apiKeyEnv` 有值时先调用 `jev.endpoint`；配置了本地 LLM 时，远程调用任何失败都会回退一次到进程内 `notjev` 包装器。没有远程 key 时直接用包装器，不另起 HTTP 服务。“本地”指包装器在进程内运行，其 LLM 可以是远程 DeepSeek。省略 `localJev`、有 `DEEPSEEK_API_KEY` 且没有远程 key 时，默认连接 `https://api.deepseek.com` 的 `deepseek-flash`；配置了远程 key 时这个默认不生效，也就没有回退，要回退须显式写 `localJev`；显式 `localJev` 完全覆盖这个默认，省略其 `apiKeyEnv` 即不带鉴权。
 
 包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
 
@@ -300,9 +306,9 @@ personas/
 
 **成本**。远程 Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；远程请求超时 3 秒。它不消耗主模型的 token；本地包装器则消耗其配置的 LLM token。
 
-接话判断启用且客户端可用时，每条未明确点名的人类消息额外 **+1 次**决策请求（内容指向与可选接话分数合并），每条最终文字回复额外 **+1 次**自然度审查；明确点名省掉接话请求，内部标记命中省掉审查请求。这些调用不使用主回复模型，但本地包装器按其 LLM 计费；远程失败回退可能额外调用一次本地 LLM。
+接话判断启用且客户端可用时，每条未明确点名的人类消息额外 **+1 次**决策请求（内容指向与可选接话分数合并），每条最终文字回复额外 **+1 次**自然度审查（不通过时再 +1 次原因判断，重写后再 +1 次审查）；明确点名省掉接话请求，内部标记命中省掉审查请求。这些调用不使用主回复模型，但本地包装器按其 LLM 计费；远程失败回退可能额外调用一次本地 LLM。
 
-**配置**。在 `.env` 写 `TYPESAFE_API_KEY: …`，在 `jingmei.config.json` 加：
+**配置**。在 `.env` 写 `TYPESAFE_API_KEY: …`，在 `jingmei.config.json` 加（用 OpenAI 时改为 `"provider": "openai"`、`"apiKeyEnv": "OPENAI_API_KEY"`，并省略 `endpoint` 与 `model` 以使用其默认值）：
 
 ```json
 "jev": {
@@ -320,9 +326,10 @@ personas/
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `endpoint` | `https://api.typesafe.ai/v1/systemone` | 远程 Jev 的 http(s) URL |
+| `provider` | `typesafe` | 远程接口格式：`typesafe` 或 `openai` |
+| `endpoint` | `https://api.typesafe.ai/v1/systemone` | 远程 Jev 的 http(s) URL；`openai` 默认 `https://api.openai.com/v1/decisions` |
 | `apiKeyEnv` | 无 | 远程 key 的环境变量名；省略则仅使用本地包装器 |
-| `model` | `jev-latest` | 也可固定版本，如 `jev-1.13.0` |
+| `model` | `jev-latest` | 也可固定版本，如 `jev-1.13.0`；`openai` 默认 `gpt-6-luna` |
 | `quickReactions` | `true` | 秒回表情 |
 | `memoryScoring` | `true` | 记忆排序 |
 | `replyDecision` | `true` | 内容感知接话判断；关闭仍保留确定性抽样门控与最终文字审查 |

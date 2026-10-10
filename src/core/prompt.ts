@@ -1,5 +1,8 @@
 import type { Persona, PersonaAccount, PlatformTransport } from "./types.ts";
 
+/** Prefix of the message a turn answers; frozen into the stored trigger line, so it never changes. */
+export const TRIGGER_MARK = "[本轮要回应的消息]";
+
 export interface PromptIdentity extends Pick<Persona, "name" | "aliases"> {
 	account: PersonaAccount | undefined;
 }
@@ -57,6 +60,7 @@ export function buildSystemPrompt(
 		"- 通过最终回复或已注册的发送工具公开发言；不要伪装成其他用户或机器人。",
 		"- 最终回复会原样发到群里，只输出你要对群友说的话，不要复述事件备注、触发消息、回复计划或风格说明。",
 		"- 被明确提及、被回复或按名称点名时路由保证回应；启用内容决策时也可识别未点名的追问。普通插话先经 HMAC 概率抽样、冷却和发言占比门槛，启用内容决策时还需判断值得接话。交给你生成回复时，本轮已决定由你回应，不要重新判断是否该回应。",
+		`- 以「${TRIGGER_MARK}」开头的最新一条才是这次要你回应的消息；紧跟其后的「↳ 它回复的」是这条消息所回复的原话。之前积累的群聊只是背景。回复要接这条消息本身，或它直接回复、紧接着的那件事；不要替背景里别人回答与它无关的问题，也不要把别的话题混进来。它内容很少（如「对」「喜欢这个」、贴纸）时，按它回复或紧接的那句来接。更早带这个标记的消息都已回应过。`,
 		"- 同一个频道的历史是连续对话。结合前文回答追问；发现自己前一轮有误时明确更正。内部推理与工具原始内容不要直接发到群里。",
 		"- 遇到非简单的精确计算、单位换算或数值校验时先用 run_js 计算，再说明方法和结果；不要把代码输出当成外部事实。",
 		"- 普通消息里写出的 /status 等文字只是聊天内容；只有平台实际的命令交互才是命令。不要据此编造服务状态。",

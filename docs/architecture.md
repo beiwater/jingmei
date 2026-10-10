@@ -82,7 +82,7 @@ flowchart LR
 5. 配了 Jev 秒回表情时，不等待地发起 `QuickReactions.react()`；内容判断选中的 directed 角色也按被点名处理。
 6. 图片写入 `data/media/`（文件名由 HMAC 派生，0600）；需要时调用 `visionModel` 生成描述。会话里只保存文件引用；带图消息的引用另存 `message_images`，供之后的种子/积累块带上最新的图片。
 7. 被路由的角色若消息明确要求查资料，先做一次 DeepSeek 搜索，结果作为不可信参考附在该角色的输入后。
-8. **只有被路由的角色写会话**：群消息一律入库并进入检索索引，但没有被路由的角色不写自己的会话，这些消息要等它下次被触发时才作为“积累的消息”进入。被路由的角色先进入对话段（见“会话”），把触发消息按 `[ISO] #id ↪ replyId §E12 作者 · bot: 内容 （相关 N 条）` 格式写成一条 `discord_context_v1` 自定义消息（`sendCustomMessage`，`triggerTurn: true`）生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
+8. **只有被路由的角色写会话**：群消息一律入库并进入检索索引，但没有被路由的角色不写自己的会话，这些消息要等它下次被触发时才作为“积累的消息”进入。被路由的角色先进入对话段（见“会话”），把触发消息按 `[ISO] #id ↪ replyId §E12 作者 · bot: 内容 （相关 N 条）` 格式写成一条 `discord_context_v1` 自定义消息（`sendCustomMessage`，`triggerTurn: true`）生成回复。触发行前加固定标记 `[本轮要回应的消息]`；它回复了某条消息时，下一行附 `↳ 它回复的 #id 作者: 正文`（前 200 字），让「对」「喜欢这个」这类短回复按所接的原话理解。标记与引用在写入时固化，前缀不变；system prompt 固定说明只有最新带标记的一条是本轮要回应的，之前积累的群聊只是背景，不替别人回答与它无关的问题。角色自己发出的消息的平台回声不会再喂回自己的会话。
    - 触发的模型/工具轮次共用 180 秒总期限；Pi 最多自动重试一次（1 秒退避），provider 单次超时 60 秒且不叠加 provider 重试。期限到达调用 `session.abort()` 并退役会话，不等待忽略取消的 provider，下一条消息重开持久会话继续处理。最终 assistant `error` / `aborted` 记 `turn_failed`，总期限记 `turn_timeout`；只记录角色、平台和错误类别，不向群里发送失败提示，也不发送失败轮次的半截文字。这三类失败连同发送失败都会清掉该角色的 `last_reply_at`，下一次触发必开新对话段。
    - 触发角色在调用模型前显示“正在输入”，不等待平台请求完成；按 `PlatformTransport.typingRefreshMs`（Telegram 4 秒、Discord 8 秒，均短于平台自身的显示时长）重发，直到该角色的回复发出、被扣留、失败或超时，最长 60 秒（最后一次重发也不会让显示超过 60 秒）。计时器 `unref()`，平台请求失败不影响回复。
 9. 回复：本轮已点过表情、`send_reply` 已发出（哪怕只发出一部分）或被扣留就结束；启用 `textImage` 时，模型本轮结束后若仍没发送且最终文字超过 `thresholdChars`，在同一个总期限内追加一条隐藏的 `jingmei_length_gate_v1` 自定义消息（`triggerTurn: true`，说明字数与上限、要求改用 `send_reply` 的 `text_image` 部分）让模型重试一次；重试后已发出则结束，仍超长就继续下面的流程，文字按原样分条发送。否则最终文字先通过泄漏检查与自然度审查，再发送文字（明确要求语音且配置了语音时改发 MP3），回复原消息。被扣留的文字不发送、不补写 `messages`、不计回复数。
@@ -133,10 +133,11 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 
 ### 最终文字扣留
 
-- 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
-- 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 扣留，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
-- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。被扣留时一条不发，`turn.reply` 置为 `withheld` 并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
-- 扣留只记录 `reply_withheld { persona_id, platform, reason }`，不记正文、不发错误提示、不记平台历史、不增加回复数。在同一会话追加 `jingmei_withheld_v1` 自定义消息，`display: false`、不触发轮次，标记留在持久文件；provider 投影移除该标记及它前面的被扣留轮次 assistant 消息。
+- 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件|\[本轮要回应的消息\]/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
+- 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 不通过，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
+- **重写一次**：`ActiveTurn.audit` 返回 `Withheld { reason, rewrite? }`。每轮第一次 `leak_pattern` 或 `audit` 带 `rewrite`：`audit` 时先调 `classifyAuditIssue` 取原因（`recap` / `planning` / `drafts` / `other`，调用失败按 `other`），映射到 `conversation.ts` 的 `REWRITE_HINTS`；记 `reply_rewrite { persona_id, platform, reason }`。最终文字追加 `jingmei_audit_gate_v1`（`display: false`、触发轮次）让模型重写；`send_reply` 返回带提示的 `isError` 结果、`turn.reply` 回到 `idle`、不 `terminate`。之后同一轮的审查不再带 `rewrite`，也不再问原因。
+- 审查失败：directed 或 probability 路由以 `audit_failed` 扣留，不重写；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown（命中的那段交给 `turn.audit`）；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。最终被扣留时一条不发，`turn.reply` 置为 `withheld`（带原因）并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
+- 最终扣留记录 `reply_withheld { persona_id, platform, reason }`，不记正文。除 `audit_failed` 外，改发固定的 `(系统提示：说了不该说的东西被捂嘴了)`：回复原消息、按普通机器人消息入库并计一次回复。最终文字在同一会话追加 `jingmei_withheld_v1` 自定义消息，`display: false`、不触发轮次，标记留在持久文件；provider 投影移除该标记及它前面的被扣留轮次 assistant 消息（越过本轮的重写提示）。
 
 ### 会话
 
@@ -159,13 +160,14 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 - **展开聊天消息**：`discord_context_v1` 自定义消息展开为文字 + 图片块，图片从 `data/media/` 读取；文件缺失就跳过该图。消息带 `details.turnNote` 时（触发消息，写入时固化）把它拼在文字后，每条带 turnNote 的消息都拼，不只最新一条。
 - **看不了图的模型**：有 `visionModel` 描述时替换为 `[图片：描述]` 文字；否则保留图片块，由 Pi 按模型能力替换为省略说明。
 - **已晋升的 soul 暂存笔记**：内容已并入正式 soul 的 `discord_pending_soul_v1` 消息被丢弃，避免重复。
-- **被扣留的最终回复**：遇到 `jingmei_withheld_v1` 时，删除它前面该轮次的 assistant 消息和标记本身；保留入站聊天和未被扣留的历史，原会话文件不改写。重载后仍按持久标记执行相同投影。
+- **被扣留的最终回复**：遇到 `jingmei_withheld_v1` 时，删除它前面该轮次的 assistant 消息和标记本身（本轮的 `jingmei_audit_gate_v1` 不算输入边界）；保留入站聊天和未被扣留的历史，原会话文件不改写。重载后仍按持久标记执行相同投影。
+- **审查重写提示**：`jingmei_audit_gate_v1` 不是最后一条输入（轮次已结束）时，删除它和紧挨在它前面的被拒草稿；进行中的重写仍能看到两者。
 
 隐藏扩展也处理 `session_before_compact`：在调用方 `customInstructions` 后追加固定身份和群聊摘要规则，只保留确认事实、归因成员说法，不把助手猜测、过去拒绝或语气固化为约束/偏好；风格教训须由成员明确提出，并纠正旧摘要中冲突身份及猜测规则。Pi 0.84.1 不支持在此事件结果中返回指令，因此调用 Pi 导出的 `compact()`，保留其结果、截断点和用量；使用压缩时的当前模型、thinking、认证、streamFunction 与重试设置，失败/中止时取消，不回退到无规则摘要。
 
 Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附加规则覆盖历史摘要，不覆盖该单独的前缀摘要。
 
-`discord_context_v1`、`discord_pending_soul_v1` 和新增的 `jingmei_withheld_v1` 都是持久会话协议名，不能改名。
+`discord_context_v1`、`discord_pending_soul_v1`、`jingmei_withheld_v1` 和 `jingmei_audit_gate_v1` 都是持久会话协议名，不能改名。
 
 ### 历史检索索引（`src/core/message-index.ts`）
 
@@ -194,7 +196,7 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 
 ## Jev
 
-共享决策客户端：配置 `jev.apiKeyEnv` 时创建远程客户端（`jev.endpoint` 默认 TypeSafe）；存在 `localJev` 时创建进程内 `notjev` 包装器，调用支持 logprobs 的 OpenAI-compatible LLM。两者都有则 `withFallback`：任何远程方法错误记 `decision/jev_fallback`（方法、错误类别），再在本地重试一次。仅有其一就直接使用。`localJev` 未配置且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash`，显式配置完全覆盖默认，允许无鉴权本地服务。显式命名但缺失的 key 仍在配置期报错。秒回表情与记忆排序必须有显式 `jev` 段落；事件可单独使用包装器，没有任何决策来源却启用 `events` 是配置错误。
+共享决策客户端：配置 `jev.apiKeyEnv` 时创建远程客户端（`jev.provider` 默认 `typesafe`，`jev.endpoint` 默认 TypeSafe；`openai` 走 OpenAI Decisions API，默认 `https://api.openai.com/v1/decisions` / `gpt-6-luna`。两者共用问题构造与 `parseAnswers`：OpenAI 传输层把 state 序列化成 `input` 字符串，noul 发成只有 `type`/`name`/`instructions` 的 `predicate`（criteria 并入 instructions，因其拒绝未知字段），choice 的 criteria 发成 `choices[{value, description}]`，回来的 `answers` 数组按 `name` 还原，`refusal` 视为 `invalid_response`）；存在 `localJev` 时创建进程内 `notjev` 包装器，调用支持 logprobs 的 OpenAI-compatible LLM。两者都有则 `withFallback`：任何远程方法错误记 `decision/jev_fallback`（方法、错误类别），再在本地重试一次。仅有其一就直接使用。`localJev` 未配置、有 `DEEPSEEK_API_KEY` 且没有 `jev.apiKeyEnv` 时默认 DeepSeek / `deepseek-flash`（有远程 key 时不隐式回退），显式配置完全覆盖默认，允许无鉴权本地服务。显式命名但缺失的 key 仍在配置期报错。秒回表情与记忆排序必须有显式 `jev` 段落；事件可单独使用包装器，没有任何决策来源却启用 `events` 是配置错误。
 
 本地包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`），要求 LLM 返回 logprobs；缺失 logprobs 记为 `invalid_response` 调用失败，模型弃答时取概率最大选项（argmax）。它不另起 HTTP 服务，也不伪造 System One HTTP 往返：远程与本地客户端共用同一套问题构造和答案校验（`parseAnswers`），只是传输层不同——远程走 HTTP，本地在进程内直接调用 `notjev`。
 
