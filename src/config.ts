@@ -64,6 +64,8 @@ export interface AppConfig {
 	imageModel: string;
 	/** Present when `textImage.enabled`: text replies over `thresholdChars` must be sent as a rendered image. */
 	textImage?: { thresholdChars: number };
+	/** Present when `kline.enabled`: personas may send live Binance candlestick charts. */
+	kline?: Record<string, never>;
 	/** DEEPSEEK_API_KEY, used by server-side web search. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
@@ -615,6 +617,14 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		}
 	}
 
+	let kline: AppConfig["kline"];
+	if (input.kline !== undefined) {
+		if (!isObject(input.kline)) errors.push("kline must be an object");
+		else if (input.kline.enabled !== undefined && typeof input.kline.enabled !== "boolean")
+			errors.push("kline.enabled must be a boolean");
+		else if (input.kline.enabled === true) kline = {};
+	}
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -714,6 +724,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(voice ? { voice } : {}),
 		imageModel,
 		...(textImage ? { textImage } : {}),
+		...(kline ? { kline } : {}),
 		...(webSearchApiKey ? { webSearchApiKey } : {}),
 		...(visionModel ? { visionModel } : {}),
 		...(jev ? { jev } : {}),

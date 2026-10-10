@@ -41,7 +41,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 |---|---|
 | `network-isolation.test.ts` | 有真实凭据时仍拒绝 Discord / Telegram（含 Discord 子域名） |
 | `log.test.ts` | `persona_id` 原样保留以区分多角色；token/key/prompt/content/url/path 字段仍脱敏；字符串中的 Telegram token、`sk-` key、URL、绝对路径被替换 |
-| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥 |
+| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
 | `events.test.ts` | 人类消息话题归属、人与 bot 回复直接继承且不决策、空间/频道隔离；裸媒体/低内容继承及十分钟边界、视觉描述/Unicode 正文保留决策；`new` 概率低于 0.6 选最佳旧话题、达到阈值或无概率保留新话题；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
 | `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
@@ -72,7 +72,8 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
 | `text-image.test.ts` | 渲染器：中文、LaTeX 公式、表格、代码块出一张固定宽度的合法 PNG，文字越长图越高；图片只从公网 URL 下载（私网、本机、本地路径、引用式写法一律不请求），最多 4 张，下载失败/非图片/网络错误只显示占位；原始 Typst、`<svg>`、`<a>`、数学里的 `#` 转义被当成文字而不执行（执行就会让编译失败）；空与超长输入不做任何工作；过高的页面报 `too_large`；`plot` 代码块画出 2D/3D 图且写错的只留说明、图例文字不会被当成 Typst 执行；`image` 代码块交给画图函数（最多 2 张），失败或未开启时只留占位。`plot.test.ts`：表达式解析（优先级、一元负号、乘方右结合、省略乘号、函数与常量、方程）与拒绝一切非白名单输入；tan 在极点断开且点都在范围内；隐函数自动找范围并等比例；坏规格给出可读原因；代码块替换、数量上限、表达式文本不进 Typst。`textImage` 配置默认关闭、阈值默认 300 与边界校验。`conversation-turn.test.ts`：超长文字被扣留一次并通过工具发图（只发一条、入库的是配文）；模型重试后仍超长则按原样发送文字；未超长与未启用时不重试 |
 | `image-generation.test.ts` | Antigravity 画图请求带存储的 project、模型与宽高比，跳过 thought 图取最终 PNG/JPEG；无效凭据/提示词不发请求；429、HTTP 错误、无图、超大图与超时分类且不回显 token |
-| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库 |
+| `kline.test.ts` | K 线：交易对写法归一（`btc/usdt`→`BTCUSDT`），带参数拼接或过短的写法不发请求；只请求固定公开主机、查询参数正确、`redirect: "error"`，返回按时间升序的数值 K 线；HTTP 400 → `invalid_symbol`，5xx、网络错误、非 JSON、行数不足或字段非数字 → `fetch_failed`；渲染出 1600×1000 的合法 PNG，配文由数据生成（最新价、窗口涨跌）；涨红跌绿、平盘与极小价格仍可渲染；渲染器先取数再画图，坏交易对在请求前失败 |
+| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
 
 `test/network-guard.ts` 是预加载文件，不是测试。
 

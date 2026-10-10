@@ -21,6 +21,7 @@ import { SoulStore } from "./core/soul.ts";
 import type { Persona, Platform, PlatformTransport } from "./core/types.ts";
 import { createJevClient, withFallback } from "./decision/jev.ts";
 import { createLocalJevClient } from "./decision/local-jev.ts";
+import { createKlineRenderer, type KlineRenderer, probeKlineRender } from "./media/kline-image.ts";
 import { cjkFontMissing, renderTextImage, type TextImageRenderer } from "./media/text-image.ts";
 import { inspectVideoTranscoder } from "./media/video-frames.ts";
 import { errorCategory, log } from "./observability/log.ts";
@@ -115,6 +116,16 @@ async function main(): Promise<void> {
 			log.warn("core", "text_image_unavailable", { error_category: errorCategory(error) });
 		}
 	}
+	// A synthetic render proves ECharts and resvg load; live data is fetched per request, not at startup.
+	let kline: KlineRenderer | undefined;
+	if (config.kline) {
+		try {
+			await probeKlineRender();
+			kline = createKlineRenderer();
+		} catch (error) {
+			log.warn("core", "kline_unavailable", { error_category: errorCategory(error) });
+		}
+	}
 	core = new Conversation({
 		db,
 		botState,
@@ -131,6 +142,7 @@ async function main(): Promise<void> {
 		...(config.voice ? { voice: config.voice } : {}),
 		...(imageGenerator ? { imageGenerator } : {}),
 		...(textImage ? { textImage } : {}),
+		...(kline ? { kline } : {}),
 		...(config.visionModel ? { visionModel: config.visionModel } : {}),
 		...(decision
 			? {
@@ -192,6 +204,7 @@ async function main(): Promise<void> {
 		voice_enabled: !!config.voice,
 		image_generation_enabled: !!imageGenerator,
 		text_image_enabled: !!textImage,
+		kline_enabled: !!kline,
 		vision_enabled: !!config.visionModel,
 		jev_quick_reactions: !!jev?.quickReactions,
 		jev_memory_scoring: !!jev?.memoryScoring,

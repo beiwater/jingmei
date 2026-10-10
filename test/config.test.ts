@@ -59,6 +59,16 @@ function errorsOf(run: () => unknown): readonly string[] {
 }
 
 describe("config", () => {
+	test("kline charts are off unless enabled, and the switch must be a boolean", () => {
+		expect(validateConfig(base(), root, env).kline).toBeUndefined();
+		expect(validateConfig(base({ kline: { enabled: false } }), root, env).kline).toBeUndefined();
+		expect(validateConfig(base({ kline: { enabled: true } }), root, env).kline).toEqual({});
+		expect(errorsOf(() => validateConfig(base({ kline: { enabled: "yes" } }), root, env))).toEqual([
+			"kline.enabled must be a boolean",
+		]);
+		expect(errorsOf(() => validateConfig(base({ kline: true }), root, env))).toEqual(["kline must be an object"]);
+	});
+
 	test("applies defaults and resolves secrets", () => {
 		const config = validateConfig(base({ jev: { apiKeyEnv: "TYPESAFE_API_KEY" } }), root, env);
 		expect(config.dataDir).toBe(join(root, "data"));
