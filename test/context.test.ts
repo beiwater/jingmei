@@ -10,7 +10,8 @@ import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { InboundMessage, Platform, SpaceId } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, scriptedStream, seamOf } from "./support/pi.ts";
 
 type Block = AssistantMessage["content"][number];
@@ -43,38 +44,20 @@ function fixture(options: {
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-context-"));
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
-	const persona: Persona = {
-		id: "luna",
-		name: "luna",
+	const persona = makePersona({
 		personaPath,
 		provider: model.provider,
 		model: model.id,
-		routingP: 0,
-		aliases: [],
-		adminUserIds: [],
-		reasoningEffort: "off",
-		sendReactionImages: false,
-		voiceEnabled: false,
-		imageGenerationEnabled: false,
 		accounts: { [platform]: { userId: "900", username: "luna" } },
-	};
-	const observer: Persona = {
+	});
+	const observer = makePersona({
 		...persona,
 		id: "sol",
 		name: "sol",
 		accounts: { [platform]: { userId: "901", username: "sol" } },
-	};
+	});
 	let sends = 0;
-	const transport: PlatformTransport = {
-		platform,
-		echoesOwnMessages: platform === "discord",
-		displayName: platform,
-		promptLines: [],
-		quickReactions: {},
-		sendMessage: async () => ({ id: String(++sends) }),
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
-	};
+	const transport = makeTransport({ platform, sendMessage: async () => ({ id: String(++sends) }) });
 	const db = new Database(":memory:");
 	const memory = new MemberMemory(db);
 	const botState = new BotState(db);

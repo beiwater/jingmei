@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { BotState } from "../src/core/bot-state.ts";
 import { ensureMessagesTable } from "../src/core/db.ts";
 import {
@@ -12,25 +11,22 @@ import {
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
 import { participationGated, participationRoute, routeMessage } from "../src/core/router.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport } from "../src/core/types.ts";
+import type { InboundMessage, Persona } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
+import { makeRuntime } from "./support/pi.ts";
 
 function persona(id: string, name: string, userId: string, overrides: Partial<Persona> = {}): Persona {
-	return {
+	return makePersona({
 		id,
 		name,
-		personaPath: "/unused",
 		provider: "deepseek",
 		model: "deepseek-flash",
-		reasoningEffort: "off",
 		routingP: 0.2,
-		aliases: [],
-		adminUserIds: [],
 		sendReactionImages: true,
 		voiceEnabled: true,
-		imageGenerationEnabled: false,
 		accounts: { discord: { userId, username: name } },
 		...overrides,
-	};
+	});
 }
 
 const personas: Persona[] = [
@@ -55,24 +51,6 @@ function message(overrides: Partial<InboundMessage> = {}): InboundMessage {
 		content: "hello",
 		...overrides,
 	};
-}
-
-function transports(sendMessage: PlatformTransport["sendMessage"]): Map<Platform, PlatformTransport> {
-	return new Map([
-		[
-			"discord",
-			{
-				platform: "discord",
-				echoesOwnMessages: true,
-				displayName: "Discord",
-				promptLines: [],
-				quickReactions: {},
-				sendMessage,
-				formatMention: (user) => `@${user.username}`,
-				isValidReaction: () => true,
-			},
-		],
-	]);
 }
 
 describe("routing", () => {
@@ -242,8 +220,8 @@ describe("conversation guards", () => {
 			dataDir: "/unused",
 			routingSecret: "secret",
 			personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],
-			modelRuntime: {} as ModelRuntime,
-			transports: transports(async () => ({ id: "1" })),
+			modelRuntime: makeRuntime(),
+			transports: new Map([["discord", makeTransport()]]),
 		});
 		for (const [platform, requester] of [
 			["discord", "33333333333333333"],

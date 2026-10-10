@@ -76,6 +76,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 
 `test/network-guard.ts` 是预加载文件，不是测试。`test/support/` 是共享测试夹具，同样不是测试：
 
+- `core.ts`：`makePersona(overrides)`、`makeTransport(overrides)`——默认关闭一切可选能力 / 接受一切发送，测试只写自己要变的字段。
 - `pi.ts`：`makeModel`、`makeRuntime`（`ModelRuntime` 的模型/鉴权桩）、`assistantMessage`、`streamOf`/`scriptedStream`（确定性 provider 流）、`IMAGE`，以及驱动真实 Pi 会话的私有接缝 `seamOf`/`onSession`。
 
 ## 写测试的规则

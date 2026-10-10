@@ -7,7 +7,8 @@ import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
-import type { Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { SpaceId } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const SPACE: SpaceId = "discord:111";
@@ -38,31 +39,13 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 	});
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
-	const persona: Persona = {
-		id: "luna",
-		name: "luna",
+	const persona = makePersona({
 		personaPath,
-		provider: "fixture",
 		model: "alpha",
-		routingP: 0,
-		aliases: [],
 		adminUserIds: ["discord:5"],
-		reasoningEffort: "off",
-		sendReactionImages: false,
-		voiceEnabled: false,
-		imageGenerationEnabled: false,
 		accounts: { discord: { userId: "900", username: "luna" } },
-	};
-	const transport: PlatformTransport = {
-		platform: "discord",
-		echoesOwnMessages: true,
-		displayName: "discord",
-		promptLines: [],
-		quickReactions: {},
-		sendMessage: async () => ({ id: "1" }),
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
-	};
+	});
+	const transport = makeTransport();
 	const used: string[] = [];
 	let messageId = 10;
 	const start = async () => {

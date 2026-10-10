@@ -13,9 +13,10 @@ import { useExtensibleSqlite } from "../src/core/db.ts";
 import { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { InboundMessage, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -60,21 +61,16 @@ function fixture(
 	const db = new Database(":memory:");
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
-	const persona: Persona = {
-		id: "luna",
+	const persona = makePersona({
 		name: "Luna",
 		personaPath,
 		provider: model.provider,
 		model: model.id,
 		routingP: options.routingP ?? 0,
-		aliases: [],
-		adminUserIds: [],
-		reasoningEffort: "off",
 		sendReactionImages: true,
 		voiceEnabled: !!options.voice,
-		imageGenerationEnabled: false,
 		accounts: { [platform]: { userId: "900", username: "luna_bot" } },
-	};
+	});
 	if (options.reactionImages) {
 		const directory = join(dataDir, "feiba");
 		mkdirSync(directory);
@@ -117,18 +113,12 @@ function fixture(
 	}
 	const typingAt: number[] = [];
 	const sends: Array<Parameters<PlatformTransport["sendMessage"]>[0]> = [];
-	const transport: PlatformTransport = {
+	const transport = makeTransport({
 		platform,
-		echoesOwnMessages: platform === "discord",
-		displayName: platform,
-		promptLines: [],
-		quickReactions: {},
 		sendMessage: async (input) => {
 			sends.push(input);
 			return { id: String(1000 + sends.length) };
 		},
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
 		...(options.typing
 			? {
 					typingRefreshMs: options.typing.refreshMs,
@@ -137,7 +127,7 @@ function fixture(
 					},
 				}
 			: {}),
-	};
+	});
 	let decisions = 0;
 	const participationRequests: Array<Parameters<JevClient["decideParticipation"]>[0]> = [];
 	const auditRequests: Array<Parameters<JevClient["auditNatural"]>[0]> = [];

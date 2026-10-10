@@ -8,7 +8,7 @@ import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
-import type { Persona, PlatformTransport } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const model = makeModel();
@@ -27,31 +27,16 @@ test("soul tool, compaction and restart retain the owning conversation without r
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-soul-session-"));
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
-	const personas: Persona[] = ["luna", "mio"].map((id, index) => ({
-		id,
-		name: id,
-		personaPath,
-		provider: model.provider,
-		model: model.id,
-		routingP: 0,
-		aliases: [],
-		adminUserIds: ["discord:999"],
-		reasoningEffort: "off",
-		sendReactionImages: true,
-		voiceEnabled: false,
-		imageGenerationEnabled: false,
-		accounts: { discord: { userId: `1234567890123456${index}`, username: id } },
-	}));
-	const transport: PlatformTransport = {
-		platform: "discord",
-		echoesOwnMessages: true,
-		displayName: "Discord",
-		promptLines: [],
-		quickReactions: {},
-		sendMessage: async () => ({ id: "12345678901234567" }),
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
-	};
+	const personas = ["luna", "mio"].map((id, index) =>
+		makePersona({
+			id,
+			personaPath,
+			adminUserIds: ["discord:999"],
+			sendReactionImages: true,
+			accounts: { discord: { userId: `1234567890123456${index}`, username: id } },
+		}),
+	);
+	const transport = makeTransport();
 	let db = new Database(join(dataDir, "jingmei.db"));
 	let soul = new SoulStore({ db, personaIds: personas.map((persona) => persona.id) });
 	const createCore = () =>

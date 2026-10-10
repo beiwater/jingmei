@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { type CelebrationTarget, CelebrationScheduler } from "../src/core/celebrations.ts";
 import type { PersonaAccount, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { makeTransport } from "./support/core.ts";
 
 afterEach(() => setSystemTime());
 
@@ -49,19 +50,15 @@ function harness(
 		(async (sent: Sent) => {
 			sends.push(sent);
 		});
-	const transport = (platform: Platform): PlatformTransport => ({
-		platform,
-		echoesOwnMessages: platform === "discord",
-		displayName: platform,
-		promptLines: [],
-		quickReactions: {},
-		formatMention: (user) => `<mention:${user.userId}:${user.username}>`,
-		isValidReaction: () => true,
-		sendMessage: async ({ personaId, channelId, content, mention }) => {
-			await send({ platform, personaId, channelId, content, ...(mention ? { mention } : {}) });
-			return { id: "1" };
-		},
-	});
+	const transport = (platform: Platform) =>
+		makeTransport({
+			platform,
+			formatMention: (user) => `<mention:${user.userId}:${user.username}>`,
+			sendMessage: async ({ personaId, channelId, content, mention }) => {
+				await send({ platform, personaId, channelId, content, ...(mention ? { mention } : {}) });
+				return { id: "1" };
+			},
+		});
 	const transports = new Map<Platform, PlatformTransport>([
 		["discord", transport("discord")],
 		["telegram", transport("telegram")],

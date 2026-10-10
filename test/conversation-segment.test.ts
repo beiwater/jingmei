@@ -12,7 +12,8 @@ import type { EventTracker } from "../src/core/events.ts";
 import { MemberMemory } from "../src/core/memory.ts";
 import type { MessageIndex, MessageKey } from "../src/core/message-index.ts";
 import { type SoulScope, SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { InboundMessage, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, onSession, scriptedStream } from "./support/pi.ts";
 
 const SPACE: SpaceId = "telegram:-100111";
@@ -65,35 +66,24 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-segment-"));
 	const personaPath = join(dataDir, "persona.md");
 	writeFileSync(personaPath, "Friendly companion.");
-	const personas: Persona[] = ["luna", "sol"].slice(0, options.personas ?? 1).map((id, index) => ({
-		id,
-		name: id === "luna" ? "Luna" : "Sol",
-		personaPath,
-		provider: model.provider,
-		model: model.id,
-		routingP: 0,
-		aliases: [],
-		adminUserIds: [],
-		reasoningEffort: "off",
-		sendReactionImages: false,
-		voiceEnabled: false,
-		imageGenerationEnabled: false,
-		accounts: { telegram: { userId: String(900 + index), username: `${id}_bot` } },
-	}));
+	const personas = ["luna", "sol"].slice(0, options.personas ?? 1).map((id, index) =>
+		makePersona({
+			id,
+			name: id === "luna" ? "Luna" : "Sol",
+			personaPath,
+			provider: model.provider,
+			model: model.id,
+			accounts: { telegram: { userId: String(900 + index), username: `${id}_bot` } },
+		}),
+	);
 	const sends: Array<Parameters<PlatformTransport["sendMessage"]>[0]> = [];
-	const transport: PlatformTransport = {
+	const transport = makeTransport({
 		platform: "telegram",
-		echoesOwnMessages: false,
-		displayName: "telegram",
-		promptLines: [],
-		quickReactions: {},
 		sendMessage: async (input) => {
 			sends.push(input);
 			return { id: String(1000 + sends.length) };
 		},
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
-	};
+	});
 	const db = new Database(":memory:");
 	const soul = new SoulStore({ db, personaIds: personas.map((persona) => persona.id) });
 	const index = options.index === false ? undefined : new FakeIndex();
