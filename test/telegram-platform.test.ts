@@ -10,6 +10,7 @@ import {
 	normalizeTelegramMessage,
 	type TelegramMessage,
 	type TelegramNormalizeDeps,
+	type TelegramUpdate,
 } from "../src/platforms/telegram/normalize.ts";
 import {
 	formatOutgoing,
@@ -238,7 +239,7 @@ describe("Telegram adapter", () => {
 					message({ text: "accepted" }),
 				].map((message, index) => ({ update_id: index + 1, message }));
 			}
-			const { promise, reject } = Promise.withResolvers<unknown[]>();
+			const { promise, reject } = Promise.withResolvers<TelegramUpdate[]>();
 			signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
 			return promise;
 		});

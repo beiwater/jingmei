@@ -301,14 +301,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		else return { provider, model };
 	};
 	const httpUrl = (field: string, value: unknown): string | undefined => {
-		if (typeof value === "string") {
-			try {
-				const url = new URL(value);
-				if (url.protocol === "http:" || url.protocol === "https:") return value;
-			} catch {
-				// Report only the field name; a malformed URL may contain credentials.
-			}
-		}
+		// Report only the field name; a malformed URL may contain credentials.
+		if (typeof value === "string" && URL.canParse(value) && /^https?:$/.test(new URL(value).protocol)) return value;
 		errors.push(`${field} must be an http(s) URL`);
 		return undefined;
 	};

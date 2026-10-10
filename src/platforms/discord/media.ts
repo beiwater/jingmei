@@ -14,7 +14,6 @@ const DISCORD_ATTACHMENT_HOSTS: Readonly<Record<string, true>> = {
 export interface DiscordAttachmentRef {
 	url: string;
 	filename?: string;
-	contentType?: string | null;
 	size?: number;
 }
 
@@ -62,7 +61,6 @@ export async function downloadDiscordImage(
 	attachment: DiscordAttachmentRef,
 	options: DownloadDiscordOptions = {},
 ): Promise<{ bytes: Uint8Array; mimeType: ImageMime } | null> {
-	if (attachment.contentType && !attachment.contentType.toLowerCase().startsWith("image/")) return null;
 	const downloaded = await downloadFromCdn(
 		attachment,
 		options.maxBytes ?? DISCORD_IMAGE_MAX_BYTES,
@@ -79,6 +77,5 @@ export async function downloadDiscordVideo(
 	attachment: DiscordAttachmentRef,
 	options: DownloadDiscordOptions = {},
 ): Promise<Uint8Array | null> {
-	if (!attachment.contentType?.toLowerCase().startsWith("video/")) return null;
 	return downloadFromCdn(attachment, options.maxBytes ?? DISCORD_VIDEO_MAX_BYTES, "video/*", options);
 }

@@ -43,22 +43,13 @@ async function main(): Promise<void> {
 	const db = openDatabase(config.dataDir);
 	const memberMemory = new MemberMemory(db);
 	const botState = new BotState(db);
-	let core: Conversation | undefined;
-	const deps = {
-		config,
-		personas,
-		memberMemory,
-		getCore: () => {
-			if (!core) throw new Error("conversation core is not ready");
-			return core;
-		},
-	};
+	// Platform handlers only fire after `platform.start()`, by which time `core` exists.
+	const deps = { config, personas, memberMemory, getCore: (): Conversation => core };
 	// Each factory verifies its tokens and fills `persona.accounts[platform]` before returning.
 	const platforms = [
 		...(config.discord ? [await createDiscordPlatform(deps)] : []),
 		...(config.telegram ? [await createTelegramPlatform(deps)] : []),
 	];
-	if (!platforms.length) throw new Error("no platform configured");
 	const transports = new Map<Platform, PlatformTransport>(
 		platforms.map((platform) => [platform.transport.platform, platform.transport]),
 	);
@@ -87,10 +78,9 @@ async function main(): Promise<void> {
 	});
 	let events: EventTracker | undefined;
 	if (config.events) {
-		if (!decision) throw new Error("events requires a decision client");
 		events = new EventTracker({
 			db,
-			decision,
+			decision: decision!,
 			embedder,
 			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
 		});
@@ -118,7 +108,7 @@ async function main(): Promise<void> {
 			log.warn("core", "text_image_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	// A synthetic render proves ECharts and resvg load; live data is fetched per request, not at startup.
+	// A synthetic render proves resvg loads; live data is fetched per request, not at startup.
 	let kline: KlineRenderer | undefined;
 	if (config.kline) {
 		try {
@@ -128,7 +118,7 @@ async function main(): Promise<void> {
 			log.warn("core", "kline_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	core = new Conversation({
+	const core = new Conversation({
 		db,
 		botState,
 		dataDir: config.dataDir,
@@ -178,7 +168,7 @@ async function main(): Promise<void> {
 		log.info("core", "shutdown", { signal });
 		await scheduler.stop();
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
-		await core?.close();
+		await core.close();
 		await events?.idle();
 		await messageIndex.idle();
 		clearInterval(heartbeat);
@@ -191,7 +181,7 @@ async function main(): Promise<void> {
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.
 	void core
-		?.recoverPending()
+		.recoverPending()
 		.catch((error: unknown) => log.error("core", "inbound_recovery_failed", { error_category: errorCategory(error) }));
 	scheduler.start();
 	botState.startRun();

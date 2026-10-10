@@ -30,11 +30,11 @@ import {
 	TELEGRAM_COMMANDS,
 } from "./commands.ts";
 import {
-	isTelegramMessage,
 	MAX_TELEGRAM_FILE_BYTES,
 	normalizeTelegramMessage,
 	type TelegramMessage,
 	type TelegramNormalizeDeps,
+	type TelegramUpdate,
 } from "./normalize.ts";
 import { Poller } from "./poller.ts";
 import { TELEGRAM_QUICK_REACTIONS, TelegramPlatformTransport } from "./transport.ts";
@@ -82,7 +82,6 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 		if (!token) continue;
 		const api = new BotApi(token);
 		const me = await api.getMe();
-		if (!me.username) throw new Error(`telegram_bot_without_username:${persona.id}`);
 		persona.accounts.telegram = { userId: String(me.id), username: me.username };
 		if (me.can_read_all_group_messages === false)
 			log.warn("telegram", "privacy_mode_enabled", { persona_id: persona.id });
@@ -137,7 +136,7 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 			async downloadFile(fileId) {
 				try {
 					const file = await bot.api.getFile(fileId);
-					if (!file.file_path || (file.file_size ?? 0) > MAX_TELEGRAM_FILE_BYTES) return null;
+					if (!file.file_path) return null;
 					return {
 						bytes: await bot.api.downloadFile(file.file_path, MAX_TELEGRAM_FILE_BYTES),
 						filePath: file.file_path,
@@ -205,10 +204,7 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 		await bot.api.sendMessage(message.chat.id, reply, [], message.message_id);
 	}
 
-	function onUpdate(bot: TelegramBot, update: unknown): void {
-		if (!update || typeof update !== "object" || !("message" in update)) return;
-		const message = update.message;
-		if (!isTelegramMessage(message)) return;
+	function onUpdate(bot: TelegramBot, { message }: TelegramUpdate): void {
 		const chatId = String(message.chat.id);
 		if (!allowedChatIds.has(chatId)) {
 			// Chat ids are not secret; logging the first sighting lets operators allow-list a group.

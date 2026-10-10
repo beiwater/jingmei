@@ -88,26 +88,14 @@ function attachmentPlaceholder(contentType: string | undefined): string {
 	return "[文件]";
 }
 
-/** Normalize one Discord message; null when outside the allow-list. Images/video frames are capped per message. */
-async function normalizeDiscordMessage(
-	message: DiscordMessage,
-	allowedGuilds: ReadonlyMap<string, ReadonlySet<string>>,
-	parentChannelId?: string,
-): Promise<InboundMessage | null> {
-	const guildId = message.guild_id;
-	const allowedChannels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-	if (
-		!allowedChannels ||
-		!(allowedChannels.has(message.channel_id) || (parentChannelId && allowedChannels.has(parentChannelId)))
-	)
-		return null;
+/** Normalize one Discord message; the transport already limited events to the persona's allowed channels. Images/video frames are capped per message. */
+async function normalizeDiscordMessage(message: DiscordMessage): Promise<InboundMessage> {
 	const images: InboundImage[] = [];
 	const placeholders: string[] = [];
 	for (const attachment of message.attachments ?? []) {
 		const ref = {
 			url: attachment.url,
 			filename: attachment.filename,
-			contentType: attachment.content_type,
 			size: attachment.size,
 		};
 		const type = attachment.content_type?.toLowerCase() ?? "";
@@ -132,7 +120,7 @@ async function normalizeDiscordMessage(
 	const content = [message.content ?? "", ...placeholders].filter(Boolean).join(" ");
 	return {
 		platform: "discord",
-		spaceId: toSpaceId("discord", guildId as string),
+		spaceId: toSpaceId("discord", message.guild_id as string),
 		channelId: message.channel_id,
 		messageId: message.id,
 		authorId: message.author.id,
@@ -148,7 +136,7 @@ async function normalizeDiscordMessage(
 }
 
 async function videoFrames(
-	ref: { url: string; filename?: string; contentType?: string; size?: number },
+	ref: { url: string; filename?: string; size?: number },
 	limit: number,
 ): Promise<InboundImage[]> {
 	const downloaded = await downloadDiscordVideo(ref);
@@ -168,12 +156,8 @@ async function videoFrames(
 }
 
 function getOption(interaction: DiscordInteraction, name: string): string | undefined {
-	const options = interaction.data?.options;
-	if (!Array.isArray(options)) return undefined;
-	for (const item of options)
-		if (item && typeof item === "object" && "name" in item && item.name === name && "value" in item)
-			return typeof item.value === "string" ? item.value : undefined;
-	return undefined;
+	const value = interaction.data?.options?.find((option) => option.name === name)?.value;
+	return typeof value === "string" ? value : undefined;
 }
 
 function inPersonaScope(persona: Persona, space: SpaceId): boolean {
@@ -183,7 +167,6 @@ function inPersonaScope(persona: Persona, space: SpaceId): boolean {
 export async function createDiscordPlatform(deps: PlatformDeps): Promise<PlatformHandle> {
 	const { config, memberMemory } = deps;
 	const guilds = config.discord?.guilds ?? [];
-	const allowedGuilds = new Map(guilds.map(({ guildId, channelIds }) => [guildId, new Set(channelIds)]));
 	const clients = new Map<string, DiscordTransport>();
 	const commandsByClient: Array<{ client: DiscordTransport; persona: Persona }> = [];
 
@@ -203,12 +186,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 				log.error("discord", "transport_error", { persona_id: persona.id, error_category: errorCategory(error) }),
 			onMessage: async (message) => {
 				try {
-					const normalized = await normalizeDiscordMessage(
-						message,
-						allowedGuilds,
-						client.getParentChannelId(message.channel_id),
-					);
-					if (normalized) await deps.getCore().handleMessage(normalized);
+					await deps.getCore().handleMessage(await normalizeDiscordMessage(message));
 				} catch (error) {
 					log.error("discord", "message_failed", { persona_id: persona.id, error_category: errorCategory(error) });
 				}
@@ -226,24 +204,14 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		persona: Persona,
 		client: DiscordTransport,
 	): Promise<void> {
-		const guildId = interaction.guild_id;
-		const channels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-		if (
-			!guildId ||
-			!channels ||
-			!inPersonaScope(persona, toSpaceId("discord", guildId)) ||
-			!interaction.channel_id ||
-			!(channels.has(interaction.channel_id) || channels.has(client.getParentChannelId(interaction.channel_id) ?? ""))
-		)
-			return;
-		const space = toSpaceId("discord", guildId);
-		const channelId = interaction.channel_id;
-		const author = interaction.member?.user ?? interaction.user;
+		// The transport only delivers interactions from this persona's allowed guild channels, which always carry a member.
+		const space = toSpaceId("discord", interaction.guild_id!);
+		const channelId = interaction.channel_id!;
+		const author = interaction.member!.user!;
 		const name = interaction.data?.name;
 		const reply = (content: string) => client.respondToInteraction(interaction, content, { ephemeral: true });
 
 		if (name === "memory" || name === "birthday" || name === "forget") {
-			if (!author) return;
 			try {
 				if (name === "forget") {
 					memberMemory.forgetMember(space, author.id);
@@ -309,7 +277,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			return;
 		}
 		if (name === "context" || name === "compact") {
-			if (!author || !isAdmin(persona, author.id)) {
+			if (!isAdmin(persona, author.id)) {
 				await reply("只有管理员可以使用这个命令。");
 				return;
 			}
@@ -334,7 +302,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		}
 		if (name === "help") {
 			await reply(
-				author && isAdmin(persona, author.id)
+				isAdmin(persona, author.id)
 					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`"
 					: "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`",
 			);
@@ -355,7 +323,6 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		}
 		await client.deferInteraction(interaction, true);
 		try {
-			if (!author) throw new Error("missing_interaction_context");
 			const dispatch = await deps.getCore().handleMessage({
 				platform: "discord",
 				spaceId: space,

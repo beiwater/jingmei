@@ -21,7 +21,7 @@ export interface DiscordInteraction {
 	type: number;
 	application_id: Snowflake;
 	token: string;
-	data?: { name?: string; options?: unknown[]; [key: string]: unknown };
+	data?: { name?: string; options?: Array<{ name: string; value?: unknown }>; [key: string]: unknown };
 	guild_id?: Snowflake;
 	channel_id?: Snowflake;
 	member?: { user?: { id: Snowflake; username: string; [key: string]: unknown }; [key: string]: unknown };
@@ -64,7 +64,6 @@ export function isSnowflake(value: unknown): value is Snowflake {
 
 /** Split without discarding whitespace; prefer a newline, then a word boundary. */
 export function splitDiscordMessage(content: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
-	if (!Number.isInteger(maxLength) || maxLength < 1) throw new Error("maxLength must be a positive integer");
 	if (!content) return [];
 	const parts: string[] = [];
 	let rest = content;
@@ -105,21 +104,14 @@ export class DiscordTransport {
 	private readonly threadParents = new Map<Snowflake, Snowflake>();
 
 	constructor(private readonly options: DiscordTransportOptions) {
-		if (!options.token) throw new Error("Discord bot token is required");
-		if (!isSnowflake(options.applicationId)) throw new Error("applicationId must be a Discord Snowflake string");
 		this.fetchImpl = options.fetch ?? fetch;
 		this.wsFactory = options.webSocketFactory ?? ((url) => new WebSocket(url));
 		this.allowedChannels = options.allowedChannelIds ? new Set(options.allowedChannelIds) : undefined;
 	}
 
-	getParentChannelId(channelId: Snowflake): Snowflake | undefined {
-		return this.threadParents.get(channelId);
-	}
-
 	async getCurrentUser(): Promise<{ id: Snowflake; username: string }> {
-		const user = await this.request<{ id: unknown; username?: unknown }>("/users/@me");
-		if (!isSnowflake(user.id)) throw new Error("Discord current user response did not include a valid id");
-		return { id: user.id, username: typeof user.username === "string" ? user.username : "" };
+		const user = await this.request<{ id: Snowflake; username: string }>("/users/@me");
+		return { id: user.id, username: user.username };
 	}
 
 	private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -190,7 +182,6 @@ export class DiscordTransport {
 		this.assertSnowflake(channelId, "channelId");
 		this.assertSnowflake(messageId, "messageId");
 		this.assertAllowedChannel(channelId);
-		if (!isValidReactionEmoji(emoji)) throw new Error("invalid reaction emoji");
 		const encoded = encodeURIComponent(emoji);
 		await this.request(`/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`, { method: "PUT" });
 	}
@@ -332,12 +323,7 @@ export class DiscordTransport {
 		switch (payload.op) {
 			case 10: {
 				this.heartbeatAck = true;
-				const interval = Number(payload.d?.heartbeat_interval);
-				if (!Number.isFinite(interval) || interval < 1000) {
-					this.options.onError?.(new Error("Invalid Gateway heartbeat interval"));
-					this.socket?.close(4000);
-					return;
-				}
+				const interval: number = payload.d.heartbeat_interval;
 				this.clearHeartbeat();
 				this.heartbeatInterval = setInterval(() => {
 					if (!this.heartbeatAck) {
@@ -488,9 +474,7 @@ export class DiscordPlatformTransport implements PlatformTransport {
 		mention?: readonly PersonaAccount[];
 	}): Promise<{ id: string }> {
 		const users = [...new Set(input.mention?.map((user) => user.userId) ?? [])];
-		if (users.length > 100) throw new Error("mention cannot include more than 100 users");
-		for (const userId of users) if (!isSnowflake(userId)) throw new Error("mention ids must be Discord Snowflakes");
-		const messages = await this.client(input.personaId).sendMessage(input.channelId, input.content, {
+		const messages = await this.clients.get(input.personaId)!.sendMessage(input.channelId, input.content, {
 			replyTo: input.replyToMessageId,
 			allowedMentions: users.length ? { ...DEFAULT_ALLOWED_MENTIONS, users } : DEFAULT_ALLOWED_MENTIONS,
 			attachments: input.attachments,
@@ -505,20 +489,14 @@ export class DiscordPlatformTransport implements PlatformTransport {
 	}
 
 	startTyping(personaId: string, channelId: string): Promise<void> {
-		return this.client(personaId).startTyping(channelId);
+		return this.clients.get(personaId)!.startTyping(channelId);
 	}
 
 	addReaction(personaId: string, channelId: string, messageId: string, emoji: string): Promise<void> {
-		return this.client(personaId).addReaction(channelId, messageId, emoji);
+		return this.clients.get(personaId)!.addReaction(channelId, messageId, emoji);
 	}
 
 	isValidReaction(emoji: string): boolean {
 		return isValidReactionEmoji(emoji);
-	}
-
-	private client(personaId: string): DiscordTransport {
-		const client = this.clients.get(personaId);
-		if (!client) throw new Error(`No Discord account configured for persona ${personaId}`);
-		return client;
 	}
 }

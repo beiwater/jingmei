@@ -4,6 +4,7 @@
 
 import { readBoundedBody } from "../../net/read-bounded-body.ts";
 import type { TelegramMessageEntity } from "./markdown.ts";
+import type { TelegramUpdate } from "./normalize.ts";
 
 const API_BASE = "https://api.telegram.org";
 const CALL_TIMEOUT_MS = 10_000;
@@ -39,7 +40,7 @@ export interface TelegramUser {
 	is_bot: boolean;
 	first_name: string;
 	last_name?: string;
-	username?: string;
+	username: string;
 	can_read_all_group_messages?: boolean;
 }
 
@@ -114,7 +115,7 @@ export class BotApi {
 		return this.call("getMe");
 	}
 
-	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<unknown[]> {
+	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
 		return this.call(
 			"getUpdates",
 			{ offset, timeout: timeoutSec, allowed_updates: ["message"] },
@@ -187,11 +188,6 @@ export class BotApi {
 			signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
 		});
 		if (!res.ok) throw new TelegramApiError(res.status, "file download failed");
-		const declared = Number(res.headers.get("content-length") ?? "0");
-		if (declared > maxBytes) {
-			await res.body?.cancel();
-			throw new TelegramApiError(413, "file too large");
-		}
 		const bytes = await readBoundedBody(res, maxBytes);
 		if (!bytes) throw new TelegramApiError(413, "file too large");
 		return bytes;
@@ -199,85 +195,84 @@ export class BotApi {
 }
 
 // The fixed ReactionTypeEmoji enum (https://core.telegram.org/bots/api#reactiontypeemoji,
-// captured 2026-09-21). Both sides strip U+FE0F variation selectors, so "❤" and "❤️"
-// spellings of the same emoji are equivalent; ZWJ sequences stay explicit.
-const REACTION_EMOJIS: ReadonlySet<string> = new Set(
-	[
-		"❤",
-		"👍",
-		"👎",
-		"🔥",
-		"🥰",
-		"👏",
-		"😁",
-		"🤔",
-		"🤯",
-		"😱",
-		"🤬",
-		"😢",
-		"🎉",
-		"🤩",
-		"🤮",
-		"💩",
-		"🙏",
-		"👌",
-		"🕊",
-		"🤡",
-		"🥱",
-		"🥴",
-		"😍",
-		"🐳",
-		"❤\u200d🔥",
-		"🌚",
-		"🌭",
-		"💯",
-		"🤣",
-		"⚡",
-		"🍌",
-		"🏆",
-		"💔",
-		"🤨",
-		"😐",
-		"🍓",
-		"🍾",
-		"💋",
-		"🖕",
-		"😈",
-		"😴",
-		"😭",
-		"🤓",
-		"👻",
-		"👨\u200d💻",
-		"👀",
-		"🎃",
-		"🙈",
-		"😇",
-		"😨",
-		"🤝",
-		"✍",
-		"🤗",
-		"🫡",
-		"🎅",
-		"🎄",
-		"☃",
-		"💅",
-		"🤪",
-		"🗿",
-		"🆒",
-		"💘",
-		"🙉",
-		"🦄",
-		"😘",
-		"💊",
-		"🙊",
-		"😎",
-		"👾",
-		"🤷\u200d♂",
-		"🤷",
-		"🤷\u200d♀",
-		"😡",
-	].map((emoji) => emoji.replaceAll("\ufe0f", "")),
-);
+// captured 2026-09-21), stored without
+// U+FE0F variation selectors; lookups strip them, so "❤" and "❤️" spellings of the same
+// emoji are equivalent. ZWJ sequences stay explicit.
+const REACTION_EMOJIS: ReadonlySet<string> = new Set([
+	"❤",
+	"👍",
+	"👎",
+	"🔥",
+	"🥰",
+	"👏",
+	"😁",
+	"🤔",
+	"🤯",
+	"😱",
+	"🤬",
+	"😢",
+	"🎉",
+	"🤩",
+	"🤮",
+	"💩",
+	"🙏",
+	"👌",
+	"🕊",
+	"🤡",
+	"🥱",
+	"🥴",
+	"😍",
+	"🐳",
+	"❤\u200d🔥",
+	"🌚",
+	"🌭",
+	"💯",
+	"🤣",
+	"⚡",
+	"🍌",
+	"🏆",
+	"💔",
+	"🤨",
+	"😐",
+	"🍓",
+	"🍾",
+	"💋",
+	"🖕",
+	"😈",
+	"😴",
+	"😭",
+	"🤓",
+	"👻",
+	"👨\u200d💻",
+	"👀",
+	"🎃",
+	"🙈",
+	"😇",
+	"😨",
+	"🤝",
+	"✍",
+	"🤗",
+	"🫡",
+	"🎅",
+	"🎄",
+	"☃",
+	"💅",
+	"🤪",
+	"🗿",
+	"🆒",
+	"💘",
+	"🙉",
+	"🦄",
+	"😘",
+	"💊",
+	"🙊",
+	"😎",
+	"👾",
+	"🤷\u200d♂",
+	"🤷",
+	"🤷\u200d♀",
+	"😡",
+]);
 
 /** Telegram rejects any emoji outside its fixed reaction enum with REACTION_INVALID. */
 export function isReactionEmoji(value: string): boolean {
