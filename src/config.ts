@@ -760,7 +760,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 export function ensureDeepSeekModelsFile(agentDir: string): string {
 	const modelsPath = join(agentDir, "models.json");
 	if (!existsSync(modelsPath)) {
-		mkdirSync(dirname(modelsPath), { recursive: true });
+		mkdirSync(dirname(modelsPath), { recursive: true, mode: 0o700 });
 		const catalog = {
 			providers: {
 				deepseek: {

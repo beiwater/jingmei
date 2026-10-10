@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -474,5 +474,10 @@ describe("config", () => {
 		writeFileSync(path, "{}");
 		expect(ensureDeepSeekModelsFile(join(root, "agent"))).toBe(path);
 		expect(readFileSync(path, "utf8")).toBe("{}");
+	});
+
+	test("creates the agent directory private so a fresh install is not world-readable", () => {
+		ensureDeepSeekModelsFile(join(root, "fresh", "pi-agent"));
+		expect(statSync(join(root, "fresh", "pi-agent")).mode & 0o777).toBe(0o700);
 	});
 });
