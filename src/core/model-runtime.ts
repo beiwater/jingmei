@@ -41,8 +41,8 @@ export class PiModelConfigurationError extends Error {
 		const target = `${provider}/${model}${purpose ? ` (${purpose})` : ""}`;
 		super(
 			reasoning
-				? `Pi model configuration invalid (${category}): ${target} requested ${reasoning.requested}; supported: ${reasoning.supported.join(", ")}. Use Pi /model, then restart.`
-				: `Pi model unavailable (${category}): ${target}. Use Pi /login and /model, then restart.`,
+				? `Pi model configuration invalid (${category}): ${target} requested ${reasoning.requested}; supported: ${reasoning.supported.join(", ")}. Change reasoningEffort in jingmei.config.json or pick another model with \`bun run jingmei model\`, then restart.`
+				: `Pi model unavailable (${category}): ${target}. Sign in with \`bun run jingmei login <provider>\` or fix provider/model in jingmei.config.json, then restart.`,
 		);
 		this.name = "PiModelConfigurationError";
 	}
