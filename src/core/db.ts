@@ -1,7 +1,6 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { load } from "sqlite-vec";
 
 const DB_FILE = "jingmei.db";
 
@@ -21,7 +20,8 @@ function selectHomebrewSqlite(): boolean {
 
 export function loadVectorExtension(db: Database): void {
 	try {
-		load(db);
+		// Resolved on first use: installs with `features.history: false` never load the package.
+		(require("sqlite-vec") as typeof import("sqlite-vec")).load(db);
 	} catch {
 		throw new Error("sqlite-vec 无法加载；macOS 需安装 Homebrew sqlite 并在打开数据库前调用 useExtensibleSqlite");
 	}

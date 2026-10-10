@@ -43,6 +43,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `log.test.ts` | `persona_id` 原样保留以区分多角色；token/key/prompt/content/url/path 字段仍脱敏；字符串中的 Telegram token、`sk-` key、URL、绝对路径被替换 |
 | `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
 | `features.test.ts` | `features` 默认全开、可单独关闭，未知键与非布尔值一并报错，`events` 配 `history: false` 报错而 `celebrations` 配 `memory: false` 合法；会话工具名列表在全开与逐项关闭时精确匹配，关闭的工具不出现在 system prompt；`audit: false` 跳过自然度审查但泄漏检查仍在 |
+| `lazy-modules.test.ts` | `embedding-models.ts` 的静态模型白名单与 fastembed 内置模型枚举一致（防漂移）；通过预加载 `trace-heavy-modules.ts` 观察运行时求值：`jingmei stats` 与仅导入 `bot.ts` 都不加载 fastembed / onnxruntime / sqlite-vec / notjev / lunar-typescript，对照探针确认预加载确实能看到它们 |
 | `events.test.ts` | 人类消息话题归属、人与 bot 回复直接继承且不决策、空间/频道隔离；裸媒体/低内容继承及十分钟边界、视觉描述/Unicode 正文保留决策；`new` 概率低于 0.6 选最佳旧话题、达到阈值或无概率保留新话题；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、平台账号与角色作用域、bot 不触发、HMAC 抽样稳定；30 秒冷却与 10 分钟/30 条/3 条/多于 1 个其他作者/25% 占比门控边界；directed 绕过门控与抽样，chat-in 不绕过；搜索预取与语音请求识别；平台限定管理员的上下文权限 |
@@ -75,7 +76,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `kline.test.ts` | K 线：交易对写法归一（`btc/usdt`→`BTCUSDT`），带参数拼接或过短的写法不发请求；只请求固定公开主机、查询参数正确、`redirect: "error"`，返回按时间升序的数值 K 线；HTTP 400 → `invalid_symbol`，5xx、网络错误、非 JSON、行数不足或字段非数字 → `fetch_failed`；渲染出 1600×1000 的合法 PNG，配文由数据生成（最新价、窗口涨跌）；涨红跌绿、平盘与极小价格仍可渲染；渲染器先取数再画图，坏交易对在请求前失败 |
 | `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
 
-`test/network-guard.ts` 是预加载文件，不是测试。
+`test/network-guard.ts` 与 `test/trace-heavy-modules.ts` 是预加载文件，不是测试。
 
 ## 写测试的规则
 

@@ -46,7 +46,7 @@ flowchart LR
 | `src/core/prompt.ts` | system prompt |
 | `src/core/tools.ts` | 模型工具（含 `related_messages` / `search_history`） |
 | `src/core/quick-reactions.ts` | Jev 秒回表情 |
-| `src/core/events.ts` / `embedding.ts` | 话题归属、摘要与参与度刷新；fastembed 中文向量（`maxLength: 128`，消息索引共用） |
+| `src/core/events.ts` / `embedding.ts` / `embedding-models.ts` | 话题归属、摘要与参与度刷新；fastembed 中文向量（`maxLength: 128`，消息索引共用）。`embedding-models.ts` 是不导入 fastembed 的支持模型白名单与默认模型，供配置校验使用 |
 | `src/core/message-index.ts` | 按条消息检索索引：FTS5 关键词表、sqlite-vec 消息向量、相关条数、历史检索、`/forget` 清理 |
 | `src/core/memory.ts` / `soul.ts` / `celebrations.ts` | 成员记忆、私人 soul、节日生日祝福 |
 | `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移、messages 与 sessions 幂等迁移（含对话段列与 `message_images`）与 sqlite-vec 加载 |
@@ -62,6 +62,8 @@ flowchart LR
 | `scripts/backfill-message-index.ts` | 历史消息回填索引（最新优先、可中断重跑），见 [deploy.md](deploy.md#升级后回填历史消息索引) |
 
 ## 启动
+
+重依赖按需加载，只有对应功能开启才进入进程：`fastembed`（含 onnxruntime）仅在 `features.history` 开启时由 `bot.ts` 动态导入 `embedding.ts`；`sqlite-vec` 在 `MessageIndex` / `EventTracker` 首次加载向量扩展时 `require`；`lunar-typescript` 仅在配置了 `celebrations` 时随动态导入的 `celebrations.ts` 加载；`notjev` 在本地决策客户端第一次请求时动态导入。`src/cli.ts` 只在 `start` 子命令里动态导入 `bot.ts`，因此 `pause` / `resume` / `stats` / `model` / `login` / `logout` 不加载这些包（`test/lazy-modules.test.ts` 守护）。
 
 1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
 2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。

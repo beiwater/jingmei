@@ -7,13 +7,15 @@
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { openDatabase } from "../src/core/db.ts";
-import { createFastEmbedder, DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
+import { createFastEmbedder } from "../src/core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding-models.ts";
 import { MessageIndex } from "../src/core/message-index.ts";
 import type { SpaceId } from "../src/core/types.ts";
 
 const delayMs = Number(process.argv[2] ?? 100);
 if (!Number.isFinite(delayMs) || delayMs < 0) throw new Error("delayMs must be a non-negative number");
 const config = loadConfig();
+if (!config.features.history) throw new Error("features.history is off; there is no message index to backfill");
 const db = openDatabase(config.dataDir);
 const embedder = await createFastEmbedder({
 	model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,

@@ -7,7 +7,6 @@ import * as p from "@clack/prompts";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { defineCommand, runMain } from "citty";
-import { startBot } from "./bot.ts";
 import { loadOperatorConfig, type OperatorConfig, piAgentDir } from "./config.ts";
 import { BotState, type BotSummary } from "./core/bot-state.ts";
 import { openDatabase } from "./core/db.ts";
@@ -308,7 +307,8 @@ async function menu(): Promise<never> {
 
 const start = defineCommand({
 	meta: { name: "start", description: "Run the bot in the foreground (same as bun run start)" },
-	run: startBot,
+	// The bot pulls in the embedding model, vector store and decision wrapper; operator commands must not.
+	run: async () => (await import("./bot.ts")).startBot(),
 });
 
 const pause = defineCommand({

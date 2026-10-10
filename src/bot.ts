@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { withLoader } from "fox-girl-loader";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, piAgentDir } from "./config.ts";
 import { BotState, HEARTBEAT_MS } from "./core/bot-state.ts";
-import { CelebrationScheduler } from "./core/celebrations.ts";
+import type { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
 import { openDatabase } from "./core/db.ts";
-import { createFastEmbedder, DEFAULT_EMBEDDING_MODEL } from "./core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "./core/embedding-models.ts";
 import { createPiEventSummarizer, EventTracker } from "./core/events.ts";
 import { MemberMemory } from "./core/memory.ts";
 import { MessageIndex } from "./core/message-index.ts";
@@ -84,6 +84,7 @@ async function main(): Promise<void> {
 	let events: EventTracker | undefined;
 	let messageIndex: MessageIndex | undefined;
 	if (config.features.history) {
+		const { createFastEmbedder } = await import("./core/embedding.ts");
 		const embedder = await createFastEmbedder({
 			model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
 			cacheDir: join(config.dataDir, "models"),
@@ -167,14 +168,19 @@ async function main(): Promise<void> {
 				}
 			: {}),
 	});
-	const scheduler = new CelebrationScheduler({
-		db,
-		targets: config.celebrations,
-		transports,
-		listBirthdays: (spaceId, month, day) => memberMemory.listBirthdays(spaceId, month, day),
-		isPaused: () => botState.pausedAt() !== null,
-		onError: (error) => log.error("core", "celebration_failed", { error_category: errorCategory(error) }),
-	});
+	// The lunar calendar library loads only when there is a greeting target.
+	let scheduler: CelebrationScheduler | undefined;
+	if (config.celebrations.length) {
+		const { CelebrationScheduler } = await import("./core/celebrations.ts");
+		scheduler = new CelebrationScheduler({
+			db,
+			targets: config.celebrations,
+			transports,
+			listBirthdays: (spaceId, month, day) => memberMemory.listBirthdays(spaceId, month, day),
+			isPaused: () => botState.pausedAt() !== null,
+			onError: (error) => log.error("core", "celebration_failed", { error_category: errorCategory(error) }),
+		});
+	}
 
 	let shuttingDown = false;
 	let heartbeat: Timer | undefined;
@@ -182,7 +188,7 @@ async function main(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		log.info("core", "shutdown", { signal });
-		await scheduler.stop();
+		await scheduler?.stop();
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
 		await core.close();
 		await events?.idle();
@@ -199,7 +205,7 @@ async function main(): Promise<void> {
 	void core
 		.recoverPending()
 		.catch((error: unknown) => log.error("core", "inbound_recovery_failed", { error_category: errorCategory(error) }));
-	scheduler.start();
+	scheduler?.start();
 	botState.startRun();
 	heartbeat = setInterval(() => botState.heartbeat(), HEARTBEAT_MS);
 	const transcoder = inspectVideoTranscoder();

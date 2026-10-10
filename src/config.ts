@@ -11,7 +11,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding-models.ts";
 import { JEV_ENDPOINT } from "./decision/jev.ts";
 import { TEXT_IMAGE_MAX_CHARS } from "./media/text-image.ts";
 import { DEFAULT_IMAGE_MODEL } from "./tools/antigravity-image.ts";

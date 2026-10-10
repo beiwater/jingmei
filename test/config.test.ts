@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
-import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding-models.ts";
 import { JEV_ENDPOINT } from "../src/decision/jev.ts";
 
 const GUILD = "1552560014353506386";
