@@ -974,7 +974,7 @@ test("explicit mention, reply and name bypass participation decisions and gates"
 });
 
 test("deterministic event leaks are rewritten, then withheld before Jev and persisted as non-triggering hidden markers", async () => {
-	for (const text of ["oops §E7 leaked", "oops [当前事件 leaked"]) {
+	for (const text of ["oops §E7 leaked", "oops [当前事件 leaked", "oops [本轮要回应的消息] leaked"]) {
 		const f = fixture({ jev: true, voice: true });
 		const session = await f.seam.getSession(f.persona, f.space, "222");
 		const custom = spyOn(session, "sendCustomMessage");
@@ -1097,4 +1097,21 @@ test("event assignment and participation decisions start concurrently in the sam
 		await pending;
 	}
 	expect(f.sends).toHaveLength(1);
+});
+
+test("the trigger line is marked and quotes the message it replies to", async () => {
+	const f = fixture();
+	const session = await f.seam.getSession(f.persona, f.space, "222");
+	const custom = spyOn(session, "sendCustomMessage");
+	cleanups.push(() => {
+		custom.mockRestore();
+	});
+	await f.send();
+	await f.send({ content: "对", mentionedUserIds: [], replyToMessageId: "1001", replyToAuthorId: "900" });
+	const triggers = custom.mock.calls
+		.filter(([message, options]) => message.customType === "discord_context_v1" && options?.triggerTurn)
+		.map(([message]) => String(message.content));
+	expect(triggers).toHaveLength(2);
+	expect(triggers[0]).toMatch(/^\[本轮要回应的消息\] \[[^\]]+\] #10 Alice: hi Luna$/);
+	expect(triggers[1]).toMatch(/^\[本轮要回应的消息\] \[[^\]]+\] #11 ↪ 1001 Alice: 对\n↳ 它回复的 #1001 luna_bot · bot: hello$/);
 });

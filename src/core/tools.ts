@@ -804,5 +804,5 @@ export function createSendReplyTool(scope: ToolScope, sources: ReplySources) {
 
 /** Internal turn markers that must never reach the chat. */
 export function isLeak(text: string): boolean {
-	return /§E\d|\[当前事件/.test(text);
+	return /§E\d|\[当前事件|\[本轮要回应的消息\]/.test(text);
 }

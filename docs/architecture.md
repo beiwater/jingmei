@@ -82,7 +82,7 @@ flowchart LR
 5. 配了 Jev 秒回表情时，不等待地发起 `QuickReactions.react()`；内容判断选中的 directed 角色也按被点名处理。
 6. 图片写入 `data/media/`（文件名由 HMAC 派生，0600）；需要时调用 `visionModel` 生成描述。会话里只保存文件引用；带图消息的引用另存 `message_images`，供之后的种子/积累块带上最新的图片。
 7. 被路由的角色若消息明确要求查资料，先做一次 DeepSeek 搜索，结果作为不可信参考附在该角色的输入后。
-8. **只有被路由的角色写会话**：群消息一律入库并进入检索索引，但没有被路由的角色不写自己的会话，这些消息要等它下次被触发时才作为“积累的消息”进入。被路由的角色先进入对话段（见“会话”），把触发消息按 `[ISO] #id ↪ replyId §E12 作者 · bot: 内容 （相关 N 条）` 格式写成一条 `discord_context_v1` 自定义消息（`sendCustomMessage`，`triggerTurn: true`）生成回复。角色自己发出的消息的平台回声不会再喂回自己的会话。
+8. **只有被路由的角色写会话**：群消息一律入库并进入检索索引，但没有被路由的角色不写自己的会话，这些消息要等它下次被触发时才作为“积累的消息”进入。被路由的角色先进入对话段（见“会话”），把触发消息按 `[ISO] #id ↪ replyId §E12 作者 · bot: 内容 （相关 N 条）` 格式写成一条 `discord_context_v1` 自定义消息（`sendCustomMessage`，`triggerTurn: true`）生成回复。触发行前加固定标记 `[本轮要回应的消息]`；它回复了某条消息时，下一行附 `↳ 它回复的 #id 作者: 正文`（前 200 字），让「对」「喜欢这个」这类短回复按所接的原话理解。标记与引用在写入时固化，前缀不变；system prompt 固定说明只有最新带标记的一条是本轮要回应的，之前积累的群聊只是背景，不替别人回答与它无关的问题。角色自己发出的消息的平台回声不会再喂回自己的会话。
    - 触发的模型/工具轮次共用 180 秒总期限；Pi 最多自动重试一次（1 秒退避），provider 单次超时 60 秒且不叠加 provider 重试。期限到达调用 `session.abort()` 并退役会话，不等待忽略取消的 provider，下一条消息重开持久会话继续处理。最终 assistant `error` / `aborted` 记 `turn_failed`，总期限记 `turn_timeout`；只记录角色、平台和错误类别，不向群里发送失败提示，也不发送失败轮次的半截文字。这三类失败连同发送失败都会清掉该角色的 `last_reply_at`，下一次触发必开新对话段。
    - 触发角色在调用模型前显示“正在输入”，不等待平台请求完成；按 `PlatformTransport.typingRefreshMs`（Telegram 4 秒、Discord 8 秒，均短于平台自身的显示时长）重发，直到该角色的回复发出、被扣留、失败或超时，最长 60 秒（最后一次重发也不会让显示超过 60 秒）。计时器 `unref()`，平台请求失败不影响回复。
 9. 回复：本轮已点过表情、`send_reply` 已发出（哪怕只发出一部分）或被扣留就结束；启用 `textImage` 时，模型本轮结束后若仍没发送且最终文字超过 `thresholdChars`，在同一个总期限内追加一条隐藏的 `jingmei_length_gate_v1` 自定义消息（`triggerTurn: true`，说明字数与上限、要求改用 `send_reply` 的 `text_image` 部分）让模型重试一次；重试后已发出则结束，仍超长就继续下面的流程，文字按原样分条发送。否则最终文字先通过泄漏检查与自然度审查，再发送文字（明确要求语音且配置了语音时改发 MP3），回复原消息。被扣留的文字不发送、不补写 `messages`、不计回复数。
@@ -133,7 +133,7 @@ bot 消息永不触发；明确提及、回复、名字路由不经过接话 Jev
 
 ### 最终文字扣留
 
-- 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
+- 最终文字发送前（包括明确请求语音的转换前），先用 `/§E\d|\[当前事件|\[本轮要回应的消息\]/u` 检查内部标记，命中以 `leak_pattern` 扣留，不调用自然度审查。
 - 有共享客户端时调用 `auditNatural({ reply, message, recent }) -> number`，使用 noul 自然度分数；`< 0.5` 以 `audit` 不通过，`≥ 0.5` 放行。没有客户端只执行泄漏检查；`replyDecision` 不控制审查。
 - **重写一次**：`ActiveTurn.audit` 返回 `Withheld { reason, rewrite? }`。每轮第一次 `leak_pattern` 或 `audit` 带 `rewrite`：`audit` 时先调 `classifyAuditIssue` 取原因（`recap` / `planning` / `drafts` / `other`，调用失败按 `other`），映射到 `conversation.ts` 的 `REWRITE_HINTS`；记 `reply_rewrite { persona_id, platform, reason }`。最终文字追加 `jingmei_audit_gate_v1`（`display: false`、触发轮次）让模型重写；`send_reply` 返回带提示的 `isError` 结果、`turn.reply` 回到 `idle`、不 `terminate`。之后同一轮的审查不再带 `rewrite`，也不再问原因。
 - 审查失败：directed 或 probability 路由以 `audit_failed` 扣留，不重写；明确提及、回复、名字路由 fail-open。确定性泄漏检查对所有路由始终生效。`send_reply` 在准备任何部分之前走同一套检查：泄漏检查覆盖文字、语音稿、配文与长文图 Markdown（命中的那段交给 `turn.audit`）；有文字或语音部分时，把它们按顺序用空行连成一段做一次自然度审查（纯图片/表情图回复不请求）。最终被扣留时一条不发，`turn.reply` 置为 `withheld`（带原因）并以 `terminate` 结束本轮，同样记 `reply_withheld`；不追加 `jingmei_withheld_v1`（投影删 assistant 消息会留下孤立的工具结果），工具结果本身告诉模型没有发出。表情（`react_to_message`）不在审查范围内。
