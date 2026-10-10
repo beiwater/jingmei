@@ -214,8 +214,8 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 | 功能 | Discord（斜杠命令） | Telegram（群内文字命令） |
 |---|---|---|
-| 查看命令 | `/help` | `/help` |
-| 在线角色 | `/status` | `/status` |
+| 查看命令和怎么和角色说话 | `/help` | `/help` |
+| 在线角色（暂停时会说明） | `/status` | `/status` |
 | 直接提问 | `/ask prompt:<问题>` | `/ask <问题>` |
 | 查看记忆 / 重新启用 | `/memory`、`/memory action:enable` | `/memory`、`/memory enable` |
 | 生日：查看 / 设置 / 清除 | `/birthday`、`/birthday date:09-25`、`/birthday date:clear` | `/birthday`、`/birthday 09-25`、`/birthday clear` |
@@ -223,7 +223,9 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 上下文用量与对话段上限（管理员） | `/context` | `/context` |
 | 手动压缩上下文（管理员） | `/compact` | `/compact` |
 
-- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。
+- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。两个平台的命令回执统一为中文，命令名不变。
+- 和角色说话不必用命令：@ 它、回复它的消息，或直接叫它的名字（`/help` 也会这样提示）。
+- bot 被运维暂停时，`/ask` 会直接说明已暂停；`/ask` 没有得到回答（出错、被扣留、超时）时，两个平台都会回一句“没有得到回答，请重试”。
 - 管理员命令只对该角色 `adminUserIds` 里的用户开放，也只注册给配置了管理员的角色。
 - Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。

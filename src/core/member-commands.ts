@@ -1,5 +1,15 @@
 import type { ConversationCore } from "./types.ts";
 
+/** First line of `/help`: how to talk to a persona, before the command list. */
+export const HELP_INTRO = "想和我聊天：@我、回复我的消息，或直接叫我的名字。";
+
+export const PAUSED_REPLY = "管理员已暂停 bot，暂时不会回复。";
+
+/** `/status` reply: the personas answering here, and whether an operator has paused the bot. */
+export function statusReply(names: readonly string[], paused: boolean): string {
+	return `${paused ? "已暂停，暂时不会回复" : "在线"}。角色：${names.join("、")}。`;
+}
+
 /** Calendar validity and opt-out enforcement remain in MemberMemory.setBirthday. */
 export function parseBirthdayDate(date: string): { month: number; day: number } | null {
 	const match = /^(\d{1,2})-(\d{1,2})$/.exec(date);

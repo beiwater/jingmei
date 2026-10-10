@@ -44,7 +44,13 @@ async function main(): Promise<void> {
 	const memberMemory = new MemberMemory(db);
 	const botState = new BotState(db);
 	// Platform handlers only fire after `platform.start()`, by which time `core` exists.
-	const deps = { config, personas, memberMemory, getCore: (): Conversation => core };
+	const deps = {
+		config,
+		personas,
+		memberMemory,
+		getCore: (): Conversation => core,
+		isPaused: () => botState.pausedAt() !== null,
+	};
 	// Each factory verifies its tokens and fills `persona.accounts[platform]` before returning.
 	const platforms = [
 		...(config.discord ? [await createDiscordPlatform(deps)] : []),

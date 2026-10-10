@@ -9,6 +9,7 @@
  */
 
 import type { AppConfig } from "../../config.ts";
+import { PAUSED_REPLY } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import {
 	type ConversationCore,
@@ -44,6 +45,8 @@ export interface PlatformDeps {
 	personas: readonly Persona[];
 	getCore(): ConversationCore;
 	memberMemory: MemberMemory;
+	/** True while an operator has paused the bot. */
+	isPaused(): boolean;
 }
 
 export interface PlatformHandle {
@@ -160,6 +163,25 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 			.catch((error: unknown) => log.error("telegram", "dispatch_failed", { error_category: errorCategory(error) }));
 	}
 
+	/** A turn that sent nothing (failed, withheld, timed out) gets a short notice, like Discord's `/ask`. */
+	async function answerAsk(bot: TelegramBot, message: TelegramMessage, ask: InboundMessage): Promise<void> {
+		let responseMessageId: string | undefined;
+		try {
+			responseMessageId = (await deps.getCore().handleMessage(ask)).responseMessageId;
+		} catch (error) {
+			log.error("telegram", "ask_failed", { persona_id: bot.persona.id, error_category: errorCategory(error) });
+		}
+		if (!responseMessageId)
+			await bot.api
+				.sendMessage(message.chat.id, "没有得到回答，请重试。", [], message.message_id)
+				.catch((error: unknown) =>
+					log.error("telegram", "command_reply_failed", {
+						persona_id: bot.persona.id,
+						error_category: errorCategory(error),
+					}),
+				);
+	}
+
 	async function handleCommand(bot: TelegramBot, command: ParsedCommand, message: TelegramMessage): Promise<void> {
 		const chatId = String(message.chat.id);
 		const space = toSpaceId("telegram", chatId);
@@ -170,12 +192,18 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 				await bot.api.sendMessage(message.chat.id, "请在 /ask 后写上问题。", [], message.message_id);
 				return;
 			}
+			if (deps.isPaused()) {
+				await bot.api.sendMessage(message.chat.id, PAUSED_REPLY, [], message.message_id);
+				return;
+			}
 			enqueue(chatId, async () => {
 				const normalized = await normalizeTelegramMessage(
 					{ ...message, text: command.args, entities: [] },
 					normalizeDeps(bot),
 				);
-				if (normalized) dispatch({ ...normalized, mentionedUserIds: [bot.userId] });
+				if (!normalized) return;
+				// Not awaited: the chat queue must not wait for a whole model turn.
+				void answerAsk(bot, message, { ...normalized, mentionedUserIds: [bot.userId] });
 			});
 			return;
 		}
@@ -192,6 +220,7 @@ export async function createTelegramPlatform(deps: PlatformDeps): Promise<Platfo
 				config,
 				memberMemory,
 				getCore: deps.getCore,
+				isPaused: deps.isPaused,
 			});
 		} catch (error) {
 			log.error("telegram", "command_failed", {

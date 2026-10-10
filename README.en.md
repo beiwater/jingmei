@@ -214,8 +214,8 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 
 | Action | Discord (slash commands) | Telegram (text commands in the group) |
 |---|---|---|
-| List commands | `/help` | `/help` |
-| Online characters | `/status` | `/status` |
+| List commands and how to talk to a character | `/help` | `/help` |
+| Online characters (says so when paused) | `/status` | `/status` |
 | Ask directly | `/ask prompt:<question>` | `/ask <question>` |
 | Show memory / re-enable | `/memory`, `/memory action:enable` | `/memory`, `/memory enable` |
 | Birthday: show / set / clear | `/birthday`, `/birthday date:09-25`, `/birthday date:clear` | `/birthday`, `/birthday 09-25`, `/birthday clear` |
@@ -223,7 +223,9 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 | Context usage and segment limits (admin) | `/context` | `/context` |
 | Compact context now (admin) | `/compact` | `/compact` |
 
-- Discord command responses are visible only to the caller; the answer to `/ask` is posted in the channel as usual.
+- Discord command responses are visible only to the caller; the answer to `/ask` is posted in the channel as usual. Command replies are in Chinese on both platforms (the project is Chinese-first); command names are unchanged.
+- You don't need a command to talk to a character: @mention it, reply to its message, or call it by name (`/help` says so).
+- While an operator has paused the bot, `/ask` says it is paused; when `/ask` gets no answer (error, withheld, timeout) both platforms reply that no answer came and to try again.
 - Admin commands are open only to the character's `adminUserIds` and registered only for characters that have admins.
 - Telegram commands can target a character with `@botusername`; without it the first character to receive the command handles it. With several characters in a group, `/context` and `/compact` must name one.
 - Telegram has no caller-only replies, so command responses go to the group and `/memory` shows counts rather than the remembered details.

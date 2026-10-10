@@ -3,9 +3,12 @@
 import type { AppConfig } from "../../config.ts";
 import {
 	contextCommandError,
+	HELP_INTRO,
 	memoryCommandError,
+	PAUSED_REPLY,
 	parseBirthdayDate,
 	runContextCommand,
+	statusReply,
 } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import {
@@ -34,6 +37,8 @@ export interface PlatformDeps {
 	personas: readonly Persona[];
 	getCore(): ConversationCore;
 	memberMemory: MemberMemory;
+	/** True while an operator has paused the bot. */
+	isPaused(): boolean;
 }
 
 export interface PlatformHandle {
@@ -47,39 +52,39 @@ const MAX_IMAGES_PER_MESSAGE = 4;
 const PROBE_APPLICATION_ID = "10000000000000001";
 
 const COMMANDS = [
-	{ name: "help", description: "Show bot commands" },
-	{ name: "status", description: "Show bot status" },
+	{ name: "help", description: "查看命令和使用方法" },
+	{ name: "status", description: "查看在线状态" },
 	{
 		name: "ask",
-		description: "Ask the assistants",
-		options: [{ name: "prompt", description: "What would you like to ask?", type: 3, required: true }],
+		description: "直接向角色提问",
+		options: [{ name: "prompt", description: "想问什么？", type: 3, required: true }],
 	},
 	{
 		name: "memory",
-		description: "View or re-enable your own server memory",
+		description: "查看或重新启用你在本服务器的长期记忆",
 		options: [
 			{
 				name: "action",
-				description: "show or enable",
+				description: "show 或 enable",
 				type: 3,
 				required: false,
 				choices: [
-					{ name: "Show", value: "show" },
-					{ name: "Enable", value: "enable" },
+					{ name: "查看", value: "show" },
+					{ name: "启用", value: "enable" },
 				],
 			},
 		],
 	},
 	{
 		name: "birthday",
-		description: "View, set, or clear your own birthday reminder",
-		options: [{ name: "date", description: "MM-DD, or clear; leave empty to view", type: 3, required: false }],
+		description: "查看、设置或清除生日提醒",
+		options: [{ name: "date", description: "MM-DD，或 clear 清除；留空查看", type: 3, required: false }],
 	},
-	{ name: "forget", description: "Delete your server memory and stop collecting it" },
+	{ name: "forget", description: "删除你在本服务器的长期记忆并停止记录" },
 ];
 const ADMIN_COMMANDS = [
-	{ name: "context", description: "Show this channel's context usage (bot admin only)" },
-	{ name: "compact", description: "Compact this channel's context (bot admin only)" },
+	{ name: "context", description: "查看本频道上下文用量（管理员）" },
+	{ name: "compact", description: "压缩本频道上下文（管理员）" },
 ];
 
 function attachmentPlaceholder(contentType: string | undefined): string {
@@ -317,24 +322,25 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			return;
 		}
 		if (name === "help") {
-			await reply(
-				isAdmin(persona, author.id)
-					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`"
-					: "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`",
-			);
+			const commands = isAdmin(persona, author.id) ? [...COMMANDS, ...ADMIN_COMMANDS] : COMMANDS;
+			await reply([HELP_INTRO, ...commands.map((command) => `/${command.name} ${command.description}`)].join("\n"));
 			return;
 		}
 		if (name === "status") {
-			const alive = deps.personas
-				.flatMap((candidate) => (candidate.accounts.discord ? [candidate.accounts.discord.username] : []))
-				.join(", ");
-			await reply(`Online. Assistants: ${alive}.`);
+			const alive = deps.personas.flatMap((candidate) =>
+				candidate.accounts.discord ? [candidate.accounts.discord.username] : [],
+			);
+			await reply(statusReply(alive, deps.isPaused()));
 			return;
 		}
 		if (name !== "ask") return;
 		const prompt = getOption(interaction, "prompt")?.trim();
 		if (!prompt) {
-			await reply("Please include a prompt.");
+			await reply("请带上你的问题。");
+			return;
+		}
+		if (deps.isPaused()) {
+			await reply(PAUSED_REPLY);
 			return;
 		}
 		await client.deferInteraction(interaction, true);
@@ -352,15 +358,11 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			});
 			await client.followUpInteraction(
 				interaction,
-				dispatch.responseMessageId
-					? "Your answer was posted in the channel."
-					: dispatch.route.personaId
-						? "The assistant didn't return an answer. Please try again."
-						: "No assistant was selected for that request. Please try /ask again.",
+				dispatch.responseMessageId ? "回答已发到频道。" : "没有得到回答，请重试。",
 			);
 		} catch (error) {
 			log.error("discord", "ask_failed", { persona_id: persona.id, error_category: errorCategory(error) });
-			await client.followUpInteraction(interaction, "I couldn't complete that request. Please try again.");
+			await client.followUpInteraction(interaction, "请求没有完成，请稍后再试。");
 		}
 	}
 
