@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { openDatabase } from "../src/core/db.ts";
 const MINUTE = 60_000;
 const dirs: string[] = [];
 afterEach(() => {
+	setSystemTime();
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -24,8 +25,10 @@ test("a pause written by the CLI connection reaches the running bot's connection
 	const bot = new BotState(botDb);
 	const cli = new BotState(cliDb);
 	expect(bot.pausedAt()).toBeNull();
-	expect(cli.pause(1_000)).toBe(true);
-	expect(cli.pause(2_000)).toBe(false);
+	setSystemTime(new Date(1_000));
+	expect(cli.pause()).toBe(true);
+	setSystemTime(new Date(2_000));
+	expect(cli.pause()).toBe(false);
 	expect(bot.pausedAt()).toBe(1_000);
 	expect(cli.resume()).toBe(true);
 	expect(cli.resume()).toBe(false);
@@ -39,15 +42,19 @@ test("runtime sums finished runs, counts a live run up to now, and stops countin
 	const state = new BotState(db);
 	expect(state.summary(0)).toMatchObject({ current: null, lastSeenAt: null, runs: 0, runtimeMs: 0, messages: 0 });
 
-	state.startRun(0);
+	setSystemTime(new Date(0));
+	state.startRun();
 	state.recordReply();
-	state.stopRun(10 * MINUTE);
+	setSystemTime(new Date(10 * MINUTE));
+	state.stopRun();
 
 	const t = 100 * MINUTE;
-	state.startRun(t);
+	setSystemTime(new Date(t));
+	state.startRun();
 	state.recordReply();
 	state.recordReply();
-	state.heartbeat(t + 5 * MINUTE);
+	setSystemTime(new Date(t + 5 * MINUTE));
+	state.heartbeat();
 	expect(state.summary(t + 5 * MINUTE + 30_000)).toMatchObject({
 		current: { startedAt: t, replies: 2 },
 		lastSeenAt: null,
