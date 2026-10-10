@@ -112,10 +112,6 @@ export class DiscordTransport {
 		this.allowedChannels = options.allowedChannelIds ? new Set(options.allowedChannelIds) : undefined;
 	}
 
-	getParentChannelId(channelId: Snowflake): Snowflake | undefined {
-		return this.threadParents.get(channelId);
-	}
-
 	async getCurrentUser(): Promise<{ id: Snowflake; username: string }> {
 		const user = await this.request<{ id: unknown; username?: unknown }>("/users/@me");
 		if (!isSnowflake(user.id)) throw new Error("Discord current user response did not include a valid id");

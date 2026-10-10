@@ -88,19 +88,8 @@ function attachmentPlaceholder(contentType: string | undefined): string {
 	return "[文件]";
 }
 
-/** Normalize one Discord message; null when outside the allow-list. Images/video frames are capped per message. */
-async function normalizeDiscordMessage(
-	message: DiscordMessage,
-	allowedGuilds: ReadonlyMap<string, ReadonlySet<string>>,
-	parentChannelId?: string,
-): Promise<InboundMessage | null> {
-	const guildId = message.guild_id;
-	const allowedChannels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-	if (
-		!allowedChannels ||
-		!(allowedChannels.has(message.channel_id) || (parentChannelId && allowedChannels.has(parentChannelId)))
-	)
-		return null;
+/** Normalize one Discord message; the transport already limited events to the persona's allowed channels. Images/video frames are capped per message. */
+async function normalizeDiscordMessage(message: DiscordMessage): Promise<InboundMessage> {
 	const images: InboundImage[] = [];
 	const placeholders: string[] = [];
 	for (const attachment of message.attachments ?? []) {
@@ -132,7 +121,7 @@ async function normalizeDiscordMessage(
 	const content = [message.content ?? "", ...placeholders].filter(Boolean).join(" ");
 	return {
 		platform: "discord",
-		spaceId: toSpaceId("discord", guildId as string),
+		spaceId: toSpaceId("discord", message.guild_id as string),
 		channelId: message.channel_id,
 		messageId: message.id,
 		authorId: message.author.id,
@@ -183,7 +172,6 @@ function inPersonaScope(persona: Persona, space: SpaceId): boolean {
 export async function createDiscordPlatform(deps: PlatformDeps): Promise<PlatformHandle> {
 	const { config, memberMemory } = deps;
 	const guilds = config.discord?.guilds ?? [];
-	const allowedGuilds = new Map(guilds.map(({ guildId, channelIds }) => [guildId, new Set(channelIds)]));
 	const clients = new Map<string, DiscordTransport>();
 	const commandsByClient: Array<{ client: DiscordTransport; persona: Persona }> = [];
 
@@ -203,12 +191,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 				log.error("discord", "transport_error", { persona_id: persona.id, error_category: errorCategory(error) }),
 			onMessage: async (message) => {
 				try {
-					const normalized = await normalizeDiscordMessage(
-						message,
-						allowedGuilds,
-						client.getParentChannelId(message.channel_id),
-					);
-					if (normalized) await deps.getCore().handleMessage(normalized);
+					await deps.getCore().handleMessage(await normalizeDiscordMessage(message));
 				} catch (error) {
 					log.error("discord", "message_failed", { persona_id: persona.id, error_category: errorCategory(error) });
 				}
@@ -226,19 +209,10 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		persona: Persona,
 		client: DiscordTransport,
 	): Promise<void> {
-		const guildId = interaction.guild_id;
-		const channels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-		if (
-			!guildId ||
-			!channels ||
-			!inPersonaScope(persona, toSpaceId("discord", guildId)) ||
-			!interaction.channel_id ||
-			!(channels.has(interaction.channel_id) || channels.has(client.getParentChannelId(interaction.channel_id) ?? ""))
-		)
-			return;
-		const space = toSpaceId("discord", guildId);
-		const channelId = interaction.channel_id;
-		const author = interaction.member?.user ?? interaction.user;
+		// The transport only delivers interactions from this persona's allowed guild channels, which always carry a member.
+		const space = toSpaceId("discord", interaction.guild_id!);
+		const channelId = interaction.channel_id!;
+		const author = interaction.member!.user!;
 		const name = interaction.data?.name;
 		const reply = (content: string) => client.respondToInteraction(interaction, content, { ephemeral: true });
 
