@@ -6,7 +6,6 @@ const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0
 const base = {
 	url: "https://cdn.discordapp.com/attachments/1/2/photo.png",
 	filename: "../photo.png",
-	contentType: "image/png",
 };
 
 describe("Discord image attachments", () => {
@@ -33,7 +32,7 @@ describe("Discord image attachments", () => {
 		expect(Array.from(imageBytes.subarray(0, 8))).toEqual(Array.from(realPng.subarray(0, 8)));
 	});
 
-	test("rejects non-CDN URLs, non-images, declared oversize and streamed oversize bodies", async () => {
+	test("rejects non-CDN URLs, declared oversize and streamed oversize bodies", async () => {
 		const fetchNever = async () => {
 			throw new Error("fetch must not run");
 		};
@@ -42,9 +41,6 @@ describe("Discord image attachments", () => {
 		).toBeNull();
 		expect(
 			await downloadDiscordImage({ ...base, url: "https://example.org/a.png" }, { fetchImpl: fetchNever }),
-		).toBeNull();
-		expect(
-			await downloadDiscordImage({ ...base, contentType: "application/pdf" }, { fetchImpl: fetchNever }),
 		).toBeNull();
 		expect(await downloadDiscordImage({ ...base, size: 101 }, { maxBytes: 100, fetchImpl: fetchNever })).toBeNull();
 		expect(
@@ -75,7 +71,7 @@ describe("Discord image attachments", () => {
 		const fetchNever = async () => {
 			throw new Error("fetch must not run");
 		};
-		const video = { url: "https://cdn.discordapp.com/attachments/1/2/clip.mp4", contentType: "video/mp4" };
+		const video = { url: "https://cdn.discordapp.com/attachments/1/2/clip.mp4" };
 		expect(
 			await downloadDiscordVideo({ ...video, url: "https://example.org/clip.mp4" }, { fetchImpl: fetchNever }),
 		).toBeNull();

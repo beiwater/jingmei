@@ -96,7 +96,6 @@ async function normalizeDiscordMessage(message: DiscordMessage): Promise<Inbound
 		const ref = {
 			url: attachment.url,
 			filename: attachment.filename,
-			contentType: attachment.content_type,
 			size: attachment.size,
 		};
 		const type = attachment.content_type?.toLowerCase() ?? "";
@@ -137,7 +136,7 @@ async function normalizeDiscordMessage(message: DiscordMessage): Promise<Inbound
 }
 
 async function videoFrames(
-	ref: { url: string; filename?: string; contentType?: string; size?: number },
+	ref: { url: string; filename?: string; size?: number },
 	limit: number,
 ): Promise<InboundImage[]> {
 	const downloaded = await downloadDiscordVideo(ref);
