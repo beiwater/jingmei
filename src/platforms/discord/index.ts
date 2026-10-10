@@ -157,12 +157,8 @@ async function videoFrames(
 }
 
 function getOption(interaction: DiscordInteraction, name: string): string | undefined {
-	const options = interaction.data?.options;
-	if (!Array.isArray(options)) return undefined;
-	for (const item of options)
-		if (item && typeof item === "object" && "name" in item && item.name === name && "value" in item)
-			return typeof item.value === "string" ? item.value : undefined;
-	return undefined;
+	const value = interaction.data?.options?.find((option) => option.name === name)?.value;
+	return typeof value === "string" ? value : undefined;
 }
 
 function inPersonaScope(persona: Persona, space: SpaceId): boolean {

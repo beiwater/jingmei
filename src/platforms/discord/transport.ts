@@ -21,7 +21,7 @@ export interface DiscordInteraction {
 	type: number;
 	application_id: Snowflake;
 	token: string;
-	data?: { name?: string; options?: unknown[]; [key: string]: unknown };
+	data?: { name?: string; options?: Array<{ name: string; value?: unknown }>; [key: string]: unknown };
 	guild_id?: Snowflake;
 	channel_id?: Snowflake;
 	member?: { user?: { id: Snowflake; username: string; [key: string]: unknown }; [key: string]: unknown };
