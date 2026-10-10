@@ -28,10 +28,12 @@ import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
 import { createTelegramPlatform } from "./platforms/telegram/index.ts";
 import { ANTIGRAVITY_PROVIDER_ID, AntigravityImageError, generateAntigravityImage } from "./tools/antigravity-image.ts";
+import { assertRunJsSandbox, RunJsSandboxError } from "./tools/run-js.ts";
 import type { ImageGenerator } from "./core/tools.ts";
 
 async function main(): Promise<void> {
 	const config = loadConfig();
+	await assertRunJsSandbox();
 	const agentDir = piAgentDir(config.dataDir);
 	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
 	ensureDeepSeekModelsFile(agentDir);
@@ -41,22 +43,19 @@ async function main(): Promise<void> {
 	const db = openDatabase(config.dataDir);
 	const memberMemory = new MemberMemory(db);
 	const botState = new BotState(db);
-	let core: Conversation | undefined;
+	// Platform handlers only fire after `platform.start()`, by which time `core` exists.
 	const deps = {
 		config,
 		personas,
 		memberMemory,
-		getCore: () => {
-			if (!core) throw new Error("conversation core is not ready");
-			return core;
-		},
+		getCore: (): Conversation => core,
+		isPaused: () => botState.pausedAt() !== null,
 	};
 	// Each factory verifies its tokens and fills `persona.accounts[platform]` before returning.
 	const platforms = [
 		...(config.discord ? [await createDiscordPlatform(deps)] : []),
 		...(config.telegram ? [await createTelegramPlatform(deps)] : []),
 	];
-	if (!platforms.length) throw new Error("no platform configured");
 	const transports = new Map<Platform, PlatformTransport>(
 		platforms.map((platform) => [platform.transport.platform, platform.transport]),
 	);
@@ -85,10 +84,9 @@ async function main(): Promise<void> {
 	});
 	let events: EventTracker | undefined;
 	if (config.events) {
-		if (!decision) throw new Error("events requires a decision client");
 		events = new EventTracker({
 			db,
-			decision,
+			decision: decision!,
 			embedder,
 			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
 		});
@@ -116,7 +114,7 @@ async function main(): Promise<void> {
 			log.warn("core", "text_image_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	// A synthetic render proves ECharts and resvg load; live data is fetched per request, not at startup.
+	// A synthetic render proves resvg loads; live data is fetched per request, not at startup.
 	let kline: KlineRenderer | undefined;
 	if (config.kline) {
 		try {
@@ -126,7 +124,7 @@ async function main(): Promise<void> {
 			log.warn("core", "kline_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	core = new Conversation({
+	const core = new Conversation({
 		db,
 		botState,
 		dataDir: config.dataDir,
@@ -176,20 +174,20 @@ async function main(): Promise<void> {
 		log.info("core", "shutdown", { signal });
 		await scheduler.stop();
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
-		await core?.close();
+		await core.close();
 		await events?.idle();
 		await messageIndex.idle();
 		clearInterval(heartbeat);
 		botState.stopRun();
 		db.close();
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
-	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
+	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
+	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
 
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.
 	void core
-		?.recoverPending()
+		.recoverPending()
 		.catch((error: unknown) => log.error("core", "inbound_recovery_failed", { error_category: errorCategory(error) }));
 	scheduler.start();
 	botState.startRun();
@@ -227,8 +225,13 @@ export async function startBot(): Promise<void> {
 			error_category: errorCategory(error),
 			detail: error instanceof Error ? error.message : undefined,
 		});
-		// Both messages are built from config/model names only, never secret values.
-		if (error instanceof ConfigError || error instanceof PiModelConfigurationError) console.error(error.message);
+		// These messages are built from config/model names and the sandbox probe result, never secret values.
+		if (
+			error instanceof ConfigError ||
+			error instanceof PiModelConfigurationError ||
+			error instanceof RunJsSandboxError
+		)
+			console.error(error.message);
 		process.exitCode = 1;
 	}
 }

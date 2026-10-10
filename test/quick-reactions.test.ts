@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import type { JevClient } from "../src/decision/jev.ts";
 import { QuickReactions } from "../src/core/quick-reactions.ts";
 import type { InboundMessage, Persona, Platform, PlatformTransport, Route } from "../src/core/types.ts";
@@ -19,10 +19,13 @@ const persona = (id: string): Persona => ({
 	accounts: { telegram: { userId: `${id}-id`, username: id } },
 });
 const personas = [persona("luna"), persona("mio")];
+afterEach(() => setSystemTime());
+
 const nobody: Route = { personaId: null, reason: "nobody" };
 
 function harness(decision: { emoji: string | null; strongEmotion: number; funny: number }) {
 	let now = 1_000_000;
+	setSystemTime(new Date(now));
 	let jevCalls = 0;
 	const reactions: Array<{ personaId: string; channelId: string; messageId: string; emoji: string }> = [];
 	const client: JevClient = {
@@ -69,7 +72,6 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 			minIntervalMs: 60_000,
 		},
 		new Map<Platform, PlatformTransport>([["telegram", transport]]),
-		() => now,
 	);
 	let id = 1;
 	const message = (overrides: Partial<InboundMessage> = {}): InboundMessage => ({
@@ -90,6 +92,7 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 		jevCalls: () => jevCalls,
 		advance: (ms: number) => {
 			now += ms;
+			setSystemTime(new Date(now));
 		},
 	};
 }

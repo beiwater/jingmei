@@ -6,6 +6,7 @@
 
 - 专用 Linux 用户；代码、`.env`、`jingmei.config.json`、persona 文件和 `data/` 都放在该用户家目录下，只有该用户可读。
 - [Bun](https://bun.sh/)。仓库 CI 使用 Bun 1.3.14。
+- 必需：`bubblewrap` 与允许其创建 user namespace 的系统策略（见下文“run_js 操作系统沙箱”）；缺少时启动直接报错退出。
 - 可选：`ffmpeg` 与 `ffprobe`（Debian/Ubuntu：`sudo apt install ffmpeg`）。缺少任一工具时启动日志有一条 `video_frames_unavailable` 警告，视频只以 `[视频]` 占位进入上下文，其他功能不受影响；安装后重启即可。
 - 可选：开启 `textImage`（长文转图）需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会联网下载并缓存两个固定版本的 Typst 包。字体缺失时图里的汉字会变成方框；启动时检测到会记一条 `text_image_font_missing` 警告（功能仍保持开启），装好字体后重启即可。
 - 可选：开启 `kline`（K 线图）不需要额外下载，只需出站访问 `data-api.binance.vision`，并有系统字体 DejaVu Sans（Debian/Ubuntu：`fonts-dejavu-core`，通常已安装）；试渲染失败会记 `kline_unavailable` 并关闭该功能。
@@ -14,7 +15,7 @@
 
 ## run_js 操作系统沙箱
 
-Linux 首次 `run_js` 调用会自动探测 bubblewrap 是否真正可用；其他系统或探测失败时保留原有 vm 沙箱，不新增配置，也不阻止计算功能。**vm 不是安全边界**：未启用 bwrap 时，引擎逃逸仍可读服务用户的文件并联网。
+`run_js` 只在 bubblewrap 里运行，没有回退。启动时用真实的 bwrap 参数试运行一次 `1 + 1`；非 Linux、未安装 bwrap、被 AppArmor 拒绝 user namespace、挂载或运行时失败都会让启动直接报错退出（stderr 打印原因），不新增配置。**node:vm 不是安全边界**，所以不在没有 bwrap 的机器上降级运行。
 
 Ubuntu 24.04 安装发行版工具：
 
@@ -24,7 +25,7 @@ command -v bwrap
 sysctl kernel.apparmor_restrict_unprivileged_userns
 ```
 
-Ubuntu 24.04 默认启用 AppArmor 对非特权 user namespace 的限制；`kernel.apparmor_restrict_unprivileged_userns = 1` 时，仅找到 `bwrap` 并不代表可创建沙箱。Ubuntu 的[官方发行说明](https://discourse.ubuntu.com/t/noble-numbat-release-notes/39890)解释了该限制及推荐的应用专用 AppArmor `flags=(unconfined)` + `userns,` 授权方式。若发行版已加载匹配 `/usr/bin/bwrap` 的授权 profile，无需另加；若实际探测仍被 AppArmor 拒绝，由管理员检查现有 profile / 内核拒绝日志，必要时按该官方模式创建 `/etc/apparmor.d/jingmei-bwrap`（这里假设 `command -v bwrap` 为 `/usr/bin/bwrap`）：
+Ubuntu 24.04 默认启用 AppArmor 对非特权 user namespace 的限制；`kernel.apparmor_restrict_unprivileged_userns = 1` 时，仅找到 `bwrap` 并不代表可创建沙箱。Ubuntu 的[官方发行说明](https://discourse.ubuntu.com/t/noble-numbat-release-notes/39890)解释了该限制及推荐的应用专用 AppArmor `flags=(unconfined)` + `userns,` 授权方式。若发行版已加载匹配 `/usr/bin/bwrap` 的授权 profile，无需另加；若启动试运行仍被 AppArmor 拒绝，由管理员检查现有 profile / 内核拒绝日志，必要时按该官方模式创建 `/etc/apparmor.d/jingmei-bwrap`（这里假设 `command -v bwrap` 为 `/usr/bin/bwrap`）：
 
 ```text
 abi <abi/4.0>,
@@ -44,7 +45,7 @@ systemctl --user restart pi-discord-agent
 
 该授权只解决 AppArmor 的 userns 限制，不承诺覆盖其他内核、容器或 systemd 策略；不推荐全局把上述 sysctl 改成 0。Bun 即使位于 `~/.bun/bin/bun` 也只挂载可执行文件本身，不暴露 home。bwrap 参数语义见 [Ubuntu bwrap 手册](https://manpages.ubuntu.com/manpages/noble/man1/bwrap.1.html)；隔离边界及剩余风险见 [architecture.md](architecture.md#run_js-sandbox-威胁模型)。
 
-重启后触发一次正常计算工具调用，并用 `journalctl --user -u pi-discord-agent -f` 查看 `event: "run_js_sandbox"`：`fields.kind: "bwrap"` 才表示试运行成功；`"vm"` 表示本进程回退。日志只出现一次，不包含失败 stderr 或路径；安装工具或调整策略后必须重启重新探测。没有工具调用时不会出现这条日志。
+重启后服务正常启动即表示试运行成功；失败时 `bun run start` 的 stderr 与 `journalctl --user -u pi-discord-agent` 里的 `startup_failed` 都会给出原因（stderr 不含 bwrap 的详细输出，userns 被拒通常表现为 `sandbox exited without a structured result`）。安装工具或调整策略后重启即可重新探测。
 
 ## systemd 用户服务
 
@@ -121,17 +122,12 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 - 向量使用 `events.embeddingModel`（未开话题时用默认模型）与 `data/models` 里的模型缓存。已 `/forget` 的成员的消息不会被索引。
 - 回填与 bot 共用同一个 `data/jingmei.db`，部署新版本后运行一次即可，之后无需再跑。
 
-## 从旧版迁移
-
-1. 停止服务。
-2. 在项目根运行 `bun scripts/migrate-config.ts`，由 `discord.config.json` 生成 `jingmei.config.json`，检查后按需补 `telegram`、`jev` 段落（见 [README](../README.md#从旧版迁移)）。
-3. 启动服务。首次启动时 `data/discord-agent.db`（连同 `-wal`/`-shm`）自动改名为 `data/jingmei.db`，旧的 `discord_*` 表在一个事务里迁移为新表，服务器 ID 改写为 `discord:<guildId>`。如果 `jingmei.db` 已存在，旧文件不会被动。
-
 ## 排查
 
 - 启动即退出：stderr 会打印配置错误清单或模型问题（`unknown_model`、`unauthenticated_provider`、`unsupported_reasoning_effort`、`image_input_unsupported`）。
 - 启动失败且与模型缓存相关：macOS 确认已安装 Homebrew SQLite；检查 sqlite-vec 能否加载、首次模型下载网络。话题启动失败另查 `events.summaryModel` 认证与决策 key / `localJev` 配置。`jev.endpoint` 的运行时调用失败只在有本地包装器时回退；显式命名却缺失的环境变量仍会拒绝启动。
 - Discord 收不到普通消息：检查 Message Content Intent 和频道权限。
+- Discord Gateway 不可恢复的关闭码（日志 `transport_error` 带 `close_code`）：进程会向 stderr 打印提示、优雅关闭并以非零码退出，重连无法修复。`4014` / `4013` 在 Discord Developer Portal 的 Bot 页打开 Message Content Intent；`4004` 令牌无效，检查 `.env` 里该角色的令牌变量；`4010` / `4011` / `4012` 是分片或 API 版本被拒，通常是 Discord 侧变化，需升级代码。其他关闭码会自动重连。
 - Telegram 只对命令和 @ 有反应：privacy mode 未关闭，日志有 `privacy_mode_enabled`。
 - Telegram 群没反应：日志里的 `chat_ignored` 给出未列入 `telegram.chatIds` 的群 ID。
 - 某条消息为什么没回：按时间找该消息附近的 `event: "route"`。`stale: true` 表示收到或开始处理时已超过 3 分钟：只入库和写向量索引，明确点名也不回。`reason: "nobody"` 时看 `candidate`（没抽中为 `null`）、`gated`（冷却/占比挡住）、`decision`（`failed` 为接话判断调用失败）与 `chat_in`（低于 `replyThreshold`）；被路由但没发出则看同一角色的 `reply_withheld` / `turn_failed` / `turn_timeout`；`reply_rewrite` 表示第一次审查没过、已让角色带原因重写，随后没有 `reply_withheld` 就说明重写发出去了。重启的 `inbound_recovered { recovered, expired }` 表示补处理的 3 分钟内未完成消息与仅保留历史的过期消息数；没有积压则不记该事件。

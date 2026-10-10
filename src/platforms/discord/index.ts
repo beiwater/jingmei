@@ -3,9 +3,12 @@
 import type { AppConfig } from "../../config.ts";
 import {
 	contextCommandError,
+	HELP_INTRO,
 	memoryCommandError,
+	PAUSED_REPLY,
 	parseBirthdayDate,
 	runContextCommand,
+	statusReply,
 } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import {
@@ -24,6 +27,7 @@ import {
 	DISCORD_QUICK_REACTIONS,
 	type DiscordInteraction,
 	type DiscordMessage,
+	DiscordGatewayFatalError,
 	DiscordPlatformTransport,
 	DiscordTransport,
 } from "./transport.ts";
@@ -33,6 +37,8 @@ export interface PlatformDeps {
 	personas: readonly Persona[];
 	getCore(): ConversationCore;
 	memberMemory: MemberMemory;
+	/** True while an operator has paused the bot. */
+	isPaused(): boolean;
 }
 
 export interface PlatformHandle {
@@ -46,39 +52,39 @@ const MAX_IMAGES_PER_MESSAGE = 4;
 const PROBE_APPLICATION_ID = "10000000000000001";
 
 const COMMANDS = [
-	{ name: "help", description: "Show bot commands" },
-	{ name: "status", description: "Show bot status" },
+	{ name: "help", description: "查看命令和使用方法" },
+	{ name: "status", description: "查看在线状态" },
 	{
 		name: "ask",
-		description: "Ask the assistants",
-		options: [{ name: "prompt", description: "What would you like to ask?", type: 3, required: true }],
+		description: "直接向角色提问",
+		options: [{ name: "prompt", description: "想问什么？", type: 3, required: true }],
 	},
 	{
 		name: "memory",
-		description: "View or re-enable your own server memory",
+		description: "查看或重新启用你在本服务器的长期记忆",
 		options: [
 			{
 				name: "action",
-				description: "show or enable",
+				description: "show 或 enable",
 				type: 3,
 				required: false,
 				choices: [
-					{ name: "Show", value: "show" },
-					{ name: "Enable", value: "enable" },
+					{ name: "查看", value: "show" },
+					{ name: "启用", value: "enable" },
 				],
 			},
 		],
 	},
 	{
 		name: "birthday",
-		description: "View, set, or clear your own birthday reminder",
-		options: [{ name: "date", description: "MM-DD, or clear; leave empty to view", type: 3, required: false }],
+		description: "查看、设置或清除生日提醒",
+		options: [{ name: "date", description: "MM-DD，或 clear 清除；留空查看", type: 3, required: false }],
 	},
-	{ name: "forget", description: "Delete your server memory and stop collecting it" },
+	{ name: "forget", description: "删除你在本服务器的长期记忆并停止记录" },
 ];
 const ADMIN_COMMANDS = [
-	{ name: "context", description: "Show this channel's context usage (bot admin only)" },
-	{ name: "compact", description: "Compact this channel's context (bot admin only)" },
+	{ name: "context", description: "查看本频道上下文用量（管理员）" },
+	{ name: "compact", description: "压缩本频道上下文（管理员）" },
 ];
 
 function attachmentPlaceholder(contentType: string | undefined): string {
@@ -88,26 +94,14 @@ function attachmentPlaceholder(contentType: string | undefined): string {
 	return "[文件]";
 }
 
-/** Normalize one Discord message; null when outside the allow-list. Images/video frames are capped per message. */
-async function normalizeDiscordMessage(
-	message: DiscordMessage,
-	allowedGuilds: ReadonlyMap<string, ReadonlySet<string>>,
-	parentChannelId?: string,
-): Promise<InboundMessage | null> {
-	const guildId = message.guild_id;
-	const allowedChannels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-	if (
-		!allowedChannels ||
-		!(allowedChannels.has(message.channel_id) || (parentChannelId && allowedChannels.has(parentChannelId)))
-	)
-		return null;
+/** Normalize one Discord message; the transport already limited events to the persona's allowed channels. Images/video frames are capped per message. */
+async function normalizeDiscordMessage(message: DiscordMessage): Promise<InboundMessage> {
 	const images: InboundImage[] = [];
 	const placeholders: string[] = [];
 	for (const attachment of message.attachments ?? []) {
 		const ref = {
 			url: attachment.url,
 			filename: attachment.filename,
-			contentType: attachment.content_type,
 			size: attachment.size,
 		};
 		const type = attachment.content_type?.toLowerCase() ?? "";
@@ -132,7 +126,7 @@ async function normalizeDiscordMessage(
 	const content = [message.content ?? "", ...placeholders].filter(Boolean).join(" ");
 	return {
 		platform: "discord",
-		spaceId: toSpaceId("discord", guildId as string),
+		spaceId: toSpaceId("discord", message.guild_id as string),
 		channelId: message.channel_id,
 		messageId: message.id,
 		authorId: message.author.id,
@@ -148,7 +142,7 @@ async function normalizeDiscordMessage(
 }
 
 async function videoFrames(
-	ref: { url: string; filename?: string; contentType?: string; size?: number },
+	ref: { url: string; filename?: string; size?: number },
 	limit: number,
 ): Promise<InboundImage[]> {
 	const downloaded = await downloadDiscordVideo(ref);
@@ -168,12 +162,8 @@ async function videoFrames(
 }
 
 function getOption(interaction: DiscordInteraction, name: string): string | undefined {
-	const options = interaction.data?.options;
-	if (!Array.isArray(options)) return undefined;
-	for (const item of options)
-		if (item && typeof item === "object" && "name" in item && item.name === name && "value" in item)
-			return typeof item.value === "string" ? item.value : undefined;
-	return undefined;
+	const value = interaction.data?.options?.find((option) => option.name === name)?.value;
+	return typeof value === "string" ? value : undefined;
 }
 
 function inPersonaScope(persona: Persona, space: SpaceId): boolean {
@@ -183,8 +173,16 @@ function inPersonaScope(persona: Persona, space: SpaceId): boolean {
 export async function createDiscordPlatform(deps: PlatformDeps): Promise<PlatformHandle> {
 	const { config, memberMemory } = deps;
 	const guilds = config.discord?.guilds ?? [];
-	const allowedGuilds = new Map(guilds.map(({ guildId, channelIds }) => [guildId, new Set(channelIds)]));
 	const clients = new Map<string, DiscordTransport>();
+	let failing = false;
+	/** Reconnecting cannot fix this: tell the operator what to change and shut down with a nonzero exit code. */
+	function failFatally(personaId: string, error: DiscordGatewayFatalError): void {
+		console.error(`[${personaId}] ${error.message}. ${error.hint}`.trim());
+		if (failing) return;
+		failing = true;
+		process.exitCode = 1;
+		process.kill(process.pid, "SIGTERM");
+	}
 	const commandsByClient: Array<{ client: DiscordTransport; persona: Persona }> = [];
 
 	for (const persona of deps.personas) {
@@ -199,16 +197,17 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			token,
 			applicationId: identity.id,
 			allowedChannelIds: personaAllowed,
-			onError: (error) =>
-				log.error("discord", "transport_error", { persona_id: persona.id, error_category: errorCategory(error) }),
+			onError: (error) => {
+				log.error("discord", "transport_error", {
+					persona_id: persona.id,
+					error_category: errorCategory(error),
+					...(error instanceof DiscordGatewayFatalError ? { close_code: error.code } : {}),
+				});
+				if (error instanceof DiscordGatewayFatalError) failFatally(persona.id, error);
+			},
 			onMessage: async (message) => {
 				try {
-					const normalized = await normalizeDiscordMessage(
-						message,
-						allowedGuilds,
-						client.getParentChannelId(message.channel_id),
-					);
-					if (normalized) await deps.getCore().handleMessage(normalized);
+					await deps.getCore().handleMessage(await normalizeDiscordMessage(message));
 				} catch (error) {
 					log.error("discord", "message_failed", { persona_id: persona.id, error_category: errorCategory(error) });
 				}
@@ -226,24 +225,14 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		persona: Persona,
 		client: DiscordTransport,
 	): Promise<void> {
-		const guildId = interaction.guild_id;
-		const channels = typeof guildId === "string" ? allowedGuilds.get(guildId) : undefined;
-		if (
-			!guildId ||
-			!channels ||
-			!inPersonaScope(persona, toSpaceId("discord", guildId)) ||
-			!interaction.channel_id ||
-			!(channels.has(interaction.channel_id) || channels.has(client.getParentChannelId(interaction.channel_id) ?? ""))
-		)
-			return;
-		const space = toSpaceId("discord", guildId);
-		const channelId = interaction.channel_id;
-		const author = interaction.member?.user ?? interaction.user;
+		// The transport only delivers interactions from this persona's allowed guild channels, which always carry a member.
+		const space = toSpaceId("discord", interaction.guild_id!);
+		const channelId = interaction.channel_id!;
+		const author = interaction.member!.user!;
 		const name = interaction.data?.name;
 		const reply = (content: string) => client.respondToInteraction(interaction, content, { ephemeral: true });
 
 		if (name === "memory" || name === "birthday" || name === "forget") {
-			if (!author) return;
 			try {
 				if (name === "forget") {
 					memberMemory.forgetMember(space, author.id);
@@ -309,7 +298,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			return;
 		}
 		if (name === "context" || name === "compact") {
-			if (!author || !isAdmin(persona, author.id)) {
+			if (!isAdmin(persona, author.id)) {
 				await reply("只有管理员可以使用这个命令。");
 				return;
 			}
@@ -333,29 +322,29 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			return;
 		}
 		if (name === "help") {
-			await reply(
-				author && isAdmin(persona, author.id)
-					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`"
-					: "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`",
-			);
+			const commands = isAdmin(persona, author.id) ? [...COMMANDS, ...ADMIN_COMMANDS] : COMMANDS;
+			await reply([HELP_INTRO, ...commands.map((command) => `/${command.name} ${command.description}`)].join("\n"));
 			return;
 		}
 		if (name === "status") {
-			const alive = deps.personas
-				.flatMap((candidate) => (candidate.accounts.discord ? [candidate.accounts.discord.username] : []))
-				.join(", ");
-			await reply(`Online. Assistants: ${alive}.`);
+			const alive = deps.personas.flatMap((candidate) =>
+				candidate.accounts.discord ? [candidate.accounts.discord.username] : [],
+			);
+			await reply(statusReply(alive, deps.isPaused()));
 			return;
 		}
 		if (name !== "ask") return;
 		const prompt = getOption(interaction, "prompt")?.trim();
 		if (!prompt) {
-			await reply("Please include a prompt.");
+			await reply("请带上你的问题。");
+			return;
+		}
+		if (deps.isPaused()) {
+			await reply(PAUSED_REPLY);
 			return;
 		}
 		await client.deferInteraction(interaction, true);
 		try {
-			if (!author) throw new Error("missing_interaction_context");
 			const dispatch = await deps.getCore().handleMessage({
 				platform: "discord",
 				spaceId: space,
@@ -369,15 +358,11 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			});
 			await client.followUpInteraction(
 				interaction,
-				dispatch.responseMessageId
-					? "Your answer was posted in the channel."
-					: dispatch.route.personaId
-						? "The assistant didn't return an answer. Please try again."
-						: "No assistant was selected for that request. Please try /ask again.",
+				dispatch.responseMessageId ? "回答已发到频道。" : "没有得到回答，请重试。",
 			);
 		} catch (error) {
 			log.error("discord", "ask_failed", { persona_id: persona.id, error_category: errorCategory(error) });
-			await client.followUpInteraction(interaction, "I couldn't complete that request. Please try again.");
+			await client.followUpInteraction(interaction, "请求没有完成，请稍后再试。");
 		}
 	}
 

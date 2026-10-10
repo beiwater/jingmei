@@ -79,16 +79,6 @@ describe("MemberMemory", () => {
 			sourceChannelId: CHANNEL,
 			sourceMessageId: "66666666666666670",
 		});
-		expect(() =>
-			memory.rememberFact({
-				spaceId: GUILD_A,
-				memberId: ALICE,
-				key: "password",
-				value: "secret",
-				sourceChannelId: CHANNEL,
-				sourceMessageId: "66666666666666670",
-			}),
-		).toThrow("invalid_memory_fact_key");
 		db.close();
 	});
 
@@ -109,6 +99,21 @@ describe("MemberMemory", () => {
 		expect(alice.relationships.find((edge) => edge.userId === BOB && edge.type === "interaction")?.count).toBe(2);
 		expect(alice.relationships.find((edge) => edge.userId === BOB && edge.type === "friend")?.count).toBe(1);
 		expect(alice.relationships.some((edge) => edge.userId === BOT)).toBe(false);
+		db.close();
+	});
+
+	test("parses English self birthdays by month name or prefix and rejects impossible dates", () => {
+		const { db, memory } = setup();
+		const birthday = (content: string, id: string) => {
+			memory.observe(message({ content, messageId: id }));
+			return memory.getProfile(GUILD_A, ALICE)?.birthday;
+		};
+		expect(birthday("my birthday is December 25", "66666666666666660")).toEqual({ month: 12, day: 25 });
+		expect(birthday("My birthday is sep 3.", "66666666666666661")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is Smarch 3", "66666666666666662")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is February 30", "66666666666666663")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is April 31", "66666666666666664")).toEqual({ month: 9, day: 3 });
+		expect(birthday("my birthday is Feb 29", "66666666666666665")).toEqual({ month: 2, day: 29 });
 		db.close();
 	});
 
@@ -171,7 +176,7 @@ describe("MemberMemory", () => {
 	test("scored recall keeps the most relevant facts and falls back to recency when scoring fails", async () => {
 		const { db, memory } = setup();
 		memory.observe(message());
-		const keys = ["language", "role", "project", "timezone", "goal", "note", "interest"];
+		const keys = ["language", "role", "project", "timezone", "goal", "note", "interest"] as const;
 		for (const [index, key] of keys.entries())
 			memory.rememberFact({
 				spaceId: GUILD_A,

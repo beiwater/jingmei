@@ -1,7 +1,4 @@
 {
-	"dataDir": "data",
-	"routingSecretEnv": "ROUTING_SECRET",
-	"//visionModel": "Optional, e.g. \"visionModel\": \"openrouter/google/gemini-2.5-flash\" (provider/model; first slash splits, the model may contain more slashes). Used only to describe images for personas whose main model cannot see images. Without it, Pi itself replaces images with an \"image omitted\" note for text-only models.",
 	"discord": {
 		"guilds": [
 			{
@@ -10,48 +7,6 @@
 			}
 		]
 	},
-	"telegram": {
-		"chatIds": ["-1001234567890"]
-	},
-	"voice": {
-		"apiKeyEnv": "FISH_AUDIO_API_KEY",
-		"referenceId": "00000000000000000000000000000000",
-		"model": "s2.1-pro-free"
-	},
-	"imageGeneration": {
-		"model": "gemini-3.1-flash-image"
-	},
-	"kline": {
-		"enabled": false
-	},
-	"textImage": {
-		"enabled": false,
-		"thresholdChars": 300
-	},
-	"jev": {
-		"endpoint": "https://api.typesafe.ai/v1/systemone",
-		"apiKeyEnv": "TYPESAFE_API_KEY",
-		"model": "jev-latest",
-		"quickReactions": true,
-		"memoryScoring": true,
-		"replyDecision": true,
-		"replyThreshold": 0.7,
-		"threshold": 0.8,
-		"minIntervalMs": 60000
-	},
-	"events": {
-		"summaryModel": "deepseek/deepseek-flash",
-		"embeddingModel": "fast-bge-small-zh-v1.5"
-	},
-	"celebrations": [
-		{
-			"space": "discord:000000000000000000",
-			"channelId": "000000000000000001",
-			"personaId": "luna",
-			"timeZone": "Australia/Sydney",
-			"calendar": "both"
-		}
-	],
 	"personas": [
 		{
 			"id": "luna",
@@ -60,18 +15,7 @@
 			"provider": "deepseek",
 			"model": "deepseek-flash",
 			"routingP": 0.65,
-			"aliases": [],
-			"sendReactionImages": true,
-			"voiceEnabled": true,
-			"imageGenerationEnabled": true,
-			"discord": {
-				"tokenEnv": "DISCORD_LUNA_TOKEN",
-				"adminUserIds": []
-			},
-			"telegram": {
-				"tokenEnv": "TELEGRAM_LUNA_TOKEN",
-				"adminUserIds": []
-			}
+			"discord": { "tokenEnv": "DISCORD_LUNA_TOKEN" }
 		}
 	]
 }

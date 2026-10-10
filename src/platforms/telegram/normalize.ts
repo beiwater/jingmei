@@ -31,7 +31,7 @@ interface TelegramSender {
 	title?: string;
 }
 
-/** The subset of Bot API `Message` the adapter reads. Only the envelope is runtime-checked. */
+/** The subset of Bot API `Message` the adapter reads. */
 export interface TelegramMessage {
 	message_id: number;
 	date: number;
@@ -53,12 +53,10 @@ export interface TelegramMessage {
 	document?: TelegramFileRef;
 }
 
-export function isTelegramMessage(value: unknown): value is TelegramMessage {
-	if (!value || typeof value !== "object") return false;
-	if (!("message_id" in value) || typeof value.message_id !== "number") return false;
-	if (!("date" in value) || typeof value.date !== "number") return false;
-	if (!("chat" in value) || !value.chat || typeof value.chat !== "object") return false;
-	return "id" in value.chat && typeof value.chat.id === "number";
+/** `getUpdates` is called with `allowed_updates: ["message"]`, so every update carries a message. */
+export interface TelegramUpdate {
+	update_id: number;
+	message: TelegramMessage;
 }
 
 export interface TelegramNormalizeDeps {

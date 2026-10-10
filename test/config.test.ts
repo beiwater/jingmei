@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrateDiscordConfig } from "../scripts/migrate-config.ts";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
 import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
 import { JEV_ENDPOINT, OPENAI_DECISIONS_ENDPOINT, OPENAI_DECISIONS_MODEL } from "../src/decision/jev.ts";
@@ -59,6 +58,15 @@ function errorsOf(run: () => unknown): readonly string[] {
 }
 
 describe("config", () => {
+	test("the shipped example config loads with the shipped .env.example", () => {
+		const example = JSON.parse(readFileSync(join(import.meta.dir, "../jingmei.config.example.json"), "utf8"));
+		const exampleEnv = parseEnvFile(join(import.meta.dir, "../.env.example"));
+		const config = validateConfig(example, root, exampleEnv);
+		expect(config.personas.map((persona) => persona.id)).toEqual(["luna"]);
+		expect(config.discord).toBeDefined();
+		expect(config.telegram).toBeUndefined();
+	});
+
 	test("kline charts are off unless enabled, and the switch must be a boolean", () => {
 		expect(validateConfig(base(), root, env).kline).toBeUndefined();
 		expect(validateConfig(base({ kline: { enabled: false } }), root, env).kline).toBeUndefined();
@@ -158,7 +166,9 @@ describe("config", () => {
 		});
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.apiKey).toBeUndefined();
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.quickReactions).toBe(true);
-		expect(validateConfig(base({ jev: {} }), root, env).jev).toBeUndefined();
+		expect(errorsOf(() => validateConfig(base({ jev: {} }), root, env))).toEqual([
+			expect.stringContaining("jev needs apiKeyEnv"),
+		]);
 	});
 
 	test("the OpenAI provider gets its own endpoint and model and replaces the DeepSeek default", () => {
@@ -435,55 +445,6 @@ describe("config", () => {
 		expect(() => parseEnvFile(path)).toThrow(/Invalid \.env key at line 1/);
 		writeFileSync(path, "A_KEY: one: two\n");
 		expect(parseEnvFile(path)).toEqual({ A_KEY: "one: two" });
-	});
-
-	test("migrates discord.config.json into a loadable jingmei config", () => {
-		const migrated = migrateDiscordConfig({
-			guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }],
-			dataDir: "data",
-			routingSecretEnv: "ROUTING_SECRET",
-			celebrations: [{ guildId: GUILD, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" }],
-			personas: [
-				{
-					id: "luna",
-					name: "Luna",
-					token_env: "DISCORD_LUNA_TOKEN",
-					personaPath: "personas/luna.md",
-					provider: "deepseek",
-					model: "deepseek-flash",
-					reasoningEffort: "high",
-					routingP: 0.65,
-					guildIds: [GUILD],
-					aliases: ["L"],
-					adminUserIds: [CHANNEL],
-				},
-			],
-		});
-		expect(migrated).toEqual({
-			dataDir: "data",
-			routingSecretEnv: "ROUTING_SECRET",
-			discord: { guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }] },
-			celebrations: [
-				{ space: `discord:${GUILD}`, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" },
-			],
-			personas: [
-				{
-					id: "luna",
-					name: "Luna",
-					personaPath: "personas/luna.md",
-					provider: "deepseek",
-					model: "deepseek-flash",
-					reasoningEffort: "high",
-					routingP: 0.65,
-					aliases: ["L"],
-					spaces: [`discord:${GUILD}`],
-					discord: { tokenEnv: "DISCORD_LUNA_TOKEN", adminUserIds: [CHANNEL] },
-				},
-			],
-		});
-		const config = validateConfig(migrated, root, env);
-		expect(config.personas[0]?.adminUserIds).toEqual([`discord:${CHANNEL}`]);
-		expect(config.celebrations[0]?.spaceId).toBe(`discord:${GUILD}`);
 	});
 
 	test("creates the DeepSeek model catalog once without secrets", () => {

@@ -1466,9 +1466,8 @@ export class Conversation implements ConversationCore {
 
 	/** One uncached, non-retried auxiliary vision call; any failure just means no description. */
 	private async describeImage(image: InboundImage): Promise<string | undefined> {
-		const selection = this.visionModel;
-		const model = selection && this.modelRuntime.getModel(selection.provider, selection.model);
-		if (!model) return undefined;
+		// Only called with a visionModel, which bot.ts verified against the model runtime at startup.
+		const model = this.modelRuntime.getModel(this.visionModel!.provider, this.visionModel!.model)!;
 		try {
 			const content: ImageContent = { type: "image", data: image.base64, mimeType: image.mimeType };
 			const reply = await this.modelRuntime.completeSimple(

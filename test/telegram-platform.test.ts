@@ -10,6 +10,7 @@ import {
 	normalizeTelegramMessage,
 	type TelegramMessage,
 	type TelegramNormalizeDeps,
+	type TelegramUpdate,
 } from "../src/platforms/telegram/normalize.ts";
 import {
 	formatOutgoing,
@@ -238,7 +239,7 @@ describe("Telegram adapter", () => {
 					message({ text: "accepted" }),
 				].map((message, index) => ({ update_id: index + 1, message }));
 			}
-			const { promise, reject } = Promise.withResolvers<unknown[]>();
+			const { promise, reject } = Promise.withResolvers<TelegramUpdate[]>();
 			signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
 			return promise;
 		});
@@ -251,6 +252,7 @@ describe("Telegram adapter", () => {
 				} as AppConfig,
 				personas: [persona],
 				memberMemory: {} as MemberMemory,
+				isPaused: () => false,
 				getCore: () =>
 					({
 						handleMessage: async (message: InboundMessage) => {
@@ -274,7 +276,132 @@ describe("Telegram adapter", () => {
 	});
 });
 
+describe("Telegram /ask", () => {
+	/** Run one `/ask hello` through a started platform; resolves with what the core received and the replies sent. */
+	async function ask(options: { paused?: boolean; handle: () => Promise<{ responseMessageId?: string }> }) {
+		const persona: Persona = {
+			id: "a",
+			name: "A",
+			personaPath: "",
+			provider: "p",
+			model: "m",
+			reasoningEffort: "off",
+			routingP: 0.5,
+			aliases: [],
+			adminUserIds: [],
+			sendReactionImages: true,
+			voiceEnabled: false,
+			imageGenerationEnabled: false,
+			accounts: {},
+		};
+		const replies: string[] = [];
+		let handled = 0;
+		const spies: Array<{ mockRestore(): void }> = [
+			spyOn(BotApi.prototype, "getMe").mockResolvedValue({ id: 111, is_bot: true, first_name: "A", username: "a_bot" }),
+			spyOn(BotApi.prototype, "setMyCommands").mockResolvedValue(true),
+			spyOn(BotApi.prototype, "sendMessage").mockImplementation(async (_chat, text) => {
+				replies.push(text);
+				return { message_id: 99 };
+			}),
+		];
+		let firstPoll = true;
+		spies.push(
+			spyOn(BotApi.prototype, "getUpdates").mockImplementation(async (_offset, timeout, signal) => {
+				if (timeout === 0) return [];
+				if (firstPoll) {
+					firstPoll = false;
+					return [
+						{
+							update_id: 1,
+							message: message({ text: "/ask hello", entities: [{ type: "bot_command", offset: 0, length: 4 }] }),
+						},
+					];
+				}
+				const { promise, reject } = Promise.withResolvers<TelegramUpdate[]>();
+				signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+				return promise;
+			}),
+		);
+		let platform: PlatformHandle | undefined;
+		try {
+			platform = await createTelegramPlatform({
+				config: {
+					telegram: { chatIds: [String(CHAT)] },
+					personas: [{ id: "a", tokens: { telegram: "test-token" } }],
+				} as AppConfig,
+				personas: [persona],
+				memberMemory: {} as MemberMemory,
+				isPaused: () => options.paused === true,
+				getCore: () =>
+					({
+						handleMessage: async () => {
+							handled++;
+							return { route: {}, messageStored: true, ...(await options.handle()) };
+						},
+					}) as unknown as ConversationCore,
+			});
+			await platform.start();
+			// Poll until the single update has been fully handled (a reply sent, or the core settled with none expected).
+			for (let i = 0; i < 100 && replies.length === 0 && !(handled > 0 && i > 10); i++)
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			return { replies, handled };
+		} finally {
+			await platform?.stop();
+			for (const spy of spies) spy.mockRestore();
+		}
+	}
+
+	test("tells the sender when the turn sent nothing or failed", async () => {
+		expect(await ask({ handle: async () => ({}) })).toEqual({ replies: ["没有得到回答，请重试。"], handled: 1 });
+		expect(
+			await ask({
+				handle: async () => {
+					throw new Error("boom");
+				},
+			}),
+		).toEqual({ replies: ["没有得到回答，请重试。"], handled: 1 });
+	});
+
+	test("stays quiet when the answer was sent", async () => {
+		expect(await ask({ handle: async () => ({ responseMessageId: "5" }) })).toEqual({ replies: [], handled: 1 });
+	});
+
+	test("says the bot is paused instead of calling the core", async () => {
+		expect(await ask({ paused: true, handle: async () => ({}) })).toEqual({
+			replies: ["管理员已暂停 bot，暂时不会回复。"],
+			handled: 0,
+		});
+	});
+});
+
 describe("Telegram text commands", () => {
+	test("help explains how to talk to the bot and lists commands; status reports a paused bot", async () => {
+		const persona = {
+			adminUserIds: [],
+			accounts: { telegram: { userId: "1", username: "a_bot" } },
+		} as unknown as Persona;
+		const context = {
+			persona,
+			chatPersonas: [persona],
+			spaceId: `telegram:${CHAT}` as const,
+			chatId: String(CHAT),
+			messageId: "1",
+			userId: "7",
+			config: { celebrations: [] } as unknown as AppConfig,
+			memberMemory: {} as MemberMemory,
+			getCore: () => ({}) as ConversationCore,
+			isPaused: () => false,
+		};
+		const help = await runCommand({ ...context, command: { name: "help", target: null, args: "" } });
+		expect(help).toContain("@我");
+		expect(help).toContain("/ask ");
+		expect(help).not.toContain("/compact");
+		const status = (paused: boolean) =>
+			runCommand({ ...context, isPaused: () => paused, command: { name: "status", target: null, args: "" } });
+		expect(await status(false)).toBe("在线。角色：@a_bot。");
+		expect(await status(true)).toBe("已暂停，暂时不会回复。角色：@a_bot。");
+	});
+
 	test("parses a leading bot_command with optional lower-cased @target and arguments", () => {
 		expect(parseCommand("/birthday@Mizore_Bot 09-25", [{ type: "bot_command", offset: 0, length: 20 }])).toEqual({
 			name: "birthday",
@@ -335,6 +462,7 @@ describe("Telegram text commands", () => {
 			config: { celebrations: [] } as unknown as AppConfig,
 			memberMemory: {} as MemberMemory,
 			getCore: () => core,
+			isPaused: () => false,
 		};
 		const ambiguous = await runCommand({
 			...context,

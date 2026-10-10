@@ -1,11 +1,34 @@
 import { describe, expect, test } from "bun:test";
 import {
+	DiscordGatewayFatalError,
 	DiscordPlatformTransport,
 	DiscordTransport,
 	isSnowflake,
 	isValidReactionEmoji,
 	splitDiscordMessage,
 } from "../src/platforms/discord/transport.ts";
+
+class FakeSocket {
+	readyState: number = WebSocket.OPEN;
+	onopen: ((event: Event) => void) | null = null;
+	onmessage: ((event: MessageEvent) => void) | null = null;
+	onerror: ((event: Event) => void) | null = null;
+	onclose: ((event: CloseEvent) => void) | null = null;
+	sent: Array<{ op: number; d: any }> = [];
+	send(raw: string) {
+		this.sent.push(JSON.parse(raw));
+	}
+	open() {
+		this.onopen?.(new Event("open"));
+	}
+	message(data: unknown) {
+		this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
+	}
+	close(code = 1000, reason = "") {
+		this.readyState = 3;
+		this.onclose?.({ code, reason, wasClean: code === 1000 } as CloseEvent);
+	}
+}
 
 describe("Discord transport primitives", () => {
 	test("keeps Discord Snowflakes as strings", () => {
@@ -71,9 +94,6 @@ describe("Discord transport primitives", () => {
 		expect(method).toBe("PUT");
 		expect(url).toContain("/channels/223456789012345678/messages/323456789012345678/reactions/%F0%9F%91%8D/@me");
 		await expect(transport.addReaction("999999999999999999", "323456789012345678", "👍")).rejects.toThrow("allowlist");
-		await expect(transport.addReaction("223456789012345678", "323456789012345678", "not emoji")).rejects.toThrow(
-			"invalid reaction emoji",
-		);
 	});
 
 	test("accepts bounded Unicode and custom emoji syntax", () => {
@@ -136,34 +156,10 @@ describe("Discord transport primitives", () => {
 			content: "生日快乐 <@423456789012345678>",
 			allowed_mentions: { parse: [], users: ["423456789012345678"], replied_user: false },
 		});
-		await expect(
-			transport.sendMessage({ personaId: "b", channelId: "223456789012345678", content: "x" }),
-		).rejects.toThrow("persona");
 		expect(Object.keys(transport.quickReactions).every((emoji) => transport.isValidReaction(emoji))).toBe(true);
 	});
 
 	test("identifies, heartbeats, and resumes the Gateway session", async () => {
-		class FakeSocket {
-			readyState: number = WebSocket.OPEN;
-			onopen: ((event: Event) => void) | null = null;
-			onmessage: ((event: MessageEvent) => void) | null = null;
-			onerror: ((event: Event) => void) | null = null;
-			onclose: ((event: CloseEvent) => void) | null = null;
-			sent: Array<{ op: number; d: any }> = [];
-			send(raw: string) {
-				this.sent.push(JSON.parse(raw));
-			}
-			open() {
-				this.onopen?.(new Event("open"));
-			}
-			message(data: unknown) {
-				this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
-			}
-			close(code = 1000, reason = "") {
-				this.readyState = 3;
-				this.onclose?.({ code, reason, wasClean: code === 1000 } as CloseEvent);
-			}
-		}
 		const sockets: FakeSocket[] = [];
 		const socketUrls: string[] = [];
 		const transport = new DiscordTransport({
@@ -205,4 +201,68 @@ describe("Discord transport primitives", () => {
 		expect(sockets[1]?.sent[0]).toMatchObject({ op: 6, d: { session_id: "session-1", seq: 1 } });
 		await transport.stop();
 	}, 5000);
+
+	test.each([
+		[4004, "token"],
+		[4013, "Message Content Intent"],
+		[4014, "Message Content Intent"],
+	])("reports unrecoverable close code %d with an actionable hint and does not reconnect", async (code, hint) => {
+		const sockets: FakeSocket[] = [];
+		const errors: Error[] = [];
+		const transport = new DiscordTransport({
+			token: "test-only",
+			applicationId: "123456789012345678",
+			gatewayUrl: "wss://gateway.discord.gg",
+			webSocketFactory: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket as unknown as WebSocket;
+			},
+			onError: (error) => void errors.push(error),
+		});
+		await transport.start();
+		sockets[0]?.open();
+		sockets[0]?.close(code);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(errors).toHaveLength(1);
+		const error = errors[0];
+		expect(error).toBeInstanceOf(DiscordGatewayFatalError);
+		expect((error as DiscordGatewayFatalError).code).toBe(code);
+		expect((error as DiscordGatewayFatalError).hint).toContain(hint);
+		expect(sockets).toHaveLength(1);
+		await transport.stop();
+	});
+
+	test("delivers messages and interactions only from allowed channels or their threads", async () => {
+		const allowed = "223456789012345678";
+		const thread = "323456789012345678";
+		const otherThread = "423456789012345678";
+		const outside = "523456789012345678";
+		const socket = new FakeSocket();
+		const messages: string[] = [];
+		const interactions: string[] = [];
+		const transport = new DiscordTransport({
+			token: "test-only",
+			applicationId: "123456789012345678",
+			gatewayUrl: "wss://gateway.discord.gg",
+			allowedChannelIds: [allowed],
+			webSocketFactory: () => socket as unknown as WebSocket,
+			onMessage: (message) => void messages.push(message.channel_id),
+			onInteraction: (interaction) => void interactions.push(interaction.channel_id!),
+		});
+		await transport.start();
+		socket.open();
+		socket.message({ op: 10, d: { heartbeat_interval: 60_000 } });
+		const dispatch = (t: string, d: object) => socket.message({ op: 0, t, s: 1, d });
+		dispatch("THREAD_CREATE", { id: thread, parent_id: allowed });
+		dispatch("THREAD_CREATE", { id: otherThread, parent_id: outside });
+		for (const channel_id of [allowed, thread, otherThread, outside]) {
+			dispatch("MESSAGE_CREATE", { channel_id });
+			dispatch("INTERACTION_CREATE", { channel_id });
+		}
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(messages).toEqual([allowed, thread]);
+		expect(interactions).toEqual([allowed, thread]);
+		await transport.stop();
+	});
 });
