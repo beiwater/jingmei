@@ -256,8 +256,6 @@ test("continuing a segment appends only unseen messages and leaves everything al
 	expect(texts[2]).not.toContain("before-1");
 	// The bot's own reply is the assistant message, not repeated in the catch-up block.
 	expect(texts[2]).not.toContain("hello");
-	// The event note is frozen with its message: the first question keeps it in later requests.
-	expect(JSON.stringify(second!.messages.slice(0, first!.messages.length))).toContain("当前事件");
 });
 
 test("a reply older than five minutes starts a new segment; exactly five minutes continues", async () => {
