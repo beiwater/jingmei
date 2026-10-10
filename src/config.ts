@@ -683,6 +683,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 					minIntervalMs: minIntervalMs as number,
 					...(emojis ? { emojis } : {}),
 				};
+			else if (value.apiKeyEnv === undefined)
+				errors.push("jev needs apiKeyEnv, or a localJev section / DEEPSEEK_API_KEY for local decisions");
 		}
 	}
 	let events: AppConfig["events"];

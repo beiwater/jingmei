@@ -156,7 +156,9 @@ describe("config", () => {
 		});
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.apiKey).toBeUndefined();
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.quickReactions).toBe(true);
-		expect(validateConfig(base({ jev: {} }), root, env).jev).toBeUndefined();
+		expect(errorsOf(() => validateConfig(base({ jev: {} }), root, env))).toEqual([
+			expect.stringContaining("jev needs apiKeyEnv"),
+		]);
 	});
 
 	test("explicit local endpoints override DeepSeek and can run without credentials", () => {

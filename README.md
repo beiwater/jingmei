@@ -296,7 +296,7 @@ personas/
 
 包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
 
-秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器；没有远程 key 且没有可用本地 LLM 时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
+秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器，但必须有可用的本地 LLM（`localJev` 段落或 `DEEPSEEK_API_KEY`），否则是配置错误。完全不写 `jev` 段落时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
 
 **成本**。远程 Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；远程请求超时 3 秒。它不消耗主模型的 token；本地包装器则消耗其配置的 LLM token。
 
