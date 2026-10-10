@@ -8,16 +8,13 @@ import { createPiEventSummarizer, EventTracker, type EventSummarizer } from "../
 import type { InboundMessage } from "../src/core/types.ts";
 
 const trackers: EventTracker[] = [];
-const databases: Database[] = [];
 afterEach(async () => {
 	setSystemTime();
 	for (const tracker of trackers.splice(0)) await tracker.idle();
-	for (const db of databases.splice(0)) db.close();
 });
 
 function setup() {
 	const db = new Database(":memory:");
-	databases.push(db);
 	let time = 1_000_000_000;
 	setSystemTime(new Date(time));
 	let serial = 0;
@@ -391,7 +388,6 @@ test("refresh is single-flight with one catch-up for messages arriving during th
 
 test("old messages gain nullable event_id without losing rows and migration is idempotent", () => {
 	const db = new Database(":memory:");
-	databases.push(db);
 	db.exec(
 		"CREATE TABLE messages(space_id TEXT NOT NULL,channel_id TEXT NOT NULL,message_id TEXT NOT NULL,author_id TEXT NOT NULL,author_name TEXT NOT NULL,is_bot INTEGER NOT NULL,content TEXT NOT NULL,reply_to_message_id TEXT,timestamp INTEGER NOT NULL,PRIMARY KEY(space_id,channel_id,message_id)); INSERT INTO messages VALUES ('discord:old','c','m','u','Alice',0,'old',NULL,1)",
 	);

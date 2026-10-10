@@ -1,22 +1,23 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigError, validateConfig } from "../src/config.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { personaFile } from "./support/core.ts";
 
+const cleanups = useCleanups();
 let root: string;
 let directory: string;
 beforeEach(() => {
-	root = mkdtempSync(join(tmpdir(), "jingmei-reaction-catalog-"));
+	root = cleanups.tmpDir();
 	directory = join(root, "personas/feiba");
 	mkdirSync(directory, { recursive: true });
-	writeFileSync(join(root, "persona.md"), "Friendly companion.");
+	personaFile(root);
 	writeFileSync(
 		join(directory, "001_innocent.png"),
 		readFileSync(join(import.meta.dir, "../assets/reactions/hello.png")),
 	);
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 function load(catalog: unknown, reactionImages: unknown = "personas/feiba") {
 	if (catalog !== undefined) writeFileSync(join(directory, "catalog.json"), JSON.stringify(catalog));

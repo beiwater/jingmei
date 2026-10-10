@@ -48,7 +48,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、平台账号与角色作用域、bot 不触发、HMAC 抽样稳定；30 秒冷却与 10 分钟/30 条/3 条/多于 1 个其他作者/25% 占比门控边界；directed 绕过门控与抽样，chat-in 不绕过；搜索预取与语音请求识别；平台限定管理员的上下文权限 |
 | `context.test.ts` | 已完成轮次丢弃 thinking、工具循环保留 thinking；暂停入库但不回复，恢复计数；图片输入与 `visionModel`/Pi 降级；当前事件说明写入时固化为 `turnNote`，投影对每条带它的消息都拼接；`jingmei_withheld_v1` 持久且隐藏，投影只移除被扣留轮次 assistant 与标记、保留正常历史；成员记忆不自动注入 |
-| `conversation-turn.test.ts` | 真实 Pi 会话总期限释放 lane、后续消息继续；error/aborted 不发半截文字、日志不泄漏、重试成功不误报；接话单次请求、门控只省 chat-in、directed 绕过门控/无候选、阈值与失败及关闭回退；每条人类消息的 `route` 日志字段（候选、门控、决策、分数、暂停）且无正文，bot 消息不记；最终文字泄漏/自然度扣留、审查失败按路由区分、明确语音审查与无客户端泄漏检查、不入库/不计数；“正在输入”在模型运行期间按周期刷新、回复发出后停止、不超过上限；无回声平台发送入库继承话题，有回声平台不预先入库；角色本地图库按 id 发送原文件并结束本轮；`send_reply` 多部分一次模型调用按序发出、只有首条回复原消息、各条入库且后续条无 `reply_to` 但继承话题、工具旁的文字不再发；被审查扣留时一条不发 |
+| `conversation-turn.test.ts` | 真实 Pi 会话总期限释放 lane、后续消息继续；error/aborted 不发半截文字、日志不泄漏、重试成功不误报；接话单次请求、门控只省 chat-in、directed 绕过门控/无候选、阈值与失败及关闭回退；每条人类消息的 `route` 日志字段（候选、门控、决策、分数、暂停）且无正文，bot 消息不记；最终文字泄漏/自然度扣留、审查失败按路由区分、明确语音审查与无客户端泄漏检查、不入库/不计数；“正在输入”在模型运行期间按周期刷新、回复发出后停止、不超过上限；无回声平台发送入库继承话题，有回声平台不预先入库；角色本地图库按 id 发送原文件并结束本轮；`send_reply` 多部分只用一次模型调用、工具旁的文字不再发、入库行只有首条带 `reply_to` 且各条继承话题（顺序与入库内容见 `send-reply.test.ts`）；被审查扣留时一条不发，工具旁的文字也不发 |
 | `conversation-turn.test.ts`（持久入站回归） | 未完成轮次重启恢复、重复 redelivery 忽略、expired pending 清理并保留历史、恢复 payload 图片字节省略；完成/失败/暂停/抛错清理；超过 3 分钟只入库（明确提及也不回、不判断/不秒回表情/不记忆）且仍进入下一段、3 分钟精确边界；后排队 bot 消息不污染 recent-lines/接话门控 |
 | `bot-state.test.ts` | CLI 连接写入的暂停对 bot 连接立即可见、重复暂停保留首次时间；累计运行时长：已结束运行求和、运行中算到当前、崩溃的运行止于最后心跳；本次与累计回复数 |
 | `model-select.test.ts` | CLI 连接写入的模型覆盖让运行中 bot 已打开的会话下一轮换模型；1M 窗口完整使用与报告，`/context` 报告窗口条数、对话段上限和窗口后备点；后启动的 provider 目录经一次离线刷新后可用；选择在重启后保留；找不到的模型退回配置模型且只刷新一次；清除后恢复配置模型 |
@@ -67,16 +67,22 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `video-frames.test.ts` | 按时长选择的代表帧 seek 位置（含 1 秒与 3 秒边界）；只探测一次、最多抽三帧并清理临时文件；缺 ffmpeg 返回固定结果而不抛错 |
 | `reaction-assets.test.ts` | 未配置本地图库时只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
 | `reaction-catalog.test.ts` | 接受旧目录名前缀与目录相对路径、绝对配置目录、JPEG content type、额外元数据；收集缺失文件、路径穿越、内置 id 重名和错误扩展名；拒绝绝对文件路径、逃逸符号链接、非法 id/配文/名称及无效 catalog/配置目录 |
-| `runjs.test.ts` | `run_js` 基本计算与输出、超时、异步膨胀、输出上限、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
+| `runjs.test.ts` | `run_js` 基本计算与输出、语法错/抛错/rejected promise 都是结构化失败、超时、异步膨胀、各类超大输出（日志行、错误、结果）有界、用户打印无法伪造结果帧、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
 | `runjs-sandbox.test.ts` | 启动断言：bwrap 可用时通过、缺失时抛 `RunJsSandboxError`；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
+| `public-url.test.ts` | 公网 URL 过滤：只接受 http(s) 公网主机名与全球可路由 IPv6 字面量（含边界地址）；拒绝非 http(s)、带凭据、`localhost`/`.local`/`.internal`、私网与回环/链路本地 IPv4、以及各类内嵌 IPv4、文档、保留、唯一本地、链路本地、组播 IPv6 |
 | `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
 | `text-image.test.ts` | 渲染器：中文、LaTeX 公式、表格、代码块出一张固定宽度的合法 PNG，文字越长图越高；图片只从公网 URL 下载（私网、本机、本地路径、引用式写法一律不请求），最多 4 张，下载失败/非图片/网络错误只显示占位；原始 Typst、`<svg>`、`<a>`、数学里的 `#` 转义被当成文字而不执行（执行就会让编译失败）；空与超长输入不做任何工作；过高的页面报 `too_large`；`plot` 代码块画出 2D/3D 图且写错的只留说明、图例文字不会被当成 Typst 执行；`image` 代码块交给画图函数（最多 2 张），失败或未开启时只留占位。`plot.test.ts`：表达式解析（优先级、一元负号、乘方右结合、省略乘号、函数与常量、方程）与拒绝一切非白名单输入；tan 在极点断开且点都在范围内；隐函数自动找范围并等比例；坏规格给出可读原因；代码块替换、数量上限、表达式文本不进 Typst。`textImage` 配置默认关闭、阈值默认 300 与边界校验。`conversation-turn.test.ts`：超长文字被扣留一次并通过工具发图（只发一条、入库的是配文）；模型重试后仍超长则按原样发送文字；未超长与未启用时不重试 |
 | `image-generation.test.ts` | Antigravity 画图请求带存储的 project、模型与宽高比，跳过 thought 图取最终 PNG/JPEG；无效凭据/提示词不发请求；429、HTTP 错误、无图、超大图与超时分类且不回显 token |
 | `kline.test.ts` | K 线：交易对写法归一（`btc/usdt`→`BTCUSDT`），带参数拼接或过短的写法不发请求；只请求固定公开主机、查询参数正确、`redirect: "error"`，返回按时间升序的数值 K 线；HTTP 400 → `invalid_symbol`，5xx、网络错误、非 JSON、行数不足或字段非数字 → `fetch_failed`；渲染出 1600×1000 的合法 PNG，配文由数据生成（最新价、窗口涨跌）；涨红跌绿、平盘与极小价格仍可渲染；渲染器先取数再画图，坏交易对在请求前失败 |
-| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
+| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；表情图以原文件和自带配文发出并入库；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
 
-`test/network-guard.ts` 与 `test/trace-heavy-modules.ts` 是预加载文件，不是测试。
+`test/network-guard.ts` 与 `test/trace-heavy-modules.ts` 是预加载文件，不是测试。`test/support/` 是共享测试夹具，同样不是测试：
+
+- `core.ts`：`makePersona(overrides)`、`makeTransport(overrides)`——默认关闭一切可选能力 / 接受一切发送，测试只写自己要变的字段；`conversationOptions(...)` 给出内存库 + 全新 `BotState`/`MemberMemory`/`SoulStore` 的 `ConversationOptions`，需要共享库或重启时传入 `db`。
+- `cleanup.ts`：`useCleanups()` 在文件顶层调用一次，注册 `afterEach` 并返回后进先出的清理栈（`push`）和随栈清理的临时目录 `tmpDir()`；`personaFile(dir)`（`core.ts`）写入真实角色 prompt 文件。
+- `fish.ts`：`mockFishTts(cleanups, onRequest?)`，把 Fish Audio TTS 请求答成固定 MP3 字节，其余网络请求一律报错。
+- `pi.ts`：`makeModel`、`makeRuntime`（`ModelRuntime` 的模型/鉴权桩）、`assistantMessage`、`streamOf`/`scriptedStream`（确定性 provider 流）、`IMAGE`，以及驱动真实 Pi 会话的私有接缝 `seamOf`/`onSession`。
 
 ## 写测试的规则
 

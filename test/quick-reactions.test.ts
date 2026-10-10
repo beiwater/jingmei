@@ -1,23 +1,10 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import type { JevClient } from "../src/decision/jev.ts";
 import { QuickReactions } from "../src/core/quick-reactions.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport, Route } from "../src/core/types.ts";
+import type { InboundMessage, Platform, PlatformTransport, Route } from "../src/core/types.ts";
+import { makePersona, makeTransport } from "./support/core.ts";
 
-const persona = (id: string): Persona => ({
-	id,
-	name: id,
-	personaPath: "/unused",
-	provider: "fixture",
-	model: "fixture",
-	reasoningEffort: "off",
-	routingP: 0,
-	aliases: [],
-	adminUserIds: [],
-	sendReactionImages: false,
-	voiceEnabled: false,
-	imageGenerationEnabled: false,
-	accounts: { telegram: { userId: `${id}-id`, username: id } },
-});
+const persona = (id: string) => makePersona({ id, accounts: { telegram: { userId: `${id}-id`, username: id } } });
 const personas = [persona("luna"), persona("mio")];
 afterEach(() => setSystemTime());
 
@@ -45,19 +32,14 @@ function harness(decision: { emoji: string | null; strongEmotion: number; funny:
 			throw new Error("unused");
 		},
 	};
-	const transport = {
+	const transport = makeTransport({
 		platform: "telegram",
-		echoesOwnMessages: false,
-		displayName: "Telegram",
-		promptLines: [],
 		quickReactions: { "👍": "赞同", "🤣": "好笑" },
-		sendMessage: async () => ({ id: "1" }),
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: (emoji: string) => emoji !== "😂",
-		addReaction: async (personaId: string, channelId: string, messageId: string, emoji: string) => {
+		isValidReaction: (emoji) => emoji !== "😂",
+		addReaction: async (personaId, channelId, messageId, emoji) => {
 			reactions.push({ personaId, channelId, messageId, emoji });
 		},
-	} satisfies PlatformTransport;
+	});
 	const quick = new QuickReactions(
 		{
 			client,

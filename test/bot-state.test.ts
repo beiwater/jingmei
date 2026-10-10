@@ -1,25 +1,14 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { BotState, HEARTBEAT_MS } from "../src/core/bot-state.ts";
 import { openDatabase } from "../src/core/db.ts";
+import { useCleanups } from "./support/cleanup.ts";
 
 const MINUTE = 60_000;
-const dirs: string[] = [];
-afterEach(() => {
-	setSystemTime();
-	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
-function dataDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "jingmei-bot-state-"));
-	dirs.push(dir);
-	return dir;
-}
+const cleanups = useCleanups();
+afterEach(() => setSystemTime());
 
 test("a pause written by the CLI connection reaches the running bot's connection and keeps its first time", () => {
-	const dir = dataDir();
+	const dir = cleanups.tmpDir();
 	const botDb = openDatabase(dir);
 	const cliDb = openDatabase(dir);
 	const bot = new BotState(botDb);
@@ -38,7 +27,7 @@ test("a pause written by the CLI connection reaches the running bot's connection
 });
 
 test("runtime sums finished runs, counts a live run up to now, and stops counting a crashed run at its last heartbeat", () => {
-	const db = openDatabase(dataDir());
+	const db = openDatabase(cleanups.tmpDir());
 	const state = new BotState(db);
 	expect(state.summary(0)).toMatchObject({ current: null, lastSeenAt: null, runs: 0, runtimeMs: 0, messages: 0 });
 

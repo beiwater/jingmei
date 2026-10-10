@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { type CelebrationTarget, CelebrationScheduler } from "../src/core/celebrations.ts";
 import type { PersonaAccount, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { makeTransport } from "./support/core.ts";
 
 afterEach(() => setSystemTime());
 
@@ -49,19 +50,15 @@ function harness(
 		(async (sent: Sent) => {
 			sends.push(sent);
 		});
-	const transport = (platform: Platform): PlatformTransport => ({
-		platform,
-		echoesOwnMessages: platform === "discord",
-		displayName: platform,
-		promptLines: [],
-		quickReactions: {},
-		formatMention: (user) => `<mention:${user.userId}:${user.username}>`,
-		isValidReaction: () => true,
-		sendMessage: async ({ personaId, channelId, content, mention }) => {
-			await send({ platform, personaId, channelId, content, ...(mention ? { mention } : {}) });
-			return { id: "1" };
-		},
-	});
+	const transport = (platform: Platform) =>
+		makeTransport({
+			platform,
+			formatMention: (user) => `<mention:${user.userId}:${user.username}>`,
+			sendMessage: async ({ personaId, channelId, content, mention }) => {
+				await send({ platform, personaId, channelId, content, ...(mention ? { mention } : {}) });
+				return { id: "1" };
+			},
+		});
 	const transports = new Map<Platform, PlatformTransport>([
 		["discord", transport("discord")],
 		["telegram", transport("telegram")],
@@ -96,7 +93,6 @@ describe("celebration scheduler", () => {
 		expect(h.sends[0]?.content).toBe(`🎂 <mention:${userA}:小明> 生日快乐！祝你新的一岁顺顺利利、每天开心。`);
 		// Exactly the birthday member is notified.
 		expect(h.sends[0]?.mention).toEqual([{ userId: userA, username: "小明" }]);
-		h.db.close();
 	});
 
 	test("recognizes Chinese lunar festivals and merges New Year for both calendars", async () => {
@@ -112,8 +108,6 @@ describe("celebration scheduler", () => {
 		await tickAt(jan1.create(), new Date("2027-01-01T00:00:00Z"));
 		expect(jan1.sends).toHaveLength(1);
 		expect(jan1.sends[0]?.content).toContain("新年快乐");
-		h.db.close();
-		jan1.db.close();
 	});
 
 	test("uses the target civil date for Lunar New Year and never sends on adjacent days", async () => {
@@ -128,7 +122,6 @@ describe("celebration scheduler", () => {
 		expect(h.sends[0]?.content).toContain("春节");
 		await tickAt(scheduler, new Date("2027-02-06T22:00:00Z"));
 		expect(h.sends).toHaveLength(1);
-		h.db.close();
 	});
 
 	test("recognizes Dragon Boat and Mid-Autumn festivals and excludes leap months", async () => {
@@ -149,7 +142,6 @@ describe("celebration scheduler", () => {
 		// June 27, 2009 is leap fifth month, day 5, not another Dragon Boat Festival.
 		await tickAt(scheduler, new Date("2009-06-27T01:00:00Z"));
 		expect(h.sends).toHaveLength(5);
-		h.db.close();
 	});
 
 	test("recognizes China Labour Day and Australian Boxing Day", async () => {
@@ -162,7 +154,6 @@ describe("celebration scheduler", () => {
 		expect(h.sends).toHaveLength(2);
 		expect(h.sends[1]?.content).toContain("Boxing Day");
 		expect(h.sends.map((sent) => sent.mention)).toEqual([undefined, undefined]);
-		h.db.close();
 	});
 
 	test("uses official NSW Easter dates in 2026 and 2027 and deduplicates each Sydney local day", async () => {
@@ -185,7 +176,6 @@ describe("celebration scheduler", () => {
 		await tickAt(scheduler, new Date("2027-03-28T00:00:00Z"));
 		expect(h.sends).toHaveLength(4);
 		expect(h.sends[3]?.content).toContain("Easter Sunday");
-		h.db.close();
 	});
 
 	test("is idempotent across ticks and scheduler restarts", async () => {
@@ -197,7 +187,6 @@ describe("celebration scheduler", () => {
 		const restarted = h.create();
 		await tickAt(restarted, now);
 		expect(h.sends).toHaveLength(1);
-		h.db.close();
 	});
 
 	test("retries a failed delivery on the same local date", async () => {
@@ -216,7 +205,6 @@ describe("celebration scheduler", () => {
 		await tickAt(scheduler, now);
 		expect(attempts).toBe(2);
 		expect(h.sends).toHaveLength(1);
-		h.db.close();
 	});
 
 	test("recovers a stale in-flight delivery after restart", async () => {
@@ -232,7 +220,6 @@ describe("celebration scheduler", () => {
 		expect(h.sends).toHaveLength(0);
 		await tickAt(h.create(), new Date(first.getTime() + 31 * 60_000));
 		expect(h.sends).toHaveLength(1);
-		h.db.close();
 	});
 
 	test("a paused bot holds today's greetings and sends them after resume", async () => {
@@ -245,7 +232,6 @@ describe("celebration scheduler", () => {
 		h.setPaused(false);
 		await tickAt(scheduler, new Date(nineAm.getTime() + 60_000));
 		expect(h.sends).toHaveLength(1);
-		h.db.close();
 	});
 
 	test("celebrates February 29 birthdays on February 28 in other years", async () => {
@@ -255,7 +241,6 @@ describe("celebration scheduler", () => {
 		await tickAt(h.create(), new Date("2027-02-28T01:00:00Z"));
 		expect(h.sends).toHaveLength(1);
 		expect(h.sends[0]?.content).toContain("小明");
-		h.db.close();
 	});
 
 	test("isolates birthday lookup by space and sends through that space's platform", async () => {
@@ -272,6 +257,5 @@ describe("celebration scheduler", () => {
 				mention: [{ userId: userA, username: "小明" }],
 			},
 		]);
-		h.db.close();
 	});
 });

@@ -1,10 +1,8 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { afterEach, expect, spyOn, test, vi } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, spyOn, test, vi } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateConfig } from "../src/config.ts";
 import { BotState } from "../src/core/bot-state.ts";
@@ -12,20 +10,15 @@ import { Conversation, type ConversationOptions } from "../src/core/conversation
 import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import { useExtensibleSqlite } from "../src/core/db.ts";
 import { EventTracker } from "../src/core/events.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { InboundMessage, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
+import { mockFishTts } from "./support/fish.ts";
+import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
-interface SessionSeam {
-	getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession>;
-}
-
-const cleanups: Array<() => void | Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+const cleanups = useCleanups();
 
 function eventId(db: Database, messageId: string) {
 	const row = db.query("SELECT event_id FROM messages WHERE message_id = ?").get(messageId);
@@ -54,62 +47,25 @@ function fixture(
 	useExtensibleSqlite();
 	const platform = options.platform ?? "telegram";
 	const space: SpaceId = platform === "telegram" ? "telegram:-100111" : "discord:111";
-	const model: Model<"openai-responses"> = {
-		id: "fixture",
-		name: "fixture",
-		api: "openai-responses",
-		provider: "fixture",
-		baseUrl: "http://unused",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 65536,
-		maxTokens: 4096,
-	};
+	const model = makeModel();
 	const reply = (
 		content: AssistantMessage["content"] = [{ type: "text", text: "hello" }],
 		stopReason: AssistantMessage["stopReason"] = "stop",
-	): AssistantMessage => ({
-		role: "assistant",
-		content,
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason,
-		timestamp: Date.now(),
-	});
-	const runtime = {
-		getModel: () => model,
-		hasConfiguredAuth: () => true,
-		getAuth: async () => ({ auth: { apiKey: "fixture" } }),
-	} as unknown as ModelRuntime;
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-turn-"));
+	): AssistantMessage => assistantMessage(content, { model, stopReason });
+	const runtime = makeRuntime(model);
+	const dataDir = cleanups.tmpDir();
 	const db = new Database(":memory:");
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
-	const persona: Persona = {
-		id: "luna",
+	const personaPath = personaFile(dataDir);
+	const persona = makePersona({
 		name: "Luna",
 		personaPath,
 		provider: model.provider,
 		model: model.id,
 		routingP: options.routingP ?? 0,
-		aliases: [],
-		adminUserIds: [],
-		reasoningEffort: "off",
 		sendReactionImages: true,
 		voiceEnabled: !!options.voice,
-		imageGenerationEnabled: false,
 		accounts: { [platform]: { userId: "900", username: "luna_bot" } },
-	};
+	});
 	if (options.reactionImages) {
 		const directory = join(dataDir, "feiba");
 		mkdirSync(directory);
@@ -152,18 +108,12 @@ function fixture(
 	}
 	const typingAt: number[] = [];
 	const sends: Array<Parameters<PlatformTransport["sendMessage"]>[0]> = [];
-	const transport: PlatformTransport = {
+	const transport = makeTransport({
 		platform,
-		echoesOwnMessages: platform === "discord",
-		displayName: platform,
-		promptLines: [],
-		quickReactions: {},
 		sendMessage: async (input) => {
 			sends.push(input);
 			return { id: String(1000 + sends.length) };
 		},
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
 		...(options.typing
 			? {
 					typingRefreshMs: options.typing.refreshMs,
@@ -172,7 +122,7 @@ function fixture(
 					},
 				}
 			: {}),
-	};
+	});
 	let decisions = 0;
 	const participationRequests: Array<Parameters<JevClient["decideParticipation"]>[0]> = [];
 	const auditRequests: Array<Parameters<JevClient["auditNatural"]>[0]> = [];
@@ -205,16 +155,12 @@ function fixture(
 				summarize: async () => ({ title: "Topic", description: "Discussion" }),
 			})
 		: undefined;
-	const coreOptions: ConversationOptions = {
+	const coreOptions = conversationOptions({
 		db,
-		botState: new BotState(db),
-		memberMemory: new MemberMemory(db),
-		soulStore: new SoulStore({ db, personaIds: [persona.id] }),
 		dataDir,
-		routingSecret: "fixture",
 		personas: [persona],
 		modelRuntime: runtime,
-		transports: new Map([[platform, transport]]),
+		transports: [transport],
 		events,
 		...(options.jev
 			? {
@@ -233,53 +179,26 @@ function fixture(
 		...(options.textImage ? { textImage: options.textImage } : {}),
 		...(options.typing ? { typingMaxMs: options.typing.maxMs } : {}),
 		...(options.voice ? { voice: { apiKey: "fixture", referenceId: "fixture", model: "s2.1-pro-free" as const } } : {}),
-	};
+	});
 	const core = new Conversation(coreOptions);
 	const logs: LogRecord[] = [];
 	cleanups.push(setLogSink((line) => logs.push(JSON.parse(line))));
 	cleanups.push(async () => {
 		await core.close();
 		await events?.idle();
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
 	});
 	const script: Array<AssistantMessage | StreamFn> = [];
 	let calls = 0;
-	const attached = new Set<AgentSession>();
-	const seam = core as unknown as SessionSeam;
-	const getSession = seam.getSession.bind(core);
-	seam.getSession = async (...args) => {
-		const session = await getSession(...args);
-		if (!attached.has(session)) {
-			attached.add(session);
-			session.agent.streamFunction = (...streamArgs) => {
-				calls++;
-				const next = script.shift() ?? reply();
-				if (typeof next === "function") return next(...streamArgs);
-				const stream = createAssistantMessageEventStream();
-				if (next.stopReason === "error" || next.stopReason === "aborted") {
-					stream.push({ type: "error", reason: next.stopReason, error: next });
-				} else {
-					stream.push({ type: "done", reason: next.stopReason as "stop", message: next });
-				}
-				return stream;
-			};
-		}
-		return session;
-	};
+	const seam = onSession(core, (session) => {
+		session.agent.streamFunction = scriptedStream(script, reply, () => {
+			calls++;
+		});
+	});
 	const restart = () => {
 		const recovered = new Conversation(coreOptions);
-		const recoveredSeam = recovered as unknown as SessionSeam;
-		const original = recoveredSeam.getSession.bind(recovered);
-		recoveredSeam.getSession = async (...args) => {
-			const session = await original(...args);
-			session.agent.streamFunction = () => {
-				const stream = createAssistantMessageEventStream();
-				stream.push({ type: "done", reason: "stop", message: reply() });
-				return stream;
-			};
-			return session;
-		};
+		onSession(recovered, (session) => {
+			session.agent.streamFunction = () => streamOf(reply());
+		});
 		cleanups.push(() => recovered.close());
 		return recovered;
 	};
@@ -464,20 +383,6 @@ function sendReply(f: ReturnType<typeof fixture>, parts: unknown[], text?: strin
 	);
 }
 
-test("reaction-image parts are stored with their caption and source topic", async () => {
-	const f = fixture({ events: true });
-	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "hello", caption: "wave" }]));
-	expect((await f.send()).responseMessageId).toBe("1001");
-	expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("image/png");
-	expect(
-		f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
-	).toEqual({
-		content: "wave",
-		reply_to_message_id: "10",
-		event_id: eventId(f.db, "10"),
-	});
-});
-
 test("a persona catalog image is sent with its default caption and ends the turn", async () => {
 	const f = fixture({ events: true, reactionImages: true });
 	f.script.push(sendReply(f, [{ type: "reaction_image", asset_id: "innocent" }]));
@@ -548,7 +453,9 @@ test("replies within the limit, and every reply without the feature, are not gat
 	expect(off.sends[0]).toMatchObject({ content: LONG_TEXT });
 });
 
-test("a multi-part reply goes out in order in one model call; later parts are stored unthreaded", async () => {
+// Part order, which part replies to the trigger and what the tool records are covered in send-reply.test.ts;
+// this is what only a real turn shows: one model call, no second send, and the stored rows' threading and topic.
+test("a multi-part reply is one model call; the text beside the tool call is not sent and every row keeps the topic", async () => {
 	const f = fixture({ events: true });
 	f.script.push(
 		sendReply(
@@ -563,22 +470,16 @@ test("a multi-part reply goes out in order in one model call; later parts are st
 	);
 	expect((await f.send()).responseMessageId).toBe("1001");
 	expect(f.calls()).toBe(1);
-	expect(f.sends.map((send) => [send.content, send.replyToMessageId])).toEqual([
-		["🤔", "10"],
-		["第一段", undefined],
-		["第二段", undefined],
-	]);
+	expect(f.sends.map((send) => send.content)).toEqual(["🤔", "第一段", "第二段"]);
 	const topic = eventId(f.db, "10");
 	expect(
 		f.db
-			.query(
-				"SELECT message_id, content, reply_to_message_id, event_id FROM messages WHERE is_bot = 1 ORDER BY message_id",
-			)
+			.query("SELECT message_id, reply_to_message_id, event_id FROM messages WHERE is_bot = 1 ORDER BY message_id")
 			.all(),
 	).toEqual([
-		{ message_id: "1001", content: "🤔", reply_to_message_id: "10", event_id: topic },
-		{ message_id: "1002", content: "第一段", reply_to_message_id: null, event_id: topic },
-		{ message_id: "1003", content: "第二段", reply_to_message_id: null, event_id: topic },
+		{ message_id: "1001", reply_to_message_id: "10", event_id: topic },
+		{ message_id: "1002", reply_to_message_id: null, event_id: topic },
+		{ message_id: "1003", reply_to_message_id: null, event_id: topic },
 	]);
 });
 
@@ -600,27 +501,20 @@ test("a send_reply the audit withholds sends nothing, not even the text beside t
 for (const mode of ["tool", "explicit"] as const) {
 	test(`${mode} voice replies store the transcript and source topic on non-echoing transports`, async () => {
 		const f = fixture({ events: true, voice: true });
-		const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
-			if (String(input) !== "https://api.fish.audio/v1/tts") throw new Error("unexpected network request");
-			return new Response(new Uint8Array([73, 68, 51]), { headers: { "content-type": "audio/mpeg" } });
-		}) as unknown as typeof globalThis.fetch);
-		try {
-			if (mode === "tool") {
-				f.script.push(sendReply(f, [{ type: "voice", text: "hello" }]));
-			}
-			const sent = await f.send({ content: mode === "explicit" ? "Luna 用语音回复" : "hi Luna" });
-			expect(sent.responseMessageId).toBe("1001");
-			expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("audio/mpeg");
-			expect(
-				f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
-			).toEqual({
-				content: "🎙️ hello",
-				reply_to_message_id: "10",
-				event_id: eventId(f.db, "10"),
-			});
-		} finally {
-			fetch.mockRestore();
+		mockFishTts(cleanups);
+		if (mode === "tool") {
+			f.script.push(sendReply(f, [{ type: "voice", text: "hello" }]));
 		}
+		const sent = await f.send({ content: mode === "explicit" ? "Luna 用语音回复" : "hi Luna" });
+		expect(sent.responseMessageId).toBe("1001");
+		expect(f.sends[0]?.attachments?.[0]?.contentType).toBe("audio/mpeg");
+		expect(
+			f.db.query("SELECT content, reply_to_message_id, event_id FROM messages WHERE message_id = '1001'").get(),
+		).toEqual({
+			content: "🎙️ hello",
+			reply_to_message_id: "10",
+			event_id: eventId(f.db, "10"),
+		});
 	});
 }
 
@@ -783,7 +677,7 @@ test("startup replays an interrupted turn exactly once and discards expired pend
 	const recovered = f.restart();
 	await recovered.recoverPending();
 	expect(f.sends).toHaveLength(1);
-	const recoveredSession = await (recovered as unknown as SessionSeam).getSession(f.persona, f.space, "222");
+	const recoveredSession = await seamOf(recovered).getSession(f.persona, f.space, "222");
 	expect(
 		recoveredSession.messages.some(
 			(message) => message.role === "custom" && JSON.stringify(message).includes("图片在崩溃恢复后不可用"),

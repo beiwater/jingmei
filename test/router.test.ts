@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { BotState } from "../src/core/bot-state.ts";
 import { ensureMessagesTable } from "../src/core/db.ts";
 import {
 	Conversation,
@@ -9,28 +7,22 @@ import {
 	explicitVoiceRequest,
 	searchQueryForRoutedMessage,
 } from "../src/core/conversation.ts";
-import { MemberMemory } from "../src/core/memory.ts";
-import { SoulStore } from "../src/core/soul.ts";
 import { participationGated, participationRoute, routeMessage } from "../src/core/router.ts";
-import type { InboundMessage, Persona, Platform, PlatformTransport } from "../src/core/types.ts";
+import type { InboundMessage, Persona } from "../src/core/types.ts";
+import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
 
 function persona(id: string, name: string, userId: string, overrides: Partial<Persona> = {}): Persona {
-	return {
+	return makePersona({
 		id,
 		name,
-		personaPath: "/unused",
 		provider: "deepseek",
 		model: "deepseek-flash",
-		reasoningEffort: "off",
 		routingP: 0.2,
-		aliases: [],
-		adminUserIds: [],
 		sendReactionImages: true,
 		voiceEnabled: true,
-		imageGenerationEnabled: false,
 		accounts: { discord: { userId, username: name } },
 		...overrides,
-	};
+	});
 }
 
 const personas: Persona[] = [
@@ -55,24 +47,6 @@ function message(overrides: Partial<InboundMessage> = {}): InboundMessage {
 		content: "hello",
 		...overrides,
 	};
-}
-
-function transports(sendMessage: PlatformTransport["sendMessage"]): Map<Platform, PlatformTransport> {
-	return new Map([
-		[
-			"discord",
-			{
-				platform: "discord",
-				echoesOwnMessages: true,
-				displayName: "Discord",
-				promptLines: [],
-				quickReactions: {},
-				sendMessage,
-				formatMention: (user) => `@${user.username}`,
-				isValidReaction: () => true,
-			},
-		],
-	]);
 }
 
 describe("routing", () => {
@@ -221,7 +195,6 @@ describe("search and voice triggers", () => {
 		expect(searchQueryForRoutedMessage(db, current, route)).toBeNull();
 		insert.run(current.spaceId, current.channelId, "18446744073709551612", current.authorId, 0, request, 1_000_010);
 		expect(searchQueryForRoutedMessage(db, { ...current, timestamp: 1_200_011 }, route)).toBeNull();
-		db.close();
 	});
 
 	test("recognizes direct voice requests without turning negations into audio", () => {
@@ -233,18 +206,12 @@ describe("search and voice triggers", () => {
 
 describe("conversation guards", () => {
 	test("only a platform-qualified persona admin may inspect or compact channel context", async () => {
-		const db = new Database(":memory:");
-		const core = new Conversation({
-			db,
-			botState: new BotState(db),
-			memberMemory: new MemberMemory(db),
-			soulStore: new SoulStore({ db, personaIds: ["mio"] }),
-			dataDir: "/unused",
-			routingSecret: "secret",
-			personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],
-			modelRuntime: {} as ModelRuntime,
-			transports: transports(async () => ({ id: "1" })),
-		});
+		const core = new Conversation(
+			conversationOptions({
+				personas: [{ ...personas[1]!, adminUserIds: ["telegram:55555555555555555"] }],
+				transports: [makeTransport()],
+			}),
+		);
 		for (const [platform, requester] of [
 			["discord", "33333333333333333"],
 			// The same raw id is a different person on another platform.
@@ -258,6 +225,5 @@ describe("conversation guards", () => {
 			);
 		}
 		await core.close();
-		db.close();
 	});
 });
