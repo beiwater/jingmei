@@ -85,7 +85,6 @@ export interface EventTrackerOptions {
 	decision: JevClient;
 	embedder: Embedder;
 	summarize: EventSummarizer;
-	now?: () => number;
 }
 
 interface EventRow {
@@ -115,7 +114,6 @@ export class EventTracker {
 	private readonly decision: JevClient;
 	private readonly embedder: Embedder;
 	private readonly summarize: EventSummarizer;
-	private readonly now: () => number;
 	private readonly flights = new Map<number, RefreshFlight>();
 
 	constructor(options: EventTrackerOptions) {
@@ -123,7 +121,6 @@ export class EventTracker {
 		this.decision = options.decision;
 		this.embedder = options.embedder;
 		this.summarize = options.summarize;
-		this.now = options.now ?? Date.now;
 		ensureMessagesTable(this.db);
 		loadVectorExtension(this.db);
 		this.db.exec(`
@@ -170,11 +167,11 @@ export class EventTracker {
 					.query(
 						"SELECT * FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at >= ? ORDER BY last_message_at DESC, id DESC LIMIT 5",
 					)
-					.all(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS) as EventRow[];
+					.all(message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS) as EventRow[];
 				const latest = active[0];
 				if (
 					latest &&
-					latest.last_message_at >= this.now() - LOW_CONTENT_WINDOW_MS &&
+					latest.last_message_at >= Date.now() - LOW_CONTENT_WINDOW_MS &&
 					!hasSubstantiveText(message.content)
 				) {
 					eventId = latest.id;
@@ -294,14 +291,14 @@ export class EventTracker {
 			.query(
 				"SELECT e.id FROM events e JOIN event_vectors v ON v.rowid = e.id WHERE e.space_id = ? AND e.channel_id = ? AND e.last_message_at < ? LIMIT 1",
 			)
-			.get(message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS);
+			.get(message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS);
 		if (!closed) return [];
 		const vector = (await this.embedder.embed([message.content]))[0]!;
 		const matches = this.db
 			.query(
 				"SELECT rowid, distance FROM event_vectors WHERE embedding MATCH ? AND k = 2 AND rowid IN (SELECT id FROM events WHERE space_id = ? AND channel_id = ? AND last_message_at < ?) ORDER BY distance",
 			)
-			.all(vector, message.spaceId, message.channelId, this.now() - ACTIVE_WINDOW_MS) as Array<{
+			.all(vector, message.spaceId, message.channelId, Date.now() - ACTIVE_WINDOW_MS) as Array<{
 			rowid: number;
 			distance: number;
 		}>;
