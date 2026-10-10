@@ -38,7 +38,7 @@
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
 - **画图**（可选）：登录 Antigravity provider 后，角色可以在 `send_reply` 里放一个 `image` 部分，按群友的描述生成一张图发出（默认 Nano Banana 2 / `gemini-3.1-flash-image`，约十几秒）。登录方式见[画图](#画图)。**注意**：Google Antigravity 条款明确禁止用第三方工具调用 Antigravity OAuth，已有账号因此被封，建议使用小号。
 - **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_reply` 的 `text_image` 部分，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）、公网图片、函数图（函数、隐函数、参数方程、散点、3D 曲面），以及开启画图时由 AI 新画的插图。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
-- **K 线图**（可选）：开启 `kline` 后，角色可以在 `send_reply` 里放一个 `kline_image` 部分，发出 Binance 现货交易对（如 BTCUSDT）的实时 K 线图（蜡烛图 + 成交量）。行情由 bot 从 Binance 公共接口取，模型只选交易对与周期，不写数字；纯库实现（ECharts 服务端渲染 + resvg），不需要浏览器。详见[K 线图](#k-线图)。
+- **K 线图**（可选）：开启 `kline` 后，角色可以在 `send_reply` 里放一个 `kline_image` 部分，发出 Binance 现货交易对（如 BTCUSDT）的实时 K 线图（蜡烛图 + 成交量）。行情由 bot 从 Binance 公共接口取，模型只选交易对与周期，不写数字；纯库实现（手写 SVG + resvg），不需要浏览器。详见[K 线图](#k-线图)。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
 - **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。必须在 Linux 上运行，并有可用的 bubblewrap（隔离文件系统、网络与 PID）；启动时试运行一次，不可用就直接报错退出，没有回退。无新增配置；Ubuntu 启用见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，开新对话段或压缩成功后才转为正式内容。成员可随时 `/forget`。
@@ -258,7 +258,7 @@ personas/
 在配置里写 `"kline": { "enabled": true }` 即可开启，不需要浏览器，也不需要 API key。角色的 `send_reply` 因此多出一种 `kline_image` 部分：`symbol`（如 `BTCUSDT`，`BTC/USDT` 也认）、`interval`（`15m`、`1h`、`4h`、`1d`、`1w`）和可选的 `limit`（K 线根数，10–120，默认 60）。
 
 - **数据**：bot 向 Binance 的公开行情镜像 `data-api.binance.vision` 取 K 线，不经过模型，价格不会被编造；只支持 Binance 现货交易对，不认的交易对或网络失败时这次 `send_reply` 一条都不发，角色改用文字说明，日志里记 `reply_part_failed`（`part_type: kline_image`）和错误分类。
-- **渲染**：ECharts 在 Node 里直接生成 SVG（不需要 DOM），再由 `@resvg/resvg-js` 转成 1600×1000 的 PNG。图为蜡烛图加成交量柱，红涨绿跌，时间为 UTC。图中文字用系统字体，Debian/Ubuntu 请确认装有 DejaVu Sans（`fonts-dejavu-core`，通常已随系统安装）。启动时用两根合成 K 线试渲染一次，失败只记 `kline_unavailable` 并关闭该功能；启动日志 `ready` 里 `kline_enabled: true` 即为生效。
+- **渲染**：代码直接手写 SVG（蜡烛、成交量柱、坐标轴），再由 `@resvg/resvg-js` 转成 1600×1000 的 PNG。图为蜡烛图加成交量柱，红涨绿跌，时间为 UTC。图中文字用系统字体，Debian/Ubuntu 请确认装有 DejaVu Sans（`fonts-dejavu-core`，通常已随系统安装）。启动时用两根合成 K 线试渲染一次，失败只记 `kline_unavailable` 并关闭该功能；启动日志 `ready` 里 `kline_enabled: true` 即为生效。
 - **入库内容**：消息配文由数据生成，如 `📈 BTCUSDT 日线 · 最新 67123.45 · 近 60 根 +5.20%`；它是之后每一轮上下文里这条消息的内容，角色需要点评时在后面加一个 `text` 部分。
 
 ## 长文转图
