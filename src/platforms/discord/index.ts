@@ -217,7 +217,6 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		const reply = (content: string) => client.respondToInteraction(interaction, content, { ephemeral: true });
 
 		if (name === "memory" || name === "birthday" || name === "forget") {
-			if (!author) return;
 			try {
 				if (name === "forget") {
 					memberMemory.forgetMember(space, author.id);
@@ -283,7 +282,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 			return;
 		}
 		if (name === "context" || name === "compact") {
-			if (!author || !isAdmin(persona, author.id)) {
+			if (!isAdmin(persona, author.id)) {
 				await reply("只有管理员可以使用这个命令。");
 				return;
 			}
@@ -308,7 +307,7 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		}
 		if (name === "help") {
 			await reply(
-				author && isAdmin(persona, author.id)
+				isAdmin(persona, author.id)
 					? "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`, `/context`, `/compact`"
 					: "Commands: `/ask`, `/status`, `/memory`, `/birthday`, `/forget`",
 			);
@@ -329,7 +328,6 @@ export async function createDiscordPlatform(deps: PlatformDeps): Promise<Platfor
 		}
 		await client.deferInteraction(interaction, true);
 		try {
-			if (!author) throw new Error("missing_interaction_context");
 			const dispatch = await deps.getCore().handleMessage({
 				platform: "discord",
 				spaceId: space,
