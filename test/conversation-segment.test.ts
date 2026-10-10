@@ -410,5 +410,4 @@ test("segment migration is idempotent and keeps pre-segment rows", () => {
 	expect(
 		db.query("SELECT session_file, last_reply_at, cursor_timestamp, segment_start_at FROM sessions").all(),
 	).toEqual([{ session_file: "/old.jsonl", last_reply_at: null, cursor_timestamp: null, segment_start_at: null }]);
-	db.close();
 });

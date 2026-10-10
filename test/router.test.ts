@@ -195,7 +195,6 @@ describe("search and voice triggers", () => {
 		expect(searchQueryForRoutedMessage(db, current, route)).toBeNull();
 		insert.run(current.spaceId, current.channelId, "18446744073709551612", current.authorId, 0, request, 1_000_010);
 		expect(searchQueryForRoutedMessage(db, { ...current, timestamp: 1_200_011 }, route)).toBeNull();
-		db.close();
 	});
 
 	test("recognizes direct voice requests without turning negations into audio", () => {
