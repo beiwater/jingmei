@@ -98,11 +98,8 @@ export async function runCommand(context: CommandContext): Promise<string> {
 		}
 		case "birthday":
 			return runBirthday(context);
-		case "context":
-		case "compact":
+		default: // context, compact
 			return runAdminCommand(context, isAdmin);
-		default:
-			throw new Error(`unhandled_command:${command.name}`);
 	}
 }
 
