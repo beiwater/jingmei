@@ -1,22 +1,17 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { expect, test } from "bun:test";
 import { Conversation } from "../src/core/conversation.ts";
 import { WITHHELD_MESSAGE_TYPE } from "../src/core/context.ts";
 import type { EventTracker } from "../src/core/events.ts";
 import type { InboundMessage, Platform, SpaceId } from "../src/core/types.ts";
-import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, scriptedStream, seamOf } from "./support/pi.ts";
 
 type Block = AssistantMessage["content"][number];
 
 const SPACE: SpaceId = "discord:111";
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0)) cleanup();
-});
+const cleanups = useCleanups();
 
 function fixture(options: {
 	imageInput: boolean;
@@ -37,11 +32,9 @@ function fixture(options: {
 			return reply([{ type: "text", text: "一只橘猫\n趴在键盘上" }]);
 		},
 	});
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-context-"));
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
+	const dataDir = cleanups.tmpDir();
 	const persona = makePersona({
-		personaPath,
+		personaPath: personaFile(dataDir),
 		provider: model.provider,
 		model: model.id,
 		accounts: { [platform]: { userId: "900", username: "luna" } },
@@ -71,11 +64,7 @@ function fixture(options: {
 	});
 	const { db, botState, memberMemory: memory } = coreOptions;
 	const core = new Conversation(coreOptions);
-	cleanups.push(() => {
-		void core.close();
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
-	});
+	cleanups.push(() => core.close());
 	const contexts: Context[] = [];
 	const observerContexts: Context[] = [];
 	const script: AssistantMessage[] = [];

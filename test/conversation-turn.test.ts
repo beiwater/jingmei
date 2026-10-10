@@ -1,9 +1,8 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { afterEach, expect, spyOn, test, vi } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, spyOn, test, vi } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateConfig } from "../src/config.ts";
 import { BotState } from "../src/core/bot-state.ts";
@@ -14,13 +13,11 @@ import { EventTracker } from "../src/core/events.ts";
 import type { InboundMessage, Platform, PlatformTransport, SpaceId } from "../src/core/types.ts";
 import type { JevClient } from "../src/decision/jev.ts";
 import { type LogRecord, setLogSink } from "../src/observability/log.ts";
-import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, onSession, scriptedStream, seamOf, streamOf } from "./support/pi.ts";
 
-const cleanups: Array<() => void | Promise<void>> = [];
-afterEach(async () => {
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+const cleanups = useCleanups();
 
 function eventId(db: Database, messageId: string) {
 	const row = db.query("SELECT event_id FROM messages WHERE message_id = ?").get(messageId);
@@ -55,10 +52,9 @@ function fixture(
 		stopReason: AssistantMessage["stopReason"] = "stop",
 	): AssistantMessage => assistantMessage(content, { model, stopReason });
 	const runtime = makeRuntime(model);
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-turn-"));
+	const dataDir = cleanups.tmpDir();
 	const db = new Database(":memory:");
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
+	const personaPath = personaFile(dataDir);
 	const persona = makePersona({
 		name: "Luna",
 		personaPath,
@@ -189,8 +185,6 @@ function fixture(
 	cleanups.push(async () => {
 		await core.close();
 		await events?.idle();
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
 	});
 	const script: Array<AssistantMessage | StreamFn> = [];
 	let calls = 0;

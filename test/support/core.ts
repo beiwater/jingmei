@@ -1,10 +1,19 @@
 import { Database } from "bun:sqlite";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { BotState } from "../../src/core/bot-state.ts";
 import type { ConversationOptions } from "../../src/core/conversation.ts";
 import { MemberMemory } from "../../src/core/memory.ts";
 import { SoulStore } from "../../src/core/soul.ts";
 import type { Persona, PlatformTransport } from "../../src/core/types.ts";
 import { makeRuntime } from "./pi.ts";
+
+/** Writes the persona prompt file a real persona points at and returns its path. */
+export function personaFile(dir: string) {
+	const path = join(dir, "persona.md");
+	writeFileSync(path, "Friendly companion.");
+	return path;
+}
 
 /** A text-only persona with every optional capability off; tests override only what they exercise. */
 export function makePersona(overrides: Partial<Persona> = {}): Persona {

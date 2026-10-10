@@ -1,19 +1,15 @@
 import { Database } from "bun:sqlite";
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { BotState } from "../src/core/bot-state.ts";
 import { Conversation } from "../src/core/conversation.ts";
 import type { SpaceId } from "../src/core/types.ts";
-import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
 import { assistantMessage, makeModel, makeRuntime, seamOf, streamOf } from "./support/pi.ts";
 
 const SPACE: SpaceId = "discord:111";
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-	for (const cleanup of cleanups.splice(0)) cleanup();
-});
+const cleanups = useCleanups();
 
 test("a model chosen by the CLI connection switches the running bot's open session, survives restart and resets", async () => {
 	// beta advertises a 1M window; the session uses the whole model window.
@@ -29,16 +25,11 @@ test("a model chosen by the CLI connection switches the running bot's open sessi
 			return { aborted: false, errors: new Map() };
 		},
 	});
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-model-"));
+	const dataDir = cleanups.tmpDir();
 	const db = new Database(join(dataDir, "test.db"));
-	cleanups.push(() => {
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
-	});
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
+	cleanups.push(() => db.close());
 	const persona = makePersona({
-		personaPath,
+		personaPath: personaFile(dataDir),
 		model: "alpha",
 		adminUserIds: ["discord:5"],
 		accounts: { discord: { userId: "900", username: "luna" } },

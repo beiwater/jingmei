@@ -2,16 +2,14 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
 import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Conversation } from "../src/core/conversation.ts";
 import { ensureSessionTables } from "../src/core/db.ts";
 import type { EventTracker } from "../src/core/events.ts";
 import type { MessageIndex, MessageKey } from "../src/core/message-index.ts";
 import type { SoulScope } from "../src/core/soul.ts";
 import type { InboundMessage, PlatformTransport, SpaceId } from "../src/core/types.ts";
-import { conversationOptions, makePersona, makeTransport } from "./support/core.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
 import { assistantMessage, IMAGE, makeModel, makeRuntime, onSession, scriptedStream } from "./support/pi.ts";
 
 const SPACE: SpaceId = "telegram:-100111";
@@ -25,11 +23,8 @@ interface Captured {
 	messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
 }
 
-const cleanups: Array<() => void | Promise<void>> = [];
-afterEach(async () => {
-	setSystemTime();
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+const cleanups = useCleanups();
+afterEach(() => setSystemTime());
 
 /** Records what the core asks of the index; counts are whatever the test sets. */
 class FakeIndex {
@@ -61,9 +56,8 @@ class FakeIndex {
 function fixture(options: { personas?: number; timeoutMs?: number; index?: boolean; imageInput?: boolean } = {}) {
 	const model = makeModel({ input: options.imageInput ? ["text", "image"] : ["text"], contextWindow: 1_048_576 });
 	const reply = (text = "hello"): AssistantMessage => assistantMessage(text, { model });
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-segment-"));
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
+	const dataDir = cleanups.tmpDir();
+	const personaPath = personaFile(dataDir);
 	const personas = ["luna", "sol"].slice(0, options.personas ?? 1).map((id, index) =>
 		makePersona({
 			id,
@@ -112,10 +106,6 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 		cleanups.push(() => core.close());
 		return { core, seam };
 	};
-	cleanups.push(() => {
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
-	});
 	const first = build();
 	let now = T0;
 	let messageId = 10;
