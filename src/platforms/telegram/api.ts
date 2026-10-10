@@ -4,6 +4,7 @@
 
 import { readBoundedBody } from "../../net/read-bounded-body.ts";
 import type { TelegramMessageEntity } from "./markdown.ts";
+import type { TelegramUpdate } from "./normalize.ts";
 
 const API_BASE = "https://api.telegram.org";
 const CALL_TIMEOUT_MS = 10_000;
@@ -114,7 +115,7 @@ export class BotApi {
 		return this.call("getMe");
 	}
 
-	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<unknown[]> {
+	getUpdates(offset: number, timeoutSec: number, signal?: AbortSignal): Promise<TelegramUpdate[]> {
 		return this.call(
 			"getUpdates",
 			{ offset, timeout: timeoutSec, allowed_updates: ["message"] },
