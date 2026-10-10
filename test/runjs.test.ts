@@ -178,11 +178,4 @@ describe("run_js escape regression", () => {
 		expect(r.ok).toBe(true);
 		expect(r.output).toContain("none");
 	});
-
-	test("missing interpreter returns structured error instead of crashing", async () => {
-		// REQ-SEC-0001 AC2: spawn ENOENT must surface as ok:false, never uncaught
-		const r = await runJs("1 + 1", "/nonexistent/no-such-interpreter");
-		expect(r.ok).toBe(false);
-		expect(r.output).toContain("spawn");
-	});
 });

@@ -179,7 +179,7 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 
 | 工具 | 注册条件 | 说明 |
 |---|---|---|
-| `run_js` | 总是 | 纯计算沙箱，见下文威胁模型 |
+| `run_js` | 总是（启动时 bwrap 试运行失败则整个进程不启动） | 纯计算沙箱，见下文威胁模型 |
 | `remember_member_fact` / `recall_member_memory` | 总是 | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
 | `related_messages` / `search_history` | 挂载消息索引 | 查当前群/频道更早的历史：前者按某条消息的号码查相关消息，后者按关键词 + 语义检索（可限时间范围）；两者每轮合计最多 3 次，详见“历史检索索引” |
 | `update_soul` | 总是 | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
@@ -274,17 +274,17 @@ flowchart TD
 
 - **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到主进程同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。
 - **防到什么**：vm context 由 `Object.create(null)` 创建且 `codeGeneration: { strings: false, wasm: false }`，context 内不存在任何 host realm 对象/函数——`console.log.constructor` / `this.constructor.constructor` / `Function` / `eval` 都拿不到 host `Function`。console 在 context 内部 bootstrap；结果只在 context 内 `JSON.stringify` 后以字符串跨界。子进程 env 只有 `PATH`、隔离 tmp cwd、`--smol`、同步代码 vm timeout 3 s、进程级 5 s SIGKILL 兜底、输出 4 KB 上限。
-- **自动 OS 隔离**：首次有效 `run_js` 调用在 Linux 上用相同 bwrap 参数和 Bun / wrapper 试运行 `1 + 1`，并发调用共享一次探测；可用性结果缓存到进程退出。未安装、AppArmor 拒绝 user namespace、挂载或运行时失败都选择原有 vm 路径；不新增配置。只记录一次 `run_js_sandbox`，字段 `{ kind: "bwrap" | "vm" }`，不记录探测错误、路径或 stderr。安装或修改系统策略后需重启再探测。
-- **bwrap 增加的边界**：`--unshare-all` 隔离网络及 PID 等命名空间；`--die-with-parent`、`--new-session` 配合 PID namespace，让 sandbox 结束时其中孙进程一并退出。只读挂载 `/usr`、存在时的 `/lib`、`/lib64`、`/etc/ld.so.cache`，以及 Bun 可执行文件、wrapper 和输入代码三个单独文件（映射到 `/runjs/`），不挂载它们的父目录。根文件系统不包含服务用户 home、bot 数据目录、`.env`、`jingmei.config.json` 或 repo；工作目录是新建 tmpfs `/tmp`，另提供 namespace 内的 `/proc` 和最小 `/dev`。保留原有 vm、PATH-only 环境、输出上限与超时控制。
+- **强制 OS 隔离**：`run_js` 总是经 bwrap 运行，没有 vm 回退。启动时 `assertRunJsSandbox()` 走与正式调用相同的路径试运行 `1 + 1`；非 Linux、未安装 bwrap、AppArmor 拒绝 user namespace、挂载或运行时失败都抛 `RunJsSandboxError`，`startBot` 把它打印到 stderr 并以非零码退出。不新增配置。运行期 bwrap 突然不可用时，单次调用返回结构化失败。
+- **bwrap 增加的边界**：`--unshare-all` 隔离网络及 PID 等命名空间；`--die-with-parent`、`--new-session` 配合 PID namespace，让 sandbox 结束时其中孙进程一并退出。只读挂载 `/usr`、存在时的 `/lib`、`/lib64`、`/etc/ld.so.cache`，以及 Bun 可执行文件、wrapper 和输入代码三个单独文件（映射到 `/runjs/`），不挂载它们的父目录。根文件系统不包含服务用户 home、bot 数据目录、`.env`、`jingmei.config.json` 或 repo；工作目录是新建 tmpfs `/tmp`，另提供 namespace 内的 `/proc` 和最小 `/dev`。bwrap 内仍保留 vm、PATH-only 环境、输出上限与超时控制。
 - **残余风险**：
-  1. node:vm 不是安全边界。回退 vm 时，若引擎漏洞打穿 realm 隔离，子进程仍以服务用户运行，可读磁盘上的 `.env`、数据目录并联网；auto 策略不保证每台机器都有 OS 隔离，运维须确认日志 `kind: "bwrap"`。
+  1. node:vm 不是安全边界；它是 bwrap 内的第二层。引擎漏洞打穿 realm 隔离后，攻击者仍被限制在 bwrap 的命名空间与只读运行时挂载里。
   2. `--smol` 不是硬内存上限，靠 5 s SIGKILL 兜底。
-  3. vm 回退时 SIGKILL 只杀直接子进程，逃逸后派生的孙进程不受超时约束；bwrap 路径通过 PID namespace 关闭这条逃逸路径。
+  3. SIGKILL 只杀直接子进程；逃逸后派生的孙进程由 PID namespace 与 `--die-with-parent` 回收。
   4. vm timeout 只约束同步代码；异步膨胀由 SIGKILL 兜底。
   5. bwrap 不隔离宿主内核，不提供 seccomp 或硬 CPU / 内存配额；内核漏洞及资源耗尽仍是风险，且沙箱可读取挂载的系统运行时文件。生产仍应使用专用低权服务用户。
-- **部署与验证**：Ubuntu 24.04 的 AppArmor userns 策略可能使已安装的 bwrap 仍不可用；按 [deploy.md](deploy.md#run_js-操作系统沙箱) 配置并确认一次性日志，不把“已安装”当作“已隔离”。
+- **部署与验证**：Ubuntu 24.04 的 AppArmor userns 策略可能使已安装的 bwrap 仍不可用；按 [deploy.md](deploy.md#run_js-操作系统沙箱) 配置；启动试运行会真实创建一次沙箱，不把“已安装”当作“已隔离”。
 
-`test/runjs.test.ts` 覆盖 vm 边界；`test/runjs-sandbox.test.ts` 覆盖缺少 / 拒绝 bwrap 时的回退、一次性探测及仅绑定运行时文件的安全边界。改沙箱后必须重跑。
+`test/runjs.test.ts` 覆盖 vm 边界；`test/runjs-sandbox.test.ts` 覆盖启动断言（可用时通过、bwrap 缺失时抛错）及仅绑定运行时文件的安全边界。改沙箱后必须重跑。
 
 ## 日志
 

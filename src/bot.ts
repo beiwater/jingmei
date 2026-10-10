@@ -28,10 +28,12 @@ import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
 import { createTelegramPlatform } from "./platforms/telegram/index.ts";
 import { ANTIGRAVITY_PROVIDER_ID, AntigravityImageError, generateAntigravityImage } from "./tools/antigravity-image.ts";
+import { assertRunJsSandbox, RunJsSandboxError } from "./tools/run-js.ts";
 import type { ImageGenerator } from "./core/tools.ts";
 
 async function main(): Promise<void> {
 	const config = loadConfig();
+	await assertRunJsSandbox();
 	const agentDir = piAgentDir(config.dataDir);
 	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
 	ensureDeepSeekModelsFile(agentDir);
@@ -227,8 +229,13 @@ export async function startBot(): Promise<void> {
 			error_category: errorCategory(error),
 			detail: error instanceof Error ? error.message : undefined,
 		});
-		// Both messages are built from config/model names only, never secret values.
-		if (error instanceof ConfigError || error instanceof PiModelConfigurationError) console.error(error.message);
+		// These messages are built from config/model names and the sandbox probe result, never secret values.
+		if (
+			error instanceof ConfigError ||
+			error instanceof PiModelConfigurationError ||
+			error instanceof RunJsSandboxError
+		)
+			console.error(error.message);
 		process.exitCode = 1;
 	}
 }

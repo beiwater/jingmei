@@ -6,6 +6,7 @@
 
 - 专用 Linux 用户；代码、`.env`、`jingmei.config.json`、persona 文件和 `data/` 都放在该用户家目录下，只有该用户可读。
 - [Bun](https://bun.sh/)。仓库 CI 使用 Bun 1.3.14。
+- 必需：`bubblewrap` 与允许其创建 user namespace 的系统策略（见下文“run_js 操作系统沙箱”）；缺少时启动直接报错退出。
 - 可选：`ffmpeg` 与 `ffprobe`（Debian/Ubuntu：`sudo apt install ffmpeg`）。缺少任一工具时启动日志有一条 `video_frames_unavailable` 警告，视频只以 `[视频]` 占位进入上下文，其他功能不受影响；安装后重启即可。
 - 可选：开启 `textImage`（长文转图）需要系统中文字体（Debian/Ubuntu：`sudo apt install fonts-noto-cjk`），首次渲染会联网下载并缓存两个固定版本的 Typst 包。字体缺失时图里的汉字会变成方框；启动时检测到会记一条 `text_image_font_missing` 警告（功能仍保持开启），装好字体后重启即可。
 - 可选：开启 `kline`（K 线图）不需要额外下载，只需出站访问 `data-api.binance.vision`，并有系统字体 DejaVu Sans（Debian/Ubuntu：`fonts-dejavu-core`，通常已安装）；试渲染失败会记 `kline_unavailable` 并关闭该功能。
@@ -14,7 +15,7 @@
 
 ## run_js 操作系统沙箱
 
-Linux 首次 `run_js` 调用会自动探测 bubblewrap 是否真正可用；其他系统或探测失败时保留原有 vm 沙箱，不新增配置，也不阻止计算功能。**vm 不是安全边界**：未启用 bwrap 时，引擎逃逸仍可读服务用户的文件并联网。
+`run_js` 只在 bubblewrap 里运行，没有回退。启动时用真实的 bwrap 参数试运行一次 `1 + 1`；非 Linux、未安装 bwrap、被 AppArmor 拒绝 user namespace、挂载或运行时失败都会让启动直接报错退出（stderr 打印原因），不新增配置。**node:vm 不是安全边界**，所以不在没有 bwrap 的机器上降级运行。
 
 Ubuntu 24.04 安装发行版工具：
 
@@ -24,7 +25,7 @@ command -v bwrap
 sysctl kernel.apparmor_restrict_unprivileged_userns
 ```
 
-Ubuntu 24.04 默认启用 AppArmor 对非特权 user namespace 的限制；`kernel.apparmor_restrict_unprivileged_userns = 1` 时，仅找到 `bwrap` 并不代表可创建沙箱。Ubuntu 的[官方发行说明](https://discourse.ubuntu.com/t/noble-numbat-release-notes/39890)解释了该限制及推荐的应用专用 AppArmor `flags=(unconfined)` + `userns,` 授权方式。若发行版已加载匹配 `/usr/bin/bwrap` 的授权 profile，无需另加；若实际探测仍被 AppArmor 拒绝，由管理员检查现有 profile / 内核拒绝日志，必要时按该官方模式创建 `/etc/apparmor.d/jingmei-bwrap`（这里假设 `command -v bwrap` 为 `/usr/bin/bwrap`）：
+Ubuntu 24.04 默认启用 AppArmor 对非特权 user namespace 的限制；`kernel.apparmor_restrict_unprivileged_userns = 1` 时，仅找到 `bwrap` 并不代表可创建沙箱。Ubuntu 的[官方发行说明](https://discourse.ubuntu.com/t/noble-numbat-release-notes/39890)解释了该限制及推荐的应用专用 AppArmor `flags=(unconfined)` + `userns,` 授权方式。若发行版已加载匹配 `/usr/bin/bwrap` 的授权 profile，无需另加；若启动试运行仍被 AppArmor 拒绝，由管理员检查现有 profile / 内核拒绝日志，必要时按该官方模式创建 `/etc/apparmor.d/jingmei-bwrap`（这里假设 `command -v bwrap` 为 `/usr/bin/bwrap`）：
 
 ```text
 abi <abi/4.0>,
@@ -44,7 +45,7 @@ systemctl --user restart pi-discord-agent
 
 该授权只解决 AppArmor 的 userns 限制，不承诺覆盖其他内核、容器或 systemd 策略；不推荐全局把上述 sysctl 改成 0。Bun 即使位于 `~/.bun/bin/bun` 也只挂载可执行文件本身，不暴露 home。bwrap 参数语义见 [Ubuntu bwrap 手册](https://manpages.ubuntu.com/manpages/noble/man1/bwrap.1.html)；隔离边界及剩余风险见 [architecture.md](architecture.md#run_js-sandbox-威胁模型)。
 
-重启后触发一次正常计算工具调用，并用 `journalctl --user -u pi-discord-agent -f` 查看 `event: "run_js_sandbox"`：`fields.kind: "bwrap"` 才表示试运行成功；`"vm"` 表示本进程回退。日志只出现一次，不包含失败 stderr 或路径；安装工具或调整策略后必须重启重新探测。没有工具调用时不会出现这条日志。
+重启后服务正常启动即表示试运行成功；失败时 `bun run start` 的 stderr 与 `journalctl --user -u pi-discord-agent` 里的 `startup_failed` 都会给出原因（stderr 不含 bwrap 的详细输出，userns 被拒通常表现为 `sandbox exited without a structured result`）。安装工具或调整策略后重启即可重新探测。
 
 ## systemd 用户服务
 

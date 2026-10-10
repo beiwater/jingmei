@@ -40,7 +40,7 @@
 - **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_reply` 的 `text_image` 部分，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）、公网图片、函数图（函数、隐函数、参数方程、散点、3D 曲面），以及开启画图时由 AI 新画的插图。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
 - **K 线图**（可选）：开启 `kline` 后，角色可以在 `send_reply` 里放一个 `kline_image` 部分，发出 Binance 现货交易对（如 BTCUSDT）的实时 K 线图（蜡烛图 + 成交量）。行情由 bot 从 Binance 公共接口取，模型只选交易对与周期，不写数字；纯库实现（ECharts 服务端渲染 + resvg），不需要浏览器。详见[K 线图](#k-线图)。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
-- **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。Linux 首次调用自动试运行 bubblewrap：可用时额外隔离文件系统、网络与 PID；未安装或被系统策略阻止时回退原有 vm 沙箱（vm 本身不是安全边界）。无新增配置；Ubuntu 启用及日志验证见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
+- **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。必须在 Linux 上运行，并有可用的 bubblewrap（隔离文件系统、网络与 PID）；启动时试运行一次，不可用就直接报错退出，没有回退。无新增配置；Ubuntu 启用见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，开新对话段或压缩成功后才转为正式内容。成员可随时 `/forget`。
   何时保存、何时回想写在 system prompt 里：作者自述长期信息时先保存再回复（玩笑、一时状态、他人信息、敏感信息不存）；被问到成员情况时先回想；查不到就说不记得，不编造。
 - **节日与生日祝福**（可选）：在指定频道、当地时间 09:00 之后发送生日祝福和中国/澳洲节日祝福；发送记录存在数据库里，重启不会重发。
@@ -79,7 +79,7 @@ flowchart LR
 
 ## 快速开始
 
-需要 [Bun](https://bun.sh/) 1.3 以上、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
+需要 Linux、[Bun](https://bun.sh/) 1.3 以上、可用的 bubblewrap（`run_js` 沙箱，缺少则启动报错，见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)）、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
 
 macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。消息检索的向量部分（相关条数、语义检索）总是使用这个模型；开启 `events` 时话题也共用它。
 
