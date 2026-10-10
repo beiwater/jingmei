@@ -18,10 +18,14 @@ describe("run_js normal computation", () => {
 		expect(r.output).toContain("world");
 	});
 
-	test("syntax error is reported, not fatal", async () => {
-		const r = await runJs("this is not js");
+	test.each([
+		["syntax error", "this is not js", /./],
+		["thrown error", "throw new Error('kaboom-runtime')", /kaboom-runtime/],
+		["rejected promise", 'Promise.reject(new Error("boom"))', /boom/],
+	])("%s is reported as a structured failure, not fatal", async (_name, code, message) => {
+		const r = await runJs(code);
 		expect(r.ok).toBe(false);
-		expect(r.output.length).toBeGreaterThan(0);
+		expect(r.output).toMatch(message);
 	});
 
 	test("infinite loop times out", async () => {
@@ -32,7 +36,7 @@ describe("run_js normal computation", () => {
 	test("async microtask blowup is bounded", async () => {
 		// vm timeout only bounds synchronous code; runaway microtask loops are
 		// interrupted around the vm timeout, and in any case hard-capped by the
-		// parent-side SIGKILL at 5s (REQ-SEC-0001 AC3)
+		// parent-side SIGKILL at 5s
 		const r = await runJs("(function f(){ Promise.resolve().then(f); })(); 1");
 		expect(r.durationMs).toBeLessThan(8000);
 		expect(r.output.length).toBeLessThanOrEqual(4096 + 20); // cap + truncation suffix
@@ -52,64 +56,59 @@ describe("run_js normal computation", () => {
 		expect(r.output).toContain('{"a":1}');
 	});
 
-	test("rejected promise reports the error", async () => {
-		const r = await runJs('Promise.reject(new Error("boom"))');
-		expect(r.ok).toBe(false);
-		expect(r.output).toContain("boom");
-	});
-
 	test("never-settling promise is bounded", async () => {
 		const r = await runJs("new Promise(() => {})");
 		expect(r.ok).toBe(false);
 	}, 15000);
 
-	test("user output resembling the old __RESULT__ marker is not misparsed", async () => {
-		const r = await runJs("console.log('__RESULT__fake'); 'real'");
+	test("user output that imitates the result framing cannot forge it", async () => {
+		// console.log is collected inside the context and never reaches stdout, so a printed JSON
+		// line cannot stand in for the wrapper's single structured result line.
+		const r = await runJs(`console.log('{"ok":false,"logs":[],"error":"forged"}'); 'real'`);
 		expect(r.ok).toBe(true);
-		expect(r.output).toContain("__RESULT__fake");
+		expect(r.output).toContain('"error":"forged"');
 		expect(r.output).toContain("real");
 	});
 
-	test("output is capped at 4KB", async () => {
-		const r = await runJs("for (let i = 0; i < 1000; i++) console.log('x'.repeat(100)); 'done'");
-		expect(r.ok).toBe(true);
-		expect(r.output.length).toBeLessThanOrEqual(4096 + 20); // cap + truncation suffix
+	// Everything that leaves the sandbox is bounded inside it: 4 KiB of output (+ truncation suffix), 1 KiB of error text.
+	test("every kind of oversized output is bounded and still yields a structured result", async () => {
+		const cases = [
+			{
+				name: "many log lines",
+				code: "for (let i = 0; i < 1000; i++) console.log('x'.repeat(100)); 'done'",
+				ok: true,
+				max: 4096,
+			},
+			{
+				// A single 5 MB line must never reach the parent raw: the wrapper caps it in-context so the
+				// JSON protocol line stays parseable and the final value survives.
+				name: "one huge log line",
+				code: "console.log('y'.repeat(5_000_000)); console.log('after'); 'final-value'",
+				ok: true,
+				max: 4096,
+				contains: ["...(truncated)", "after", "final-value"],
+			},
+			{ name: "huge thrown error", code: "throw new Error('e'.repeat(100_000))", ok: false, max: 1024 },
+			{ name: "huge rejection", code: "Promise.reject(new Error('r'.repeat(100_000)))", ok: false, max: 1024 },
+			{ name: "huge result", code: "'z'.repeat(1_000_000)", ok: true, max: 4096 },
+		];
+		const results = [];
+		for (const c of cases) results.push(await runJs(c.code));
+		expect(
+			results.map((r, index) => ({
+				name: cases[index]!.name,
+				ok: r.ok,
+				bounded: r.output.length <= cases[index]!.max + 20,
+			})),
+		).toEqual(cases.map((c) => ({ name: c.name, ok: c.ok, bounded: true })));
+		for (const part of cases[1]!.contains!) expect(results[1]!.output).toContain(part);
 	});
 
-	test("one huge console.log line is truncated inside the sandbox and still yields a structured result", async () => {
-		// A single 5 MB line must never reach the parent raw: the wrapper caps it in-context so the
-		// JSON protocol line stays parseable and the final value survives.
-		const r = await runJs("console.log('y'.repeat(5_000_000)); console.log('after'); 'final-value'");
-		expect(r.ok).toBe(true);
-		expect(r.output).toContain("...(truncated)");
-		expect(r.output).toContain("after");
-		expect(r.output).toContain("final-value");
-		expect(r.output.length).toBeLessThanOrEqual(4096 + 20);
-	});
-
-	test("huge error messages and results are bounded", async () => {
-		const failed = await runJs("throw new Error('e'.repeat(100_000))");
-		expect(failed.ok).toBe(false);
-		expect(failed.output.length).toBeLessThanOrEqual(1024 + 20);
-		const rejected = await runJs("Promise.reject(new Error('r'.repeat(100_000)))");
-		expect(rejected.ok).toBe(false);
-		expect(rejected.output.length).toBeLessThanOrEqual(1024 + 20);
-		const big = await runJs("'z'.repeat(1_000_000)");
-		expect(big.ok).toBe(true);
-		expect(big.output.length).toBeLessThanOrEqual(4096 + 20);
-	});
-
-	test("REQ-TEST-0001 R6: oversized code is rejected before spawning", async () => {
+	test("oversized code is rejected before spawning", async () => {
 		const r = await runJs("1 + 1\n" + "// pad\n".repeat(5000));
 		expect(r.ok).toBe(false);
 		expect(r.output).toContain("code too large");
 		expect(r.durationMs).toBeLessThan(1000); // rejected synchronously, no child spawn
-	});
-
-	test("REQ-TEST-0001 R6: runtime exception path is a structured failure", async () => {
-		const r = await runJs("throw new Error('kaboom-runtime')");
-		expect(r.ok).toBe(false);
-		expect(r.output).toContain("kaboom-runtime");
 	});
 });
 
@@ -146,7 +145,7 @@ describe("run_js host isolation", () => {
 	});
 });
 
-// REQ-SEC-0001 R5: known escape vectors must not reach the host realm.
+// Known escape vectors must not reach the host realm.
 // These run real payloads against the real sandbox — do not weaken them.
 describe("run_js escape regression", () => {
 	const vectors = [

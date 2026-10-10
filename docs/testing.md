@@ -65,7 +65,7 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `video-frames.test.ts` | 按时长选择的代表帧 seek 位置（含 1 秒与 3 秒边界）；只探测一次、最多抽三帧并清理临时文件；缺 ffmpeg 返回固定结果而不抛错 |
 | `reaction-assets.test.ts` | 未配置本地图库时只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
 | `reaction-catalog.test.ts` | 接受旧目录名前缀与目录相对路径、绝对配置目录、JPEG content type、额外元数据；收集缺失文件、路径穿越、内置 id 重名和错误扩展名；拒绝绝对文件路径、逃逸符号链接、非法 id/配文/名称及无效 catalog/配置目录 |
-| `runjs.test.ts` | `run_js` 基本计算与输出、超时、异步膨胀、输出上限、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
+| `runjs.test.ts` | `run_js` 基本计算与输出、语法错/抛错/rejected promise 都是结构化失败、超时、异步膨胀、各类超大输出（日志行、错误、结果）有界、用户打印无法伪造结果帧、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
 | `runjs-sandbox.test.ts` | 启动断言：bwrap 可用时通过、缺失时抛 `RunJsSandboxError`；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
 | `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
