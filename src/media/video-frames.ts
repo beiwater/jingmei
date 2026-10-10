@@ -1,9 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const VIDEO_COMMAND_TIMEOUT_MS = 30_000;
-const VIDEO_FRAME_MAX_BYTES = 5 * 1024 * 1024;
 
 export type VideoFrameOutcome = "video_transcoder_unavailable" | "video_probe_failed" | "video_frame_extraction_failed";
 
@@ -56,23 +55,6 @@ export function inspectVideoTranscoder(runner: VideoCommandRunner = defaultRunne
 	return { ffmpeg: runner.which("ffmpeg") != null, ffprobe: runner.which("ffprobe") != null };
 }
 
-function parseDuration(stdout: string): number | null {
-	try {
-		const value = JSON.parse(stdout) as {
-			format?: { duration?: unknown };
-			streams?: Array<{ duration?: unknown }>;
-		};
-		const candidates = [value.streams?.[0]?.duration, value.format?.duration];
-		for (const candidate of candidates) {
-			const duration = typeof candidate === "number" ? candidate : Number(candidate);
-			if (Number.isFinite(duration) && duration > 0) return duration;
-		}
-	} catch {
-		// Fixed failure outcome below; probe output is untrusted and never logged.
-	}
-	return null;
-}
-
 function safeExtension(extension: string): string {
 	const normalized = extension.toLowerCase();
 	return /^[a-z0-9]{1,8}$/.test(normalized) ? normalized : "bin";
@@ -96,17 +78,16 @@ export async function extractVideoFrames(
 			ffprobe,
 			"-v",
 			"error",
-			"-select_streams",
-			"v:0",
 			"-show_entries",
-			"format=duration:stream=duration",
+			"format=duration",
 			"-of",
-			"json",
+			"csv=p=0",
 			sourcePath,
 		]);
 		if (probe.exitCode !== 0) return { ok: false, outcome: "video_probe_failed" };
-		const durationSeconds = parseDuration(probe.stdout);
-		if (durationSeconds == null) return { ok: false, outcome: "video_probe_failed" };
+		// Probe output is untrusted: anything but a positive number (e.g. "N/A") is a failed probe.
+		const durationSeconds = Number(probe.stdout);
+		if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return { ok: false, outcome: "video_probe_failed" };
 
 		const positions = durationSeconds < 1 ? [0.5] : durationSeconds < 3 ? [1 / 3, 2 / 3] : [0.2, 0.5, 0.8];
 		const frames: VideoFrame[] = [];
@@ -136,10 +117,6 @@ export async function extractVideoFrames(
 			]);
 			if (extraction.exitCode !== 0) return { ok: false, outcome: "video_frame_extraction_failed" };
 			try {
-				const stat = statSync(outputPath);
-				if (!stat.isFile() || stat.size <= 0 || stat.size > VIDEO_FRAME_MAX_BYTES) {
-					return { ok: false, outcome: "video_frame_extraction_failed" };
-				}
 				frames.push({ bytes: new Uint8Array(readFileSync(outputPath)), mimeType: "image/jpeg" });
 			} catch {
 				return { ok: false, outcome: "video_frame_extraction_failed" };
