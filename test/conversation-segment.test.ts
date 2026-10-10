@@ -1,7 +1,7 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { afterEach, expect, setSystemTime, test } from "bun:test";
+import { afterEach, expect, mock, setSystemTime, test } from "bun:test";
 import { Conversation } from "../src/core/conversation.ts";
 import { ensureSessionTables } from "../src/core/db.ts";
 import type { EventTracker } from "../src/core/events.ts";
@@ -27,31 +27,28 @@ const cleanups = useCleanups();
 afterEach(() => setSystemTime());
 
 /** Records what the core asks of the index; counts are whatever the test sets. */
-class FakeIndex {
-	readonly enqueued: string[] = [];
-	readonly events: string[] = [];
-	readonly relatedCalls: Array<{ messageId: string; before: number }> = [];
-	counts = new Map<string, number | null>();
-	enqueue(key: MessageKey) {
-		this.enqueued.push(key.messageId);
-	}
-	async ensure(keys: readonly MessageKey[]) {
-		this.events.push(`ensure:${keys.map((key) => key.messageId).join(",")}`);
-	}
-	relatedCount(key: MessageKey, before: number) {
-		this.events.push(`count:${key.messageId}`);
-		this.relatedCalls.push({ messageId: key.messageId, before });
-		return this.counts.get(key.messageId) ?? null;
-	}
-	related() {
-		return [];
-	}
-	async search() {
-		return [];
-	}
-	forgetAuthor() {}
-	async idle() {}
+function fakeIndex() {
+	const events: string[] = [];
+	const index = {
+		events,
+		counts: new Map<string, number | null>(),
+		enqueue: mock((_key: MessageKey) => {}),
+		ensure: mock(async (keys: readonly MessageKey[]) => {
+			events.push(`ensure:${keys.map((key) => key.messageId).join(",")}`);
+		}),
+		relatedCount: mock((key: MessageKey, _before: number): number | null => {
+			events.push(`count:${key.messageId}`);
+			return index.counts.get(key.messageId) ?? null;
+		}),
+		related: () => [],
+		search: async () => [],
+		forgetAuthor: () => {},
+		idle: async () => {},
+	};
+	return index;
 }
+
+const enqueuedIds = (index: ReturnType<typeof fakeIndex>) => index.enqueue.mock.calls.map(([key]) => key.messageId);
 
 function fixture(options: { personas?: number; timeoutMs?: number; index?: boolean; imageInput?: boolean } = {}) {
 	const model = makeModel({ input: options.imageInput ? ["text", "image"] : ["text"], contextWindow: 1_048_576 });
@@ -76,7 +73,7 @@ function fixture(options: { personas?: number; timeoutMs?: number; index?: boole
 			return { id: String(1000 + sends.length) };
 		},
 	});
-	const index = options.index === false ? undefined : new FakeIndex();
+	const index = options.index === false ? undefined : fakeIndex();
 	const coreOptions = conversationOptions({
 		dataDir,
 		personas,
@@ -176,10 +173,10 @@ test("untriggered messages are stored and indexed but never written to a session
 	expect(f.captured).toEqual([]);
 	expect((await f.seam.getSession(f.persona, SPACE, CHANNEL)).messages).toEqual([]);
 	expect(f.db.query("SELECT COUNT(*) AS n FROM messages").get()).toEqual({ n: 2 });
-	expect(f.index!.enqueued).toEqual(["10", "11"]);
+	expect(enqueuedIds(f.index!)).toEqual(["10", "11"]);
 	await f.send(1_000);
 	// The stored bot reply is indexed too.
-	expect(f.index!.enqueued).toEqual(["10", "11", "12", "1001"]);
+	expect(enqueuedIds(f.index!)).toEqual(["10", "11", "12", "1001"]);
 });
 
 test("a new segment is seeded with the latest 30 earlier messages as one context message", async () => {
@@ -219,8 +216,9 @@ test("related counts are computed once per line, against history older than the 
 	expect(trigger).toContain("（相关 1 条）");
 	// Lines are embedded before they are counted, and every count looks only before the window start.
 	expect(f.index!.events.slice(0, 2)).toEqual(["ensure:10,11,12", "count:10"]);
-	expect(f.index!.relatedCalls.every((entry) => entry.before === earliest)).toBe(true);
-	expect(f.index!.relatedCalls.map((entry) => entry.messageId).sort()).toEqual(["10", "11", "12", "13"]);
+	const counted = f.index!.relatedCount.mock.calls;
+	expect(counted.every(([, before]) => before === earliest)).toBe(true);
+	expect(counted.map(([key]) => key.messageId).sort()).toEqual(["10", "11", "12", "13"]);
 });
 
 test("without an index no relatedness is written", async () => {
