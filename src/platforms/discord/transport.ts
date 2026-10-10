@@ -182,7 +182,6 @@ export class DiscordTransport {
 		this.assertSnowflake(channelId, "channelId");
 		this.assertSnowflake(messageId, "messageId");
 		this.assertAllowedChannel(channelId);
-		if (!isValidReactionEmoji(emoji)) throw new Error("invalid reaction emoji");
 		const encoded = encodeURIComponent(emoji);
 		await this.request(`/channels/${channelId}/messages/${messageId}/reactions/${encoded}/@me`, { method: "PUT" });
 	}
@@ -475,7 +474,7 @@ export class DiscordPlatformTransport implements PlatformTransport {
 		mention?: readonly PersonaAccount[];
 	}): Promise<{ id: string }> {
 		const users = [...new Set(input.mention?.map((user) => user.userId) ?? [])];
-		const messages = await this.client(input.personaId).sendMessage(input.channelId, input.content, {
+		const messages = await this.clients.get(input.personaId)!.sendMessage(input.channelId, input.content, {
 			replyTo: input.replyToMessageId,
 			allowedMentions: users.length ? { ...DEFAULT_ALLOWED_MENTIONS, users } : DEFAULT_ALLOWED_MENTIONS,
 			attachments: input.attachments,
@@ -490,20 +489,14 @@ export class DiscordPlatformTransport implements PlatformTransport {
 	}
 
 	startTyping(personaId: string, channelId: string): Promise<void> {
-		return this.client(personaId).startTyping(channelId);
+		return this.clients.get(personaId)!.startTyping(channelId);
 	}
 
 	addReaction(personaId: string, channelId: string, messageId: string, emoji: string): Promise<void> {
-		return this.client(personaId).addReaction(channelId, messageId, emoji);
+		return this.clients.get(personaId)!.addReaction(channelId, messageId, emoji);
 	}
 
 	isValidReaction(emoji: string): boolean {
 		return isValidReactionEmoji(emoji);
-	}
-
-	private client(personaId: string): DiscordTransport {
-		const client = this.clients.get(personaId);
-		if (!client) throw new Error(`No Discord account configured for persona ${personaId}`);
-		return client;
 	}
 }

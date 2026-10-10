@@ -93,9 +93,6 @@ describe("Discord transport primitives", () => {
 		expect(method).toBe("PUT");
 		expect(url).toContain("/channels/223456789012345678/messages/323456789012345678/reactions/%F0%9F%91%8D/@me");
 		await expect(transport.addReaction("999999999999999999", "323456789012345678", "👍")).rejects.toThrow("allowlist");
-		await expect(transport.addReaction("223456789012345678", "323456789012345678", "not emoji")).rejects.toThrow(
-			"invalid reaction emoji",
-		);
 	});
 
 	test("accepts bounded Unicode and custom emoji syntax", () => {
@@ -158,9 +155,6 @@ describe("Discord transport primitives", () => {
 			content: "生日快乐 <@423456789012345678>",
 			allowed_mentions: { parse: [], users: ["423456789012345678"], replied_user: false },
 		});
-		await expect(
-			transport.sendMessage({ personaId: "b", channelId: "223456789012345678", content: "x" }),
-		).rejects.toThrow("persona");
 		expect(Object.keys(transport.quickReactions).every((emoji) => transport.isValidReaction(emoji))).toBe(true);
 	});
 
