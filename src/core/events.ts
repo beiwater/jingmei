@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { contentText } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { type EventOption, type JevClient, NEW_EVENT_OPTION } from "../decision/jev.ts";
 import { errorCategory, log } from "../observability/log.ts";
@@ -48,7 +49,7 @@ export function createPiEventSummarizer(
 			{ maxTokens: 512, cacheRetention: "none", timeoutMs: 30_000, maxRetries: 0 },
 		);
 		if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error("事件摘要生成失败");
-		const text = reply.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+		const text = contentText(reply.content);
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(text);
