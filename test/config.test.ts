@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
+import {
+	ConfigError,
+	ensureDeepSeekModelsFile,
+	formatEnvFile,
+	loadConfig,
+	loadOperatorConfig,
+	parseEnvFile,
+	validateConfig,
+} from "../src/config.ts";
 import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding-models.ts";
 import { JEV_ENDPOINT } from "../src/decision/jev.ts";
 
@@ -427,6 +435,36 @@ describe("config", () => {
 		expect(() => parseEnvFile(path)).toThrow(/Invalid \.env key at line 1/);
 		writeFileSync(path, "A_KEY: one: two\n");
 		expect(parseEnvFile(path)).toEqual({ A_KEY: "one: two" });
+	});
+
+	test("a missing config file points at jingmei init", () => {
+		for (const load of [() => loadConfig(root), () => loadOperatorConfig(root)])
+			expect(errorsOf(load)).toEqual([
+				"Missing jingmei.config.json; run `bun run jingmei init` or copy jingmei.config.example.json",
+			]);
+	});
+
+	test("formatEnvFile round-trips through parseEnvFile, with comments and colons in values", () => {
+		const env = { ROUTING_SECRET: "abc", DISCORD_LUNA_TOKEN: "MTI.x:y#z", TELEGRAM_LUNA_TOKEN: "123456:ABC-def" };
+		const path = join(root, "env");
+		writeFileSync(path, formatEnvFile(env, "first line\nsecond line"));
+		expect(readFileSync(path, "utf8")).toStartWith("# first line\n# second line\n");
+		expect(parseEnvFile(path)).toEqual(env);
+	});
+
+	test("formatEnvFile rejects keys and values that would not parse back, without echoing them", () => {
+		const invalid: Array<Record<string, string>> = [
+			{ KEY: "two\nlines" },
+			{ KEY: " padded" },
+			{ KEY: "" },
+			{ "bad key": "v" },
+		];
+		for (const bad of invalid) {
+			const message = errorsOf(() => formatEnvFile(bad, "h")).join();
+			expect(message).not.toBe("");
+			expect(message).not.toContain("padded");
+			expect(message).not.toContain("two");
+		}
 	});
 
 	test("creates the DeepSeek model catalog once without secrets", () => {

@@ -95,11 +95,11 @@ export class ConfigError extends Error {
 const PLATFORMS: readonly Platform[] = ["discord", "telegram"];
 const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PERSONA_ID = /^[a-z0-9_-]+$/;
-const DISCORD_ID = /^\d{17,20}$/;
-const TELEGRAM_CHAT_ID = /^-?\d+$/;
+export const PERSONA_ID = /^[a-z0-9_-]+$/;
+export const DISCORD_ID = /^\d{17,20}$/;
+export const TELEGRAM_CHAT_ID = /^-?\d+$/;
 const TELEGRAM_USER_ID = /^\d+$/;
-const FISH_REFERENCE_ID = /^[0-9a-f]{32}$/i;
+export const FISH_REFERENCE_ID = /^[0-9a-f]{32}$/i;
 const DEFAULT_ROUTING_SECRET_ENV = "ROUTING_SECRET";
 const DEFAULT_JEV_MODEL = "jev-latest";
 const DEFAULT_JEV_THRESHOLD = 0.8;
@@ -125,6 +125,20 @@ export function parseEnvFile(path: string): Record<string, string> {
 	return env;
 }
 
+/** The inverse of `parseEnvFile`. Keys and values that would not parse back to themselves are rejected without echoing them. */
+export function formatEnvFile(env: Readonly<Record<string, string>>, header: string): string {
+	const lines = Object.entries(env).map(([key, value]) => {
+		if (!ENV_NAME.test(key)) throw new ConfigError(["Invalid .env key"]);
+		if (!value || value !== value.trim() || /[\r\n]/.test(value))
+			throw new ConfigError([`Invalid .env value for ${key}`]);
+		return `${key}: ${value}`;
+	});
+	return `${header
+		.split("\n")
+		.map((line) => `# ${line}`)
+		.join("\n")}\n\n${lines.join("\n")}\n`;
+}
+
 /** `.env` values overridden by `process.env`. */
 function loadEnv(rootDir: string): Record<string, string> {
 	const env = parseEnvFile(join(rootDir, ".env"));
@@ -135,7 +149,7 @@ function loadEnv(rootDir: string): Record<string, string> {
 function readConfigFile(rootDir: string): unknown {
 	const configPath = join(rootDir, CONFIG_FILE);
 	if (!existsSync(configPath)) {
-		throw new ConfigError([`Missing ${configPath}; copy jingmei.config.example.json`]);
+		throw new ConfigError([`Missing ${CONFIG_FILE}; run \`bun run jingmei init\` or copy jingmei.config.example.json`]);
 	}
 	try {
 		return JSON.parse(readFileSync(configPath, "utf8"));
