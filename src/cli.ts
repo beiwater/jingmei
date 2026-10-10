@@ -2,7 +2,8 @@
 // 精魅 (jingmei) operator CLI: an interactive menu, plus subcommands to run the bot, sign in to providers,
 // switch persona models, pause/resume and summarize a running bot.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import * as p from "@clack/prompts";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -162,6 +163,16 @@ function showStats(): string {
 	return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
 }
 
+/** First-run wizard: writes jingmei.config.json, .env and a persona file; it never overwrites. */
+async function createInstall(): Promise<string> {
+	if (!process.stdin.isTTY || !process.stdout.isTTY)
+		throw new Error(
+			"init is interactive and needs a terminal; otherwise copy jingmei.config.example.json and .env.example",
+		);
+	const { clackUi, defaultInitDeps, runInit } = await import("./init.ts");
+	return runInit(process.cwd(), clackUi, defaultInitDeps(process.cwd()));
+}
+
 /** Print the self-check table; any failed check makes the command (and the process exit code) fail. */
 async function checkInstall(): Promise<string> {
 	const { defaultProbes, failureCount, formatReport, runDoctor } = await import("./doctor.ts");
@@ -279,6 +290,7 @@ async function switchModel(ref?: string, personaId?: string): Promise<string> {
 }
 
 const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
+	init: createInstall,
 	stats: showStats,
 	doctor: checkInstall,
 	model: () => switchModel(),
@@ -292,18 +304,25 @@ const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
 async function menu(): Promise<never> {
 	p.intro("jingmei");
 	for (;;) {
-		const paused = openBotState().pausedAt() !== null;
+		// Before `init` there is no config, so only init (and exit) can work.
+		const installed = existsSync(join(process.cwd(), "jingmei.config.json"));
+		const paused = installed && openBotState().pausedAt() !== null;
 		const choice = await p.select({
 			message: "What next?",
-			options: [
-				{ value: "stats", label: "Status", hint: "uptime and totals" },
-				{ value: "doctor", label: "Check install", hint: "config, tokens, models, dependencies" },
-				{ value: "model", label: "Switch model" },
-				paused ? { value: "resume", label: "Resume replies" } : { value: "pause", label: "Pause replies" },
-				{ value: "login", label: "Sign in to a provider" },
-				{ value: "logout", label: "Sign out of a provider" },
-				{ value: "exit", label: "Exit" },
-			],
+			options: installed
+				? [
+						{ value: "stats", label: "Status", hint: "uptime and totals" },
+						{ value: "doctor", label: "Check install", hint: "config, tokens, models, dependencies" },
+						{ value: "model", label: "Switch model" },
+						paused ? { value: "resume", label: "Resume replies" } : { value: "pause", label: "Pause replies" },
+						{ value: "login", label: "Sign in to a provider" },
+						{ value: "logout", label: "Sign out of a provider" },
+						{ value: "exit", label: "Exit" },
+					]
+				: [
+						{ value: "init", label: "Set up", hint: "create config, .env and a persona" },
+						{ value: "exit", label: "Exit" },
+					],
 		});
 		const action = p.isCancel(choice) ? undefined : MENU_ACTIONS[choice];
 		if (!action) break;
@@ -336,6 +355,11 @@ const resume = defineCommand({
 const stats = defineCommand({
 	meta: { name: "stats", description: "Show uptime, total runtime and data totals" },
 	run: () => operation("jingmei stats", showStats),
+});
+
+const init = defineCommand({
+	meta: { name: "init", description: "Create jingmei.config.json, .env and a persona file with a guided wizard" },
+	run: () => operation("jingmei init", createInstall),
 });
 
 const doctor = defineCommand({
@@ -372,7 +396,7 @@ const logout = defineCommand({
 await runMain(
 	defineCommand({
 		meta: { name: "jingmei", description: "精魅 operator commands; run without a command for the interactive menu" },
-		subCommands: { start, doctor, login, logout, model, pause, resume, stats },
+		subCommands: { start, init, doctor, login, logout, model, pause, resume, stats },
 		// citty also calls this after a subcommand (only `start` returns), so act only on a bare invocation.
 		run: ({ rawArgs }) => (rawArgs.length ? undefined : menu()),
 	}),

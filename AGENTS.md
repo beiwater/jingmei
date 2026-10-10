@@ -11,7 +11,7 @@
 
 ## 2. 仓库地图
 
-- `src/main.ts` — 入口（只调 `startBot()`）；`src/bot.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）；`src/cli.ts` — 运维 CLI（`bun run jingmei` 交互菜单，或 `start|doctor|login|logout|model|pause|resume|stats`，citty + clack；子命令做完即 `process.exit`，因为 provider 扩展可能留着计时器）；`src/doctor.ts` — `doctor` 自检（探针注入，只读，输出不含 secret）
+- `src/main.ts` — 入口（只调 `startBot()`）；`src/bot.ts` — 启动编排；`src/discord/main.ts` — systemd 入口（一行 import，**不得改名或改动**，`deploy/pi-discord-agent.service` 也不得改）；`src/cli.ts` — 运维 CLI（`bun run jingmei` 交互菜单，或 `start|init|doctor|login|logout|model|pause|resume|stats`，citty + clack；子命令做完即 `process.exit`，因为 provider 扩展可能留着计时器）；`src/init.ts` — `init` 向导（`buildInitFiles` 纯函数经真实 `validateConfig` 校验，`InitUi` 注入提示层，不覆盖已有文件）；`src/doctor.ts` — `doctor` 自检（探针注入，只读，输出不含 secret）
 - `src/config.ts` — `jingmei.config.json` + `.env` 的唯一读取与校验
 - `src/core/` — 对话核心：`conversation.ts`（主流程、会话）、`router.ts`、`context.ts`（上下文投影）、`prompt.ts`、`tools.ts`、`quick-reactions.ts`、`memory.ts`、`member-commands.ts`（两平台共用的生日解析与 context/compact 命令）、`soul.ts`、`celebrations.ts`、`bot-state.ts`（运行记录、暂停、模型覆盖、stats，CLI 与 bot 共享）、`db.ts`、`model-runtime.ts`、`types.ts`
 - `src/platforms/discord/`、`src/platforms/telegram/` — 平台适配器

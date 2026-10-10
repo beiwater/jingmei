@@ -52,4 +52,7 @@ test("operator commands and the bot module load no embedding, decision or calend
 	expect(await loadedPackages({ args: [join(root, "src/cli.ts"), "stats"] })).toEqual([]);
 	// Importing the bot (not starting it) is free too: its heavy parts load only when their features are used.
 	expect(await loadedPackages({ script: `import ${JSON.stringify(join(root, "src/bot.ts"))};` })).toEqual([]);
+	// The first-run wizard and the self-check run before anything is installed or configured.
+	const wizard = ["src/init.ts", "src/doctor.ts"].map((file) => `import ${JSON.stringify(join(root, file))};`);
+	expect(await loadedPackages({ script: wizard.join("\n") })).toEqual([]);
 });

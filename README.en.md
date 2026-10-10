@@ -87,6 +87,24 @@ macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. T
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
 bun install
+bun run jingmei init
+```
+
+`init` is the recommended way to configure: an interactive wizard that creates `jingmei.config.json`, `.env` and `personas/<id>.md`, so you never hand-edit JSON. It first asks Recommended / Minimal / Custom (Recommended = every core feature on, no add-ons; Minimal = every core feature off, no embedding model download; Custom = pick core features and add-ons one by one, asking for parameters only for the add-ons you pick). Then it asks for the platform(s), each bot token (masked, and verified live with the same call the bot makes, showing the bot's name), the server / channel ids (the group ids on Telegram), the persona id and name, and the model (DeepSeek with `DEEPSEEK_API_KEY`, or sign in later with `bun run jingmei login`). `ROUTING_SECRET` is generated randomly; secrets go only into `.env` (mode 0600), never into the JSON. `init` refuses to run when `jingmei.config.json` or `.env` already exists, never overwrites anything, and needs an interactive terminal. It ends by printing the next steps (including the Discord invite link).
+
+After it finishes:
+
+1. Edit `personas/<id>.md`: the character's identity, voice and boundaries.
+2. `bun run jingmei doctor`: a read-only self-check of the config, the `run_js` sandbox, model credentials, bot tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg / fonts / sqlite-vec / the embedding cache for the features you enabled. One OK / WARN / FAIL line each, with a fix hint.
+3. Start:
+
+   ```bash
+   bun run start
+   ```
+
+To configure by hand instead (or to script deployments), the wizard does the equivalent of:
+
+```bash
 cp jingmei.config.example.json jingmei.config.json
 cp .env.example .env
 cp personas/template.en.md personas/luna.md
@@ -98,11 +116,7 @@ cp personas/template.en.md personas/luna.md
 4. Provide model credentials, either way:
    - The example persona uses DeepSeek `deepseek-flash`; just set `DEEPSEEK_API_KEY` in `.env`. On startup a catalog entry for this model (without the key) is written to `data/pi-agent/models.json`.
    - Other providers: for subscription accounts (Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, ...) run `bun run jingmei login` and pick a provider to sign in with OAuth. Credentials go to `<dataDir>/pi-agent/auth.json`; the bot uses them on startup and refreshes tokens automatically. `bun run jingmei logout` removes them. On a server without a browser, open the printed link on your own machine, then paste the final redirect URL or code back into the terminal. `bun run jingmei model` lists every model that has credentials. Alternatively put that provider's API key variable (for example `OPENAI_API_KEY`) in the process environment. `.env` is read only by this project and, apart from `DEEPSEEK_API_KEY`, is not passed to Pi.
-5. Start:
-
-   ```bash
-   bun run start
-   ```
+5. Run `bun run jingmei doctor` to self-check, then `bun run start`.
 
 Startup validates the configuration, verifies every bot token, and checks that every persona's model exists and is authenticated. Configuration errors are listed all at once; an invalid token or unavailable model also stops startup. Then @-mention or reply to a character in the group.
 
@@ -249,11 +263,12 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 
 ## Operator commands
 
-Run them in the project directory as the same user that runs the bot. They read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
+Run them in the project directory as the same user that runs the bot. Apart from `init` and `doctor`, they read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
 
 | Command | What it does |
 |---|---|
-| `bun run jingmei` | Interactive menu: status, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
+| `bun run jingmei` | Interactive menu (before a config exists it offers only "Set up", i.e. `init`): status, check install, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
+| `bun run jingmei init` | First-run wizard: creates `jingmei.config.json`, `.env` (mode 0600) and a persona file, verifying bot tokens live; refuses to run when a config exists and needs an interactive terminal |
 | `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
 | `bun run jingmei doctor` | Read-only self-check: config, the `run_js` sandbox, models and credentials, Discord / Telegram tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg, fonts, sqlite-vec and the embedding cache for the features you enabled. One OK / WARN / FAIL line each with a one-line fix hint; exits non-zero on any FAIL. Never prints a token |
 | `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential; signing in refreshes that provider's model list |

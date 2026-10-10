@@ -60,7 +60,7 @@ function probes(config: AppConfig, overrides: Partial<DoctorProbes> = {}): Docto
 		loadConfig: () => config,
 		runJsSandbox: async () => {},
 		modelRuntime: async () => ({ getModel: () => model as never, hasConfiguredAuth: () => true }),
-		discordBot: async () => ({ username: "Luna", flags: 1 << 18 }),
+		discordBot: async () => ({ id: GUILD, username: "Luna", flags: 1 << 18 }),
 		telegramBot: async () => ({ username: "luna_bot", canReadAllGroupMessages: true }),
 		telegramChat: async () => ({ title: "Group" }),
 		videoTranscoder: () => ({ ffmpeg: true, ffprobe: true }),
@@ -190,7 +190,7 @@ describe("doctor", () => {
 			byName(
 				await runDoctor(
 					probes(configOf(), {
-						discordBot: async () => ({ username: "Luna", ...(flags === undefined ? {} : { flags }) }),
+						discordBot: async () => ({ id: GUILD, username: "Luna", ...(flags === undefined ? {} : { flags }) }),
 					}),
 				),
 			)["discord luna intent"]?.status;
@@ -332,7 +332,7 @@ describe("doctor", () => {
 		}) as typeof fetch;
 		try {
 			const real = defaultProbes(root);
-			expect(await real.discordBot(TOKEN_D)).toEqual({ username: "Luna", flags: (1 << 19) | 1 });
+			expect(await real.discordBot(TOKEN_D)).toEqual({ id: GUILD, username: "Luna", flags: (1 << 19) | 1 });
 			expect(await real.telegramBot(TOKEN_T)).toEqual({ username: "luna_bot", canReadAllGroupMessages: false });
 			await expect(real.telegramChat(TOKEN_T, CHAT)).rejects.toThrow("Telegram error 400: Bad Request: chat not found");
 			globalThis.fetch = (async (input: string | URL | Request) => {

@@ -87,6 +87,24 @@ macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展�
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
 bun install
+bun run jingmei init
+```
+
+`init` 是推荐的配置方式：一个交互向导，生成 `jingmei.config.json`、`.env` 和 `personas/<id>.md`，不用手改 JSON。先选“推荐 / 最小 / 自定义”（推荐 = 核心功能全开、不加附加功能；最小 = 核心功能全关，不下载 embedding 模型；自定义 = 逐项选核心功能和附加功能，只对选中的附加功能追问参数），再依次选平台、填 bot token（输入不回显，并用与 bot 相同的调用实时验证、显示 bot 名字）、服务器 / 频道 ID（Telegram 为群 ID）、角色 id 和名字、模型（DeepSeek 填 `DEEPSEEK_API_KEY`，或之后用 `bun run jingmei login`）。`ROUTING_SECRET` 随机生成；secret 只写进权限 0600 的 `.env`，不进 JSON。已存在 `jingmei.config.json` 或 `.env` 时 `init` 拒绝运行，不覆盖任何文件；需要交互终端。结束时打印后续步骤（含 Discord 邀请链接）。
+
+写完后：
+
+1. 编辑 `personas/<id>.md`，写下角色的身份、说话方式和边界。
+2. `bun run jingmei doctor`：只读自检，检查配置、`run_js` 沙箱、模型凭据、bot token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg / 字体 / sqlite-vec / embedding 缓存，逐项给出 OK / WARN / FAIL 和修复提示。
+3. 启动：
+
+   ```bash
+   bun run start
+   ```
+
+想手动配置（或脚本化部署）也可以，向导做的事等价于下面的步骤：
+
+```bash
 cp jingmei.config.example.json jingmei.config.json
 cp .env.example .env
 cp personas/template.zh.md personas/luna.md
@@ -98,11 +116,7 @@ cp personas/template.zh.md personas/luna.md
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
    - 其他 provider：订阅账号（Claude Pro/Max、ChatGPT Plus/Pro、GitHub Copilot 等）用 `bun run jingmei login` 选 provider 走 OAuth 登录，凭据写进 `<dataDir>/pi-agent/auth.json`，bot 启动后直接使用并自动刷新 token；`bun run jingmei logout` 删除。服务器上没有浏览器时，在本机浏览器打开打印出的链接，再把最终跳转 URL 或授权码粘贴回终端。`bun run jingmei model` 列出所有已有凭据的模型。也可以把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
-5. 启动：
-
-   ```bash
-   bun run start
-   ```
+5. 运行 `bun run jingmei doctor` 自检，再 `bun run start` 启动。
 
 启动时会校验配置、验证每个 bot token、确认每个角色的模型存在且已认证。配置错误会一次列全；token 或模型不可用也会报错退出。之后去群里 @ 角色或回复它试试。
 
@@ -249,11 +263,12 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 ## 运维命令
 
-在项目目录、以运行 bot 的同一个用户执行。只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
+在项目目录、以运行 bot 的同一个用户执行。除 `init` 与 `doctor` 外只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
 
 | 命令 | 作用 |
 |---|---|
-| `bun run jingmei` | 交互菜单：状态、自检、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei` | 交互菜单（尚无配置时只有“Set up”，即 `init`）：状态、自检、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei init` | 首次配置向导：生成 `jingmei.config.json`、`.env`（0600）和角色文件，实时验证 bot token；已有配置时拒绝运行，需要交互终端 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
 | `bun run jingmei doctor` | 只读自检：配置、`run_js` 沙箱、模型与凭据、Discord / Telegram token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg、字体、sqlite-vec、embedding 缓存；逐项 OK / WARN / FAIL，附一行修复提示，有 FAIL 时退出码非 0。不打印任何 token |
 | `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |

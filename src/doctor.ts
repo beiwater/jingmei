@@ -45,7 +45,7 @@ export interface DoctorProbes {
 	runJsSandbox(): Promise<void>;
 	modelRuntime(config: AppConfig): Promise<Pick<ModelRuntime, "getModel" | "hasConfiguredAuth">>;
 	/** `flags` are the Discord application flags, undefined when the response did not carry them. */
-	discordBot(token: string): Promise<{ username: string; flags?: number }>;
+	discordBot(token: string): Promise<{ id: string; username: string; flags?: number }>;
 	telegramBot(token: string): Promise<{ username: string; canReadAllGroupMessages?: boolean }>;
 	telegramChat(token: string, chatId: string): Promise<{ title?: string }>;
 	videoTranscoder(): { ffmpeg: boolean; ffprobe: boolean };
@@ -66,7 +66,7 @@ const MESSAGE_CONTENT_FLAGS = (1 << 18) | (1 << 19);
 const INTENT_FIX =
 	"Developer Portal > your application > Bot > Privileged Gateway Intents > enable Message Content Intent";
 
-type Attempt<T> = { ok: true; value: T } | { ok: false; reason: string; fix?: string };
+export type Attempt<T> = { ok: true; value: T } | { ok: false; reason: string; fix?: string };
 
 function describe(error: unknown, timeoutMs: number): { reason: string; fix?: string } {
 	if (error instanceof ProbeFailure) return { reason: error.message, ...(error.fix ? { fix: error.fix } : {}) };
@@ -79,7 +79,7 @@ function describe(error: unknown, timeoutMs: number): { reason: string; fix?: st
 
 class TimeoutError extends Error {}
 
-async function attempt<T>(timeoutMs: number, work: () => Promise<T> | T): Promise<Attempt<T>> {
+export async function attempt<T>(timeoutMs: number, work: () => Promise<T> | T): Promise<Attempt<T>> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		const value = await Promise.race([
@@ -380,7 +380,7 @@ export function defaultProbes(rootDir: string): DoctorProbes {
 				const client = new DiscordTransport({ token, applicationId: "10000000000000001" });
 				const identity = await client.getCurrentUser();
 				const flags = await client.getApplicationFlags().catch(() => undefined);
-				return { username: identity.username, ...(flags === undefined ? {} : { flags }) };
+				return { id: identity.id, username: identity.username, ...(flags === undefined ? {} : { flags }) };
 			}),
 		telegramBot: (token) =>
 			platformCall(async () => {
