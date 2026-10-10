@@ -232,28 +232,24 @@ export async function renderTextImage(
 	]);
 	const images = inlined.images;
 	const { markdown: prepared, plots } = preparePlots(placePictures(inlined.markdown, pictures, images));
-	const typst = await getCompiler().catch(() => {
-		throw new TextImageError("render_failed");
-	});
-	const shadows = [{ name: "doc.md", data: Buffer.from(prepared) }, ...images];
-	let svg: string;
 	try {
-		for (const shadow of shadows) typst.mapShadow(join(TYPST_DIR, shadow.name), Buffer.from(shadow.data));
-		const compiled = typst.compile({
-			mainFileContent: mainSource(
-				images.map((image) => image.name),
-				plots,
-			),
-		});
-		if (compiled.hasError() || !compiled.result) throw new TextImageError("render_failed");
-		svg = typst.svg(compiled.result);
-	} catch (error) {
-		throw error instanceof TextImageError ? error : new TextImageError("render_failed");
-	} finally {
-		for (const shadow of shadows) typst.unmapShadow(join(TYPST_DIR, shadow.name));
-		typst.evictCache(10);
-	}
-	try {
+		const typst = await getCompiler();
+		const shadows = [{ name: "doc.md", data: Buffer.from(prepared) }, ...images];
+		let svg: string;
+		try {
+			for (const shadow of shadows) typst.mapShadow(join(TYPST_DIR, shadow.name), Buffer.from(shadow.data));
+			const compiled = typst.compile({
+				mainFileContent: mainSource(
+					images.map((image) => image.name),
+					plots,
+				),
+			});
+			if (compiled.hasError() || !compiled.result) throw new TextImageError("render_failed");
+			svg = typst.svg(compiled.result);
+		} finally {
+			for (const shadow of shadows) typst.unmapShadow(join(TYPST_DIR, shadow.name));
+			typst.evictCache(10);
+		}
 		return { data: await toPng(svg), contentType: "image/png" };
 	} catch (error) {
 		throw error instanceof TextImageError ? error : new TextImageError("render_failed");
