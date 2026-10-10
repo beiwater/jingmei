@@ -15,7 +15,7 @@
 
 **中文** · [English](README.en.md)
 
-[快速开始](#快速开始) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [可选功能](#可选功能) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -93,7 +93,7 @@ cp personas/template.zh.md personas/luna.md
 ```
 
 1. 编辑 `personas/luna.md`，写下角色的身份、说话方式和边界。
-2. 编辑 `jingmei.config.json`：填入服务器/频道或群 ID，只用一个平台就删掉另一个平台的段落和角色里对应的账号；不用语音、Jev、话题或节日祝福就删掉 `voice`、`jev`、`events`、`celebrations`。字段见[配置参考](#配置参考)。
+2. 编辑 `jingmei.config.json`：填入 Discord 服务器 ID 和频道 ID。示例只有一个 Discord 角色；Telegram、语音、Jev 等见[可选功能](#可选功能)，字段见[配置参考](#配置参考)。
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
@@ -125,6 +125,8 @@ cp personas/template.zh.md personas/luna.md
 
 ## Telegram 设置
 
+示例配置没有 Telegram；先按[可选功能](#可选功能)加上 `telegram` 段和角色的 `telegram` 账号。
+
 1. 在 [@BotFather](https://t.me/BotFather) 用 `/newbot` 为每个角色创建 bot，token 写进 `.env`（如 `TELEGRAM_LUNA_TOKEN: …`）。
 2. 用 `/setprivacy` 把 privacy mode 设为 **Disable**，或把 bot 设为群管理员，否则它只能看到命令和 @ 它的消息。改完后把 bot 移出群再重新拉入才会生效。启动日志里的 `privacy_mode_enabled` 警告就是在提示这件事。
 3. 把 bot 拉进群，在 `telegram.chatIds` 填入群 ID（超级群形如 `-100…`）。不知道 ID 时，先随便填一个再启动，在群里发条消息，日志里的 `chat_ignored` 事件会带出 `chat_id`。
@@ -133,12 +135,87 @@ Telegram 的限制：**bot 看不到其他 bot 的消息**。同一个群里放�
 
 Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送；大段解释、长清单这类细节由角色放进 ```` ```fold ```` 代码块，显示成默认收起、点开才展开的引用（块内只保留粗体/斜体/删除线，代码以纯文字显示，链接写成“文字 (网址)”）。表情回应只能用 Bot API 允许的表情集合（其中没有 😂）。
 
+## 可选功能
+
+示例配置只有一个 Discord 角色。下面的功能都是在 `jingmei.config.json` 里按需加，每段写明需要的环境变量（写进 `.env`，格式 `key: value`）。字段含义见[配置参考](#配置参考)。
+
+**Telegram**：需要 `.env` 里的 `TELEGRAM_LUNA_TOKEN`（BotFather 给的 token）。顶层加 `telegram` 段，并在角色里加 `telegram` 账号；设置步骤见 [Telegram 设置](#telegram-设置)。
+
+```json
+"telegram": { "chatIds": ["-1001234567890"] }
+```
+
+```json
+"telegram": { "tokenEnv": "TELEGRAM_LUNA_TOKEN" }
+```
+
+第二段加在 `personas[]` 里对应角色对象中，与 `discord` 并列。
+
+**语音**（Fish Audio）：需要 `FISH_AUDIO_API_KEY`。`referenceId` 是 32 位十六进制音色 ID；角色默认使用语音，可用 `voiceEnabled: false` 关闭。
+
+```json
+"voice": {
+	"apiKeyEnv": "FISH_AUDIO_API_KEY",
+	"referenceId": "00000000000000000000000000000000",
+	"model": "s2.1-pro-free"
+}
+```
+
+**画图**：不需要环境变量，而是 Antigravity 的 OAuth 登录，步骤见[画图](#画图)。模型默认 `gemini-3.1-flash-image`，只有要换模型时才需要写：
+
+```json
+"imageGeneration": { "model": "gemini-3.1-flash-image" }
+```
+
+**看图模型**：角色的主模型不能看图时，用另一个模型描述图片。需要该 provider 的凭据（`bun run jingmei login <provider>` 或它的 API key 环境变量）。
+
+```json
+"visionModel": "openrouter/google/gemini-2.5-flash"
+```
+
+**K 线图**与**长文转图**：不需要环境变量，默认关闭，见 [K 线图](#k-线图)、[长文转图](#长文转图)。
+
+```json
+"kline": { "enabled": true },
+"textImage": { "enabled": true, "thresholdChars": 300 }
+```
+
+**Jev**（秒回表情、记忆排序，接话判断也会使用）：远程 Jev 需要 `TYPESAFE_API_KEY`；省略 `apiKeyEnv` 则只用进程内包装器，此时必须有 `DEEPSEEK_API_KEY`（或写 `localJev`），否则启动报配置错误。详见 [Jev](#jev)。
+
+```json
+"jev": {
+	"apiKeyEnv": "TYPESAFE_API_KEY",
+	"quickReactions": true,
+	"memoryScoring": true
+}
+```
+
+**话题**（`events`）：需要能解析出决策客户端，即上面的 Jev 配置，或 `DEEPSEEK_API_KEY`；`summaryModel` 的 provider 需要凭据。首次启动会下载 embedding 模型。
+
+```json
+"events": { "summaryModel": "deepseek/deepseek-flash" }
+```
+
+**节日与生日祝福**：不需要环境变量。`space` 与 `channelId` 必须是上面已配置的服务器/频道，`personaId` 是发祝福的角色。
+
+```json
+"celebrations": [
+	{
+		"space": "discord:000000000000000000",
+		"channelId": "000000000000000001",
+		"personaId": "luna",
+		"timeZone": "Australia/Sydney",
+		"calendar": "both"
+	}
+]
+```
+
 ## 命令
 
 | 功能 | Discord（斜杠命令） | Telegram（群内文字命令） |
 |---|---|---|
-| 查看命令 | `/help` | `/help` |
-| 在线角色 | `/status` | `/status` |
+| 查看命令和怎么和角色说话 | `/help` | `/help` |
+| 在线角色（暂停时会说明） | `/status` | `/status` |
 | 直接提问 | `/ask prompt:<问题>` | `/ask <问题>` |
 | 查看记忆 / 重新启用 | `/memory`、`/memory action:enable` | `/memory`、`/memory enable` |
 | 生日：查看 / 设置 / 清除 | `/birthday`、`/birthday date:09-25`、`/birthday date:clear` | `/birthday`、`/birthday 09-25`、`/birthday clear` |
@@ -146,7 +223,9 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 上下文用量与对话段上限（管理员） | `/context` | `/context` |
 | 手动压缩上下文（管理员） | `/compact` | `/compact` |
 
-- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。
+- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。两个平台的命令回执统一为中文，命令名不变。
+- 和角色说话不必用命令：@ 它、回复它的消息，或直接叫它的名字（`/help` 也会这样提示）。
+- bot 被运维暂停时，`/ask` 会直接说明已暂停；`/ask` 没有得到回答（出错、被扣留、超时）时，两个平台都会回一句“没有得到回答，请重试”。
 - 管理员命令只对该角色 `adminUserIds` 里的用户开放，也只注册给配置了管理员的角色。
 - Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。
@@ -296,7 +375,7 @@ personas/
 
 包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
 
-秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器；没有远程 key 且没有可用本地 LLM 时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
+秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器，但必须有可用的本地 LLM（`localJev` 段落或 `DEEPSEEK_API_KEY`），否则是配置错误。完全不写 `jev` 段落时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
 
 **成本**。远程 Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；远程请求超时 3 秒。它不消耗主模型的 token；本地包装器则消耗其配置的 LLM token。
 

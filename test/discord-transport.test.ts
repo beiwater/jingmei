@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	DiscordGatewayFatalError,
 	DiscordPlatformTransport,
 	DiscordTransport,
 	isSnowflake,
@@ -200,6 +201,37 @@ describe("Discord transport primitives", () => {
 		expect(sockets[1]?.sent[0]).toMatchObject({ op: 6, d: { session_id: "session-1", seq: 1 } });
 		await transport.stop();
 	}, 5000);
+
+	test.each([
+		[4004, "token"],
+		[4013, "Message Content Intent"],
+		[4014, "Message Content Intent"],
+	])("reports unrecoverable close code %d with an actionable hint and does not reconnect", async (code, hint) => {
+		const sockets: FakeSocket[] = [];
+		const errors: Error[] = [];
+		const transport = new DiscordTransport({
+			token: "test-only",
+			applicationId: "123456789012345678",
+			gatewayUrl: "wss://gateway.discord.gg",
+			webSocketFactory: () => {
+				const socket = new FakeSocket();
+				sockets.push(socket);
+				return socket as unknown as WebSocket;
+			},
+			onError: (error) => void errors.push(error),
+		});
+		await transport.start();
+		sockets[0]?.open();
+		sockets[0]?.close(code);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(errors).toHaveLength(1);
+		const error = errors[0];
+		expect(error).toBeInstanceOf(DiscordGatewayFatalError);
+		expect((error as DiscordGatewayFatalError).code).toBe(code);
+		expect((error as DiscordGatewayFatalError).hint).toContain(hint);
+		expect(sockets).toHaveLength(1);
+		await transport.stop();
+	});
 
 	test("delivers messages and interactions only from allowed channels or their threads", async () => {
 		const allowed = "223456789012345678";

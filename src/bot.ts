@@ -44,7 +44,13 @@ async function main(): Promise<void> {
 	const memberMemory = new MemberMemory(db);
 	const botState = new BotState(db);
 	// Platform handlers only fire after `platform.start()`, by which time `core` exists.
-	const deps = { config, personas, memberMemory, getCore: (): Conversation => core };
+	const deps = {
+		config,
+		personas,
+		memberMemory,
+		getCore: (): Conversation => core,
+		isPaused: () => botState.pausedAt() !== null,
+	};
 	// Each factory verifies its tokens and fills `persona.accounts[platform]` before returning.
 	const platforms = [
 		...(config.discord ? [await createDiscordPlatform(deps)] : []),
@@ -175,8 +181,8 @@ async function main(): Promise<void> {
 		botState.stopRun();
 		db.close();
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
-	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
+	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
+	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
 
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.

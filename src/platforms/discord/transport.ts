@@ -58,6 +58,26 @@ const GUILD_MESSAGES = 1 << 9;
 const MESSAGE_CONTENT = 1 << 15;
 const DEFAULT_INTENTS = GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT;
 
+/** Gateway close codes that reconnecting cannot fix; `hint` tells the operator what to change. */
+const FATAL_CLOSE_HINTS: Readonly<Record<number, string>> = {
+	4004: "Discord rejected the bot token. Check the persona's token variable in .env.",
+	4010: "Discord rejected the gateway shard configuration.",
+	4011: "Discord requires sharding for this bot.",
+	4012: "Discord rejected the gateway API version.",
+	4013: "Discord rejected the requested intents. Enable Message Content Intent in the Discord Developer Portal (Bot > Privileged Gateway Intents).",
+	4014: "Message Content Intent is not enabled. Enable it in the Discord Developer Portal (Bot > Privileged Gateway Intents).",
+};
+
+/** The Gateway closed with a code that no reconnect can recover from. */
+export class DiscordGatewayFatalError extends Error {
+	override readonly name = "DiscordGatewayFatalError";
+	readonly hint: string;
+	constructor(readonly code: number) {
+		super(`Discord Gateway closed with unrecoverable code ${code}`);
+		this.hint = FATAL_CLOSE_HINTS[code] ?? "";
+	}
+}
+
 export function isSnowflake(value: unknown): value is Snowflake {
 	return typeof value === "string" && /^\d{17,20}$/.test(value);
 }
@@ -288,14 +308,8 @@ export class DiscordTransport {
 				if (this.socket === socket) this.socket = undefined;
 				this.clearHeartbeat();
 				if (!this.stopped && !this.intentionalClose) {
-					if (
-						event.code === 4004 ||
-						event.code === 4010 ||
-						event.code === 4011 ||
-						event.code === 4013 ||
-						event.code === 4014
-					) {
-						this.options.onError?.(new Error(`Discord Gateway closed with unrecoverable code ${event.code}`));
+					if (event.code in FATAL_CLOSE_HINTS) {
+						this.options.onError?.(new DiscordGatewayFatalError(event.code));
 						this.stopped = true;
 					} else if (event.code === 4007 || event.code === 4009) {
 						this.sessionId = undefined;
