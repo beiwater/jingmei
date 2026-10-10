@@ -58,6 +58,15 @@ function errorsOf(run: () => unknown): readonly string[] {
 }
 
 describe("config", () => {
+	test("the shipped example config loads with the shipped .env.example", () => {
+		const example = JSON.parse(readFileSync(join(import.meta.dir, "../jingmei.config.example.json"), "utf8"));
+		const exampleEnv = parseEnvFile(join(import.meta.dir, "../.env.example"));
+		const config = validateConfig(example, root, exampleEnv);
+		expect(config.personas.map((persona) => persona.id)).toEqual(["luna"]);
+		expect(config.discord).toBeDefined();
+		expect(config.telegram).toBeUndefined();
+	});
+
 	test("kline charts are off unless enabled, and the switch must be a boolean", () => {
 		expect(validateConfig(base(), root, env).kline).toBeUndefined();
 		expect(validateConfig(base({ kline: { enabled: false } }), root, env).kline).toBeUndefined();

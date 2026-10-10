@@ -15,7 +15,7 @@
 
 **中文** · [English](README.en.md)
 
-[快速开始](#快速开始) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [可选功能](#可选功能) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -93,7 +93,7 @@ cp personas/template.zh.md personas/luna.md
 ```
 
 1. 编辑 `personas/luna.md`，写下角色的身份、说话方式和边界。
-2. 编辑 `jingmei.config.json`：填入服务器/频道或群 ID，只用一个平台就删掉另一个平台的段落和角色里对应的账号；不用语音、Jev、话题或节日祝福就删掉 `voice`、`jev`、`events`、`celebrations`。字段见[配置参考](#配置参考)。
+2. 编辑 `jingmei.config.json`：填入 Discord 服务器 ID 和频道 ID。示例只有一个 Discord 角色；Telegram、语音、Jev 等见[可选功能](#可选功能)，字段见[配置参考](#配置参考)。
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
@@ -125,6 +125,8 @@ cp personas/template.zh.md personas/luna.md
 
 ## Telegram 设置
 
+示例配置没有 Telegram；先按[可选功能](#可选功能)加上 `telegram` 段和角色的 `telegram` 账号。
+
 1. 在 [@BotFather](https://t.me/BotFather) 用 `/newbot` 为每个角色创建 bot，token 写进 `.env`（如 `TELEGRAM_LUNA_TOKEN: …`）。
 2. 用 `/setprivacy` 把 privacy mode 设为 **Disable**，或把 bot 设为群管理员，否则它只能看到命令和 @ 它的消息。改完后把 bot 移出群再重新拉入才会生效。启动日志里的 `privacy_mode_enabled` 警告就是在提示这件事。
 3. 把 bot 拉进群，在 `telegram.chatIds` 填入群 ID（超级群形如 `-100…`）。不知道 ID 时，先随便填一个再启动，在群里发条消息，日志里的 `chat_ignored` 事件会带出 `chat_id`。
@@ -132,6 +134,81 @@ cp personas/template.zh.md personas/luna.md
 Telegram 的限制：**bot 看不到其他 bot 的消息**。同一个群里放多个角色时，它们互相看不到对方的回复，每个角色只知道群友说了什么和自己说了什么。Discord 没有这个限制。
 
 Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送；大段解释、长清单这类细节由角色放进 ```` ```fold ```` 代码块，显示成默认收起、点开才展开的引用（块内只保留粗体/斜体/删除线，代码以纯文字显示，链接写成“文字 (网址)”）。表情回应只能用 Bot API 允许的表情集合（其中没有 😂）。
+
+## 可选功能
+
+示例配置只有一个 Discord 角色。下面的功能都是在 `jingmei.config.json` 里按需加，每段写明需要的环境变量（写进 `.env`，格式 `key: value`）。字段含义见[配置参考](#配置参考)。
+
+**Telegram**：需要 `.env` 里的 `TELEGRAM_LUNA_TOKEN`（BotFather 给的 token）。顶层加 `telegram` 段，并在角色里加 `telegram` 账号；设置步骤见 [Telegram 设置](#telegram-设置)。
+
+```json
+"telegram": { "chatIds": ["-1001234567890"] }
+```
+
+```json
+"telegram": { "tokenEnv": "TELEGRAM_LUNA_TOKEN" }
+```
+
+第二段加在 `personas[]` 里对应角色对象中，与 `discord` 并列。
+
+**语音**（Fish Audio）：需要 `FISH_AUDIO_API_KEY`。`referenceId` 是 32 位十六进制音色 ID；角色默认使用语音，可用 `voiceEnabled: false` 关闭。
+
+```json
+"voice": {
+	"apiKeyEnv": "FISH_AUDIO_API_KEY",
+	"referenceId": "00000000000000000000000000000000",
+	"model": "s2.1-pro-free"
+}
+```
+
+**画图**：不需要环境变量，而是 Antigravity 的 OAuth 登录，步骤见[画图](#画图)。模型默认 `gemini-3.1-flash-image`，只有要换模型时才需要写：
+
+```json
+"imageGeneration": { "model": "gemini-3.1-flash-image" }
+```
+
+**看图模型**：角色的主模型不能看图时，用另一个模型描述图片。需要该 provider 的凭据（`bun run jingmei login <provider>` 或它的 API key 环境变量）。
+
+```json
+"visionModel": "openrouter/google/gemini-2.5-flash"
+```
+
+**K 线图**与**长文转图**：不需要环境变量，默认关闭，见 [K 线图](#k-线图)、[长文转图](#长文转图)。
+
+```json
+"kline": { "enabled": true },
+"textImage": { "enabled": true, "thresholdChars": 300 }
+```
+
+**Jev**（秒回表情、记忆排序，接话判断也会使用）：远程 Jev 需要 `TYPESAFE_API_KEY`；省略 `apiKeyEnv` 则只用进程内包装器，此时必须有 `DEEPSEEK_API_KEY`（或写 `localJev`），否则启动报配置错误。详见 [Jev](#jev)。
+
+```json
+"jev": {
+	"apiKeyEnv": "TYPESAFE_API_KEY",
+	"quickReactions": true,
+	"memoryScoring": true
+}
+```
+
+**话题**（`events`）：需要能解析出决策客户端，即上面的 Jev 配置，或 `DEEPSEEK_API_KEY`；`summaryModel` 的 provider 需要凭据。首次启动会下载 embedding 模型。
+
+```json
+"events": { "summaryModel": "deepseek/deepseek-flash" }
+```
+
+**节日与生日祝福**：不需要环境变量。`space` 与 `channelId` 必须是上面已配置的服务器/频道，`personaId` 是发祝福的角色。
+
+```json
+"celebrations": [
+	{
+		"space": "discord:000000000000000000",
+		"channelId": "000000000000000001",
+		"personaId": "luna",
+		"timeZone": "Australia/Sydney",
+		"calendar": "both"
+	}
+]
+```
 
 ## 命令
 

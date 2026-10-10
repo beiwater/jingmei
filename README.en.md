@@ -15,7 +15,7 @@
 
 [中文](README.md) · **English**
 
-[Quick start](#quick-start) · [Commands](#commands) · [Operator commands](#operator-commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Optional features](#optional-features) · [Commands](#commands) · [Operator commands](#operator-commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -93,7 +93,7 @@ cp personas/template.en.md personas/luna.md
 ```
 
 1. Edit `personas/luna.md`: the character's identity, voice and boundaries.
-2. Edit `jingmei.config.json`: fill in server/channel or group IDs. If you use only one platform, delete the other platform's section and the matching account in each persona; delete `voice`, `jev`, `events` or `celebrations` if you don't want them. Fields are listed in [Configuration reference](#configuration-reference).
+2. Edit `jingmei.config.json`: fill in your Discord server ID and channel ID. The example has a single Discord character; Telegram, voice, Jev and the rest are in [Optional features](#optional-features), and fields are in [Configuration reference](#configuration-reference).
 3. Edit `.env`: bot tokens, `ROUTING_SECRET` (any long random string) and API keys. The format is `key: value`, not `KEY=value`.
 4. Provide model credentials, either way:
    - The example persona uses DeepSeek `deepseek-flash`; just set `DEEPSEEK_API_KEY` in `.env`. On startup a catalog entry for this model (without the key) is written to `data/pi-agent/models.json`.
@@ -125,6 +125,8 @@ On startup each character registers its slash commands in its servers. Replies u
 
 ## Telegram setup
 
+The example config has no Telegram; first add the `telegram` section and the persona's `telegram` account from [Optional features](#optional-features).
+
 1. Create one bot per character with `/newbot` at [@BotFather](https://t.me/BotFather) and put the token in `.env` (e.g. `TELEGRAM_LUNA_TOKEN: …`).
 2. Use `/setprivacy` to set privacy mode to **Disable**, or make the bot a group admin; otherwise it only sees commands and messages addressed to it. After changing it, remove the bot from the group and add it again. The `privacy_mode_enabled` warning in the startup log points at this.
 3. Add the bot to the group and put the group ID (supergroups look like `-100…`) in `telegram.chatIds`. If you don't know it, start with any placeholder, send a message in the group, and read `chat_id` from the `chat_ignored` log event.
@@ -132,6 +134,81 @@ On startup each character registers its slash commands in its servers. Replies u
 Telegram limitation: **bots cannot see other bots' messages**. With several characters in one group they do not see each other's replies; each one knows only what members said and what it said itself. Discord has no such limit.
 
 Telegram replies convert Markdown into message entities and are split above 4096 characters. Characters put long explanations and lists in a ```` ```fold ```` block, shown as a quote that stays collapsed until tapped (inside it only bold/italic/strikethrough survive, code shows as plain text and links are written as "label (url)"). Reactions are limited to the emoji set allowed by the Bot API (which has no 😂).
+
+## Optional features
+
+The example config has one Discord character. Everything below is added to `jingmei.config.json` as needed; each snippet says which environment variable it needs (put it in `.env`, `key: value` format). Field meanings are in the [Configuration reference](#configuration-reference).
+
+**Telegram**: needs `TELEGRAM_LUNA_TOKEN` in `.env` (the BotFather token). Add a top-level `telegram` section and a `telegram` account on the persona; setup steps are in [Telegram setup](#telegram-setup).
+
+```json
+"telegram": { "chatIds": ["-1001234567890"] }
+```
+
+```json
+"telegram": { "tokenEnv": "TELEGRAM_LUNA_TOKEN" }
+```
+
+The second snippet goes in the persona object under `personas[]`, next to `discord`.
+
+**Voice** (Fish Audio): needs `FISH_AUDIO_API_KEY`. `referenceId` is a 32-hex voice ID; a persona uses voice by default and can opt out with `voiceEnabled: false`.
+
+```json
+"voice": {
+	"apiKeyEnv": "FISH_AUDIO_API_KEY",
+	"referenceId": "00000000000000000000000000000000",
+	"model": "s2.1-pro-free"
+}
+```
+
+**Drawing**: needs no environment variable, but an Antigravity OAuth login; steps in [Drawing](#drawing). The model defaults to `gemini-3.1-flash-image`, so write this only to change it:
+
+```json
+"imageGeneration": { "model": "gemini-3.1-flash-image" }
+```
+
+**Vision model**: describes images with another model when a persona's main model cannot see images. Needs credentials for that provider (`bun run jingmei login <provider>` or its API key variable).
+
+```json
+"visionModel": "openrouter/google/gemini-2.5-flash"
+```
+
+**Candlestick charts** and **long text as an image**: no environment variable; both are off by default. See [Candlestick charts](#candlestick-charts) and [Long text as an image](#long-text-as-an-image).
+
+```json
+"kline": { "enabled": true },
+"textImage": { "enabled": true, "thresholdChars": 300 }
+```
+
+**Jev** (quick reactions, memory ranking; participation decisions use it too): remote Jev needs `TYPESAFE_API_KEY`; omit `apiKeyEnv` to use only the in-process wrapper, which then requires `DEEPSEEK_API_KEY` (or a `localJev` section), otherwise startup fails with a configuration error. See [Jev](#jev).
+
+```json
+"jev": {
+	"apiKeyEnv": "TYPESAFE_API_KEY",
+	"quickReactions": true,
+	"memoryScoring": true
+}
+```
+
+**Topics** (`events`): needs a resolvable decision client, that is the Jev section above or `DEEPSEEK_API_KEY`; the `summaryModel` provider needs credentials. The first start downloads an embedding model.
+
+```json
+"events": { "summaryModel": "deepseek/deepseek-flash" }
+```
+
+**Holiday and birthday greetings**: no environment variable. `space` and `channelId` must be a server/channel you configured above; `personaId` is the character that posts.
+
+```json
+"celebrations": [
+	{
+		"space": "discord:000000000000000000",
+		"channelId": "000000000000000001",
+		"personaId": "luna",
+		"timeZone": "Australia/Sydney",
+		"calendar": "both"
+	}
+]
+```
 
 ## Commands
 
