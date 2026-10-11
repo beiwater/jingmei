@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { Solar } from "lunar-typescript";
+import { Solar, SolarUtil } from "lunar-typescript";
 import { platformOf } from "./ids.ts";
 import type { PersonaAccount, Platform, PlatformTransport, SpaceId } from "./types.ts";
 
@@ -24,7 +24,6 @@ export interface CelebrationSchedulerOptions {
 	transports: ReadonlyMap<Platform, PlatformTransport>;
 	/** A paused bot sends nothing; greetings due today go out after resume. */
 	isPaused: () => boolean;
-	now?: () => Date;
 	onError?: (error: unknown) => void;
 }
 
@@ -91,10 +90,8 @@ function holidayOn(local: LocalDateTime, calendar: CelebrationTarget["calendar"]
 		if (local.month === 12 && local.day === 25) found.push("圣诞节");
 		if (local.month === 12 && local.day === 26) found.push("Boxing Day");
 		const easter = easterSunday(local.year);
-		const easterDate = new Date(Date.UTC(local.year, easter.month - 1, easter.day));
-		const goodFridayDate = new Date(easterDate.getTime() - 2 * 24 * 60 * 60 * 1_000);
-		if (local.month === goodFridayDate.getUTCMonth() + 1 && local.day === goodFridayDate.getUTCDate())
-			found.push("Good Friday");
+		const goodFriday = Solar.fromYmd(local.year, easter.month, easter.day).next(-2);
+		if (local.month === goodFriday.getMonth() && local.day === goodFriday.getDay()) found.push("Good Friday");
 		if (local.month === easter.month && local.day === easter.day) found.push("Easter Sunday");
 	}
 	return found;
@@ -114,13 +111,10 @@ export class CelebrationScheduler {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private stopped = true;
 	private running: Promise<void> | undefined;
-	private readonly now: () => Date;
 
 	constructor(private readonly options: CelebrationSchedulerOptions) {
-		this.now = options.now ?? (() => new Date());
 		for (const target of options.targets) {
-			// Fail during startup on a misspelled zone or unserved platform, not on the first birthday.
-			new Intl.DateTimeFormat("en", { timeZone: target.timeZone });
+			// Fail during startup on an unserved platform, not on the first birthday.
 			if (!options.transports.has(platformOf(target.spaceId)))
 				throw new Error(`celebration target ${target.spaceId} has no running platform`);
 		}
@@ -155,10 +149,9 @@ export class CelebrationScheduler {
 		await this.running;
 	}
 
-	async tick(now: Date = this.now()): Promise<void> {
-		if (!Number.isFinite(now.getTime())) throw new Error("now must be a valid Date");
+	async tick(): Promise<void> {
 		if (this.running) return this.running;
-		const task = this.deliverForDate(now);
+		const task = this.deliverForDate(new Date());
 		this.running = task;
 		try {
 			await task;
@@ -175,13 +168,10 @@ export class CelebrationScheduler {
 			const localDate = `${local.year.toString().padStart(4, "0")}-${local.month.toString().padStart(2, "0")}-${local.day.toString().padStart(2, "0")}`;
 			const birthdays = [...this.options.listBirthdays(target.spaceId, local.month, local.day)];
 			// A February 29 birthday is celebrated on February 28 in non-leap years.
-			if (local.month === 2 && local.day === 28 && !isLeapYear(local.year))
+			if (local.month === 2 && local.day === 28 && !SolarUtil.isLeapYear(local.year))
 				birthdays.push(...this.options.listBirthdays(target.spaceId, 2, 29));
 			const transport = this.options.transports.get(platformOf(target.spaceId))!;
-			const seenUsers = new Set<string>();
 			for (const member of birthdays) {
-				if (seenUsers.has(member.userId)) continue;
-				seenUsers.add(member.userId);
 				// Exactly one notified recipient: the member whose birthday it is.
 				const name = member.name
 					.replace(/[\r\n]/g, " ")
@@ -256,8 +246,4 @@ export class CelebrationScheduler {
 			throw error;
 		}
 	}
-}
-
-function isLeapYear(year: number): boolean {
-	return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }

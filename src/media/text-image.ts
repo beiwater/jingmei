@@ -5,6 +5,7 @@ import type { NodeCompiler } from "@myriaddreamin/typst-ts-node-compiler";
 import { parsePublicHttpUrl } from "../net/public-url.ts";
 import { readBoundedBody } from "../net/read-bounded-body.ts";
 import { preparePlots } from "./plot.ts";
+import { sniffImageMime } from "./sniff-image.ts";
 
 /** Longest Markdown source one image may be rendered from. */
 export const TEXT_IMAGE_MAX_CHARS = 8_000;
@@ -57,14 +58,9 @@ interface LoadedImage {
 	data: Uint8Array;
 }
 
-function imageExtension(bytes: Uint8Array): "png" | "jpg" | "gif" | "webp" | null {
-	const at = (index: number) => bytes[index];
-	if (at(0) === 0x89 && at(1) === 0x50 && at(2) === 0x4e && at(3) === 0x47) return "png";
-	if (at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return "jpg";
-	if (at(0) === 0x47 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x38) return "gif";
-	if (at(0) === 0x52 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x46 && at(8) === 0x57 && at(9) === 0x45)
-		return "webp";
-	return null;
+function imageExtension(bytes: Uint8Array): string | null {
+	const mime = sniffImageMime(bytes);
+	return mime && (mime === "image/jpeg" ? "jpg" : mime.slice(6));
 }
 
 /** One public image, or null. Redirects are refused so a public URL cannot bounce to a private host. */
@@ -236,28 +232,24 @@ export async function renderTextImage(
 	]);
 	const images = inlined.images;
 	const { markdown: prepared, plots } = preparePlots(placePictures(inlined.markdown, pictures, images));
-	const typst = await getCompiler().catch(() => {
-		throw new TextImageError("render_failed");
-	});
-	const shadows = [{ name: "doc.md", data: Buffer.from(prepared) }, ...images];
-	let svg: string;
 	try {
-		for (const shadow of shadows) typst.mapShadow(join(TYPST_DIR, shadow.name), Buffer.from(shadow.data));
-		const compiled = typst.compile({
-			mainFileContent: mainSource(
-				images.map((image) => image.name),
-				plots,
-			),
-		});
-		if (compiled.hasError() || !compiled.result) throw new TextImageError("render_failed");
-		svg = typst.svg(compiled.result);
-	} catch (error) {
-		throw error instanceof TextImageError ? error : new TextImageError("render_failed");
-	} finally {
-		for (const shadow of shadows) typst.unmapShadow(join(TYPST_DIR, shadow.name));
-		typst.evictCache(10);
-	}
-	try {
+		const typst = await getCompiler();
+		const shadows = [{ name: "doc.md", data: Buffer.from(prepared) }, ...images];
+		let svg: string;
+		try {
+			for (const shadow of shadows) typst.mapShadow(join(TYPST_DIR, shadow.name), Buffer.from(shadow.data));
+			const compiled = typst.compile({
+				mainFileContent: mainSource(
+					images.map((image) => image.name),
+					plots,
+				),
+			});
+			if (compiled.hasError() || !compiled.result) throw new TextImageError("render_failed");
+			svg = typst.svg(compiled.result);
+		} finally {
+			for (const shadow of shadows) typst.unmapShadow(join(TYPST_DIR, shadow.name));
+			typst.evictCache(10);
+		}
 		return { data: await toPng(svg), contentType: "image/png" };
 	} catch (error) {
 		throw error instanceof TextImageError ? error : new TextImageError("render_failed");

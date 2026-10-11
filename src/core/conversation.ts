@@ -83,8 +83,10 @@ export interface ConversationOptions {
 	/** Text replies longer than `thresholdChars` are refused and must be sent as a `send_reply` text image. */
 	textImage?: { render: TextImageRenderer; thresholdChars: number };
 	kline?: KlineRenderer;
-	memberMemory: MemberMemory;
-	soulStore: SoulStore;
+	/** Present when `features.memory`: passive member observation plus the memory tools. */
+	memberMemory?: MemberMemory;
+	/** Present when `features.soul`: the `update_soul` tool and the injected private soul notes. */
+	soulStore?: SoulStore;
 	jev?: JevIntegration;
 	events?: EventTracker;
 	/** Auxiliary image describer for personas whose model cannot see images. */
@@ -193,8 +195,8 @@ export class Conversation implements ConversationCore {
 	private readonly imageGenerator?: ImageGenerator;
 	private readonly textImage?: ConversationOptions["textImage"];
 	private readonly kline?: ConversationOptions["kline"];
-	private readonly memberMemory: MemberMemory;
-	private readonly soulStore: SoulStore;
+	private readonly memberMemory?: MemberMemory;
+	private readonly soulStore?: SoulStore;
 	private readonly visionModel?: ConversationOptions["visionModel"];
 	private readonly quickReactions?: QuickReactions;
 	private readonly jev?: JevIntegration;
@@ -381,7 +383,7 @@ export class Conversation implements ConversationCore {
 	private async compactSession(session: AgentSession, scope: SoulScope) {
 		let pendingBefore: string | null = null;
 		try {
-			pendingBefore = this.soulStore.readPending(scope);
+			pendingBefore = this.soulStore?.readPending(scope) ?? null;
 		} catch (error) {
 			log.error("core", "soul_pending_read_failed", {
 				persona_id: scope.personaId,
@@ -442,7 +444,7 @@ export class Conversation implements ConversationCore {
 			return { route: { personaId: null, reason: "nobody" }, messageStored: true };
 		}
 		const botUserIds = new Set(this.personas.flatMap((persona) => persona.accounts[message.platform]?.userId ?? []));
-		if (!message.isBot) {
+		if (!message.isBot && this.memberMemory) {
 			try {
 				this.memberMemory.observe(message, botUserIds);
 			} catch (error) {
@@ -849,7 +851,7 @@ export class Conversation implements ConversationCore {
 			return offerRewrite
 				? { reason: "leak_pattern", rewrite: REWRITE_HINTS.leak_pattern }
 				: { reason: "leak_pattern" };
-		if (!this.jev) return null;
+		if (!this.jev || this.jev.audit === false) return null;
 		const input = { reply, message: message.content, recent };
 		let natural: number;
 		try {
@@ -1023,6 +1025,7 @@ export class Conversation implements ConversationCore {
 		spaceId: SpaceId,
 		channelId: string,
 	): Promise<string | null> {
+		if (!this.soulStore) return null;
 		try {
 			const snapshot = this.soulStore.readPending({ personaId: persona.id, spaceId, channelId });
 			const pending = snapshot.trim();
@@ -1063,7 +1066,7 @@ export class Conversation implements ConversationCore {
 	}
 
 	private async promotePendingSoulAfterCompaction(scope: SoulScope, expectedPending: string | null): Promise<void> {
-		if (expectedPending === null) return;
+		if (expectedPending === null || !this.soulStore) return;
 		const key = sessionKey(scope.personaId, scope.spaceId, scope.channelId);
 		try {
 			const promoted = this.soulStore.promotePending(scope, expectedPending);
@@ -1124,14 +1127,18 @@ export class Conversation implements ConversationCore {
 					kline: !!this.kline,
 					events: !!this.events,
 					history: !!this.messageIndex,
+					memory: !!this.memberMemory,
+					soul: !!this.soulStore,
 					...(this.textImage ? { textImageChars: this.textImage.thresholdChars } : {}),
 				},
 				{ name: persona.name, aliases: persona.aliases, account: persona.accounts[transport.platform] },
 			),
 			systemPromptOverride: (base) => {
+				const soulStore = this.soulStore;
+				if (!soulStore) return base;
 				const revision = this.soulRevisions.get(key) ?? 0;
 				try {
-					const formalSoul = this.soulStore.read({ personaId: persona.id, spaceId, channelId }).trim();
+					const formalSoul = soulStore.read({ personaId: persona.id, spaceId, channelId }).trim();
 					this.sessionFormalSouls.set(key, formalSoul);
 					this.sessionSoulRevisions.set(key, revision);
 					return formalSoul ? `${base ?? ""}\n\n## 私人 Soul 备忘（参考信息）\n\n${formalSoul}` : base;
@@ -1183,9 +1190,13 @@ export class Conversation implements ConversationCore {
 			noTools: "builtin",
 			customTools: [
 				...(reactTool ? [createReactionTool(scope, this.db)] : []),
-				createRememberMemberFactTool(scope, this.memberMemory),
-				createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
-				createUpdateSoulTool(scope, this.soulStore),
+				...(this.memberMemory
+					? [
+							createRememberMemberFactTool(scope, this.memberMemory),
+							createRecallMemberMemoryTool(scope, this.memberMemory, this.scoreRelevance),
+						]
+					: []),
+				...(this.soulStore ? [createUpdateSoulTool(scope, this.soulStore)] : []),
 				...(this.webSearchApiKey ? [createWebSearchTool(this.webSearchApiKey)] : []),
 				createSendReplyTool(scope, {
 					...(voice ? { voice } : {}),
@@ -1358,6 +1369,7 @@ export class Conversation implements ConversationCore {
 	}
 
 	private async promotePendingForNewSegment(scope: SoulScope): Promise<void> {
+		if (!this.soulStore) return;
 		let pending: string;
 		try {
 			pending = this.soulStore.readPending(scope);
@@ -1466,9 +1478,8 @@ export class Conversation implements ConversationCore {
 
 	/** One uncached, non-retried auxiliary vision call; any failure just means no description. */
 	private async describeImage(image: InboundImage): Promise<string | undefined> {
-		const selection = this.visionModel;
-		const model = selection && this.modelRuntime.getModel(selection.provider, selection.model);
-		if (!model) return undefined;
+		// Only called with a visionModel, which bot.ts verified against the model runtime at startup.
+		const model = this.modelRuntime.getModel(this.visionModel!.provider, this.visionModel!.model)!;
 		try {
 			const content: ImageContent = { type: "image", data: image.base64, mimeType: image.mimeType };
 			const reply = await this.modelRuntime.completeSimple(

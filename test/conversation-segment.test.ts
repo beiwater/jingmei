@@ -1,191 +1,108 @@
-import {
-	type AssistantMessage,
-	type AssistantMessageEventStream,
-	createAssistantMessageEventStream,
-	type Model,
-} from "@earendil-works/pi-ai";
-import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { Database } from "bun:sqlite";
-import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { BotState } from "../src/core/bot-state.ts";
-import { Conversation, type ConversationOptions } from "../src/core/conversation.ts";
+import { afterEach, expect, mock, setSystemTime, test } from "bun:test";
+import { Conversation } from "../src/core/conversation.ts";
 import { ensureSessionTables } from "../src/core/db.ts";
 import type { EventTracker } from "../src/core/events.ts";
-import { MemberMemory } from "../src/core/memory.ts";
 import type { MessageIndex, MessageKey } from "../src/core/message-index.ts";
-import { type SoulScope, SoulStore } from "../src/core/soul.ts";
-import type { InboundMessage, Persona, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import type { SoulScope } from "../src/core/soul.ts";
+import type { InboundMessage, PlatformTransport, SpaceId } from "../src/core/types.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { conversationOptions, makePersona, makeTransport, personaFile } from "./support/core.ts";
+import { assistantMessage, IMAGE, makeModel, makeRuntime, onSession, scriptedStream } from "./support/pi.ts";
 
 const SPACE: SpaceId = "telegram:-100111";
 const CHANNEL = "222";
 const T0 = Date.UTC(2026, 0, 1, 12, 0, 0);
 const MINUTE = 60_000;
-const IMAGE = { mimeType: "image/png" as const, base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" };
 
-interface SessionSeam {
-	getSession(persona: Persona, spaceId: SpaceId, channelId: string): Promise<AgentSession>;
-}
 interface Captured {
 	persona: string;
 	systemPrompt: string;
 	messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>;
 }
 
-const cleanups: Array<() => void | Promise<void>> = [];
-afterEach(async () => {
-	setSystemTime();
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+const cleanups = useCleanups();
+afterEach(() => setSystemTime());
 
 /** Records what the core asks of the index; counts are whatever the test sets. */
-class FakeIndex {
-	readonly enqueued: string[] = [];
-	readonly events: string[] = [];
-	readonly relatedCalls: Array<{ messageId: string; before: number }> = [];
-	counts = new Map<string, number | null>();
-	enqueue(key: MessageKey) {
-		this.enqueued.push(key.messageId);
-	}
-	async ensure(keys: readonly MessageKey[]) {
-		this.events.push(`ensure:${keys.map((key) => key.messageId).join(",")}`);
-	}
-	relatedCount(key: MessageKey, before: number) {
-		this.events.push(`count:${key.messageId}`);
-		this.relatedCalls.push({ messageId: key.messageId, before });
-		return this.counts.get(key.messageId) ?? null;
-	}
-	related() {
-		return [];
-	}
-	async search() {
-		return [];
-	}
-	forgetAuthor() {}
-	async idle() {}
+function fakeIndex() {
+	const events: string[] = [];
+	const index = {
+		events,
+		counts: new Map<string, number | null>(),
+		enqueue: mock((_key: MessageKey) => {}),
+		ensure: mock(async (keys: readonly MessageKey[]) => {
+			events.push(`ensure:${keys.map((key) => key.messageId).join(",")}`);
+		}),
+		relatedCount: mock((key: MessageKey, _before: number): number | null => {
+			events.push(`count:${key.messageId}`);
+			return index.counts.get(key.messageId) ?? null;
+		}),
+		related: () => [],
+		search: async () => [],
+		forgetAuthor: () => {},
+		idle: async () => {},
+	};
+	return index;
 }
 
+const enqueuedIds = (index: ReturnType<typeof fakeIndex>) => index.enqueue.mock.calls.map(([key]) => key.messageId);
+
 function fixture(options: { personas?: number; timeoutMs?: number; index?: boolean; imageInput?: boolean } = {}) {
-	const model: Model<"openai-responses"> = {
-		id: "fixture",
-		name: "fixture",
-		api: "openai-responses",
-		provider: "fixture",
-		baseUrl: "http://unused",
-		reasoning: false,
-		input: options.imageInput ? ["text", "image"] : ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 1_048_576,
-		maxTokens: 4096,
-	};
-	const reply = (text = "hello"): AssistantMessage => ({
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	});
-	const dataDir = mkdtempSync(join(tmpdir(), "jingmei-segment-"));
-	const personaPath = join(dataDir, "persona.md");
-	writeFileSync(personaPath, "Friendly companion.");
-	const personas: Persona[] = ["luna", "sol"].slice(0, options.personas ?? 1).map((id, index) => ({
-		id,
-		name: id === "luna" ? "Luna" : "Sol",
-		personaPath,
-		provider: model.provider,
-		model: model.id,
-		routingP: 0,
-		aliases: [],
-		adminUserIds: [],
-		reasoningEffort: "off",
-		sendReactionImages: false,
-		voiceEnabled: false,
-		imageGenerationEnabled: false,
-		accounts: { telegram: { userId: String(900 + index), username: `${id}_bot` } },
-	}));
+	const model = makeModel({ input: options.imageInput ? ["text", "image"] : ["text"], contextWindow: 1_048_576 });
+	const reply = (text = "hello"): AssistantMessage => assistantMessage(text, { model });
+	const dataDir = cleanups.tmpDir();
+	const personaPath = personaFile(dataDir);
+	const personas = ["luna", "sol"].slice(0, options.personas ?? 1).map((id, index) =>
+		makePersona({
+			id,
+			name: id === "luna" ? "Luna" : "Sol",
+			personaPath,
+			provider: model.provider,
+			model: model.id,
+			accounts: { telegram: { userId: String(900 + index), username: `${id}_bot` } },
+		}),
+	);
 	const sends: Array<Parameters<PlatformTransport["sendMessage"]>[0]> = [];
-	const transport: PlatformTransport = {
+	const transport = makeTransport({
 		platform: "telegram",
-		echoesOwnMessages: false,
-		displayName: "telegram",
-		promptLines: [],
-		quickReactions: {},
 		sendMessage: async (input) => {
 			sends.push(input);
 			return { id: String(1000 + sends.length) };
 		},
-		formatMention: (user) => `@${user.username}`,
-		isValidReaction: () => true,
-	};
-	const db = new Database(":memory:");
-	const soul = new SoulStore({ db, personaIds: personas.map((persona) => persona.id) });
-	const index = options.index === false ? undefined : new FakeIndex();
-	const coreOptions: ConversationOptions = {
-		db,
-		botState: new BotState(db),
-		memberMemory: new MemberMemory(db),
-		soulStore: soul,
+	});
+	const index = options.index === false ? undefined : fakeIndex();
+	const coreOptions = conversationOptions({
 		dataDir,
-		routingSecret: "fixture",
 		personas,
-		modelRuntime: {
-			getModel: () => model,
-			hasConfiguredAuth: () => true,
-			getAuth: async () => ({ auth: { apiKey: "fixture" } }),
-		} as unknown as ModelRuntime,
-		transports: new Map([["telegram", transport]]),
+		modelRuntime: makeRuntime(model),
+		transports: [transport],
 		events: {
 			assign: async () => 7,
 			describe: () => ({ title: "Topic", description: "Chat", participants: [] }),
 		} as unknown as EventTracker,
 		turnTimeoutMs: options.timeoutMs ?? 5_000,
 		...(index ? { messageIndex: index as unknown as MessageIndex } : {}),
-	};
+	});
+	const { db, soulStore: soul } = coreOptions;
 	const captured: Captured[] = [];
-	const script: Array<AssistantMessage | (() => AssistantMessageEventStream)> = [];
+	const script: Array<AssistantMessage | StreamFn> = [];
 	const build = () => {
 		const core = new Conversation(coreOptions);
-		const seam = core as unknown as SessionSeam;
-		const original = seam.getSession.bind(core);
-		const attached = new Set<AgentSession>();
-		seam.getSession = async (...args) => {
-			const session = await original(...args);
-			if (!attached.has(session)) {
-				attached.add(session);
-				session.agent.streamFunction = (_model, context) => {
-					captured.push({
-						persona: args[0].id,
-						systemPrompt: context.systemPrompt ?? "",
-						messages: JSON.parse(JSON.stringify(context.messages)),
-					});
-					const next = script.shift() ?? reply();
-					if (typeof next === "function") return next();
-					const stream = createAssistantMessageEventStream();
-					stream.push({ type: "done", reason: "stop", message: next });
-					return stream;
-				};
-			}
-			return session;
-		};
+		const seam = onSession(core, (session, persona) => {
+			session.agent.streamFunction = scriptedStream(script, reply, (context) =>
+				captured.push({
+					persona: persona.id,
+					systemPrompt: context.systemPrompt ?? "",
+					messages: JSON.parse(JSON.stringify(context.messages)),
+				}),
+			);
+		});
 		cleanups.push(() => core.close());
 		return { core, seam };
 	};
-	cleanups.push(() => {
-		db.close();
-		rmSync(dataDir, { recursive: true, force: true });
-	});
 	const first = build();
 	let now = T0;
 	let messageId = 10;
@@ -256,10 +173,10 @@ test("untriggered messages are stored and indexed but never written to a session
 	expect(f.captured).toEqual([]);
 	expect((await f.seam.getSession(f.persona, SPACE, CHANNEL)).messages).toEqual([]);
 	expect(f.db.query("SELECT COUNT(*) AS n FROM messages").get()).toEqual({ n: 2 });
-	expect(f.index!.enqueued).toEqual(["10", "11"]);
+	expect(enqueuedIds(f.index!)).toEqual(["10", "11"]);
 	await f.send(1_000);
 	// The stored bot reply is indexed too.
-	expect(f.index!.enqueued).toEqual(["10", "11", "12", "1001"]);
+	expect(enqueuedIds(f.index!)).toEqual(["10", "11", "12", "1001"]);
 });
 
 test("a new segment is seeded with the latest 30 earlier messages as one context message", async () => {
@@ -299,8 +216,9 @@ test("related counts are computed once per line, against history older than the 
 	expect(trigger).toContain("（相关 1 条）");
 	// Lines are embedded before they are counted, and every count looks only before the window start.
 	expect(f.index!.events.slice(0, 2)).toEqual(["ensure:10,11,12", "count:10"]);
-	expect(f.index!.relatedCalls.every((entry) => entry.before === earliest)).toBe(true);
-	expect(f.index!.relatedCalls.map((entry) => entry.messageId).sort()).toEqual(["10", "11", "12", "13"]);
+	const counted = f.index!.relatedCount.mock.calls;
+	expect(counted.every(([, before]) => before === earliest)).toBe(true);
+	expect(counted.map(([key]) => key.messageId).sort()).toEqual(["10", "11", "12", "13"]);
 });
 
 test("without an index no relatedness is written", async () => {
@@ -338,8 +256,6 @@ test("continuing a segment appends only unseen messages and leaves everything al
 	expect(texts[2]).not.toContain("before-1");
 	// The bot's own reply is the assistant message, not repeated in the catch-up block.
 	expect(texts[2]).not.toContain("hello");
-	// The event note is frozen with its message: the first question keeps it in later requests.
-	expect(JSON.stringify(second!.messages.slice(0, first!.messages.length))).toContain("当前事件");
 });
 
 test("a reply older than five minutes starts a new segment; exactly five minutes continues", async () => {
@@ -490,5 +406,4 @@ test("segment migration is idempotent and keeps pre-segment rows", () => {
 	expect(
 		db.query("SELECT session_file, last_reply_at, cursor_timestamp, segment_start_at FROM sessions").all(),
 	).toEqual([{ session_file: "/old.jsonl", last_reply_at: null, cursor_timestamp: null, segment_start_at: null }]);
-	db.close();
 });

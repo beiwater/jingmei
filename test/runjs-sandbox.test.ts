@@ -1,59 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
-import { setLogSink } from "../src/observability/log.ts";
-import { runJs } from "../src/tools/run-js.ts";
-import { buildRunJsBwrapArgs, createRunJsSandboxDetector } from "../src/tools/run-js-sandbox.ts";
+import { assertRunJsSandbox, RunJsSandboxError } from "../src/tools/run-js.ts";
+import { buildRunJsBwrapArgs } from "../src/tools/run-js-sandbox.ts";
 
 describe("run_js OS sandbox policy", () => {
-	test("missing bwrap selects vm once and computation still works", async () => {
-		const records: string[] = [];
-		const restore = setLogSink((line) => records.push(line));
-		let probes = 0;
-		const detect = createRunJsSandboxDetector(
-			() =>
-				new Promise<boolean>((resolve) => {
-					probes++;
-					const child = spawn("/nonexistent/runjs-no-such-bwrap", [], { stdio: "ignore" });
-					child.on("error", () => resolve(false));
-					child.on("close", () => resolve(false));
-				}),
-		);
-		try {
-			expect(await Promise.all([detect(), detect()])).toEqual(["vm", "vm"]);
-			expect(await detect()).toBe("vm");
-			expect(probes).toBe(1);
-			expect(records.map((line) => JSON.parse(line).fields)).toEqual([{ kind: "vm" }]);
-			const result = await runJs("6 * 7");
-			expect(result.ok).toBe(true);
-			expect(result.output).toBe("42");
-		} finally {
-			restore();
-		}
+	test("startup assertion passes when bwrap can run the sandbox", async () => {
+		await assertRunJsSandbox();
 	});
 
-	test("a denied namespace probe falls back without logging the failure", async () => {
-		const records: string[] = [];
-		const restore = setLogSink((line) => records.push(line));
+	test("startup assertion fails loudly when bwrap is unavailable", async () => {
+		const path = process.env.PATH;
+		process.env.PATH = "/nonexistent";
 		try {
-			const detect = createRunJsSandboxDetector(async () => {
-				throw new Error("private path and stderr must not be logged");
-			});
-			expect(await detect()).toBe("vm");
-			expect(records.map((line) => JSON.parse(line).fields)).toEqual([{ kind: "vm" }]);
-			expect(records.join("")).not.toContain("private");
+			await expect(assertRunJsSandbox()).rejects.toBeInstanceOf(RunJsSandboxError);
 		} finally {
-			restore();
+			process.env.PATH = path;
 		}
-	});
-
-	test("a usable probe selects bwrap once", async () => {
-		let probes = 0;
-		const detect = createRunJsSandboxDetector(async () => {
-			probes++;
-			return true;
-		});
-		expect(await Promise.all([detect(), detect()])).toEqual(["bwrap", "bwrap"]);
-		expect(probes).toBe(1);
 	});
 
 	test("bind boundary exposes runtime files, never their home or working directory", () => {

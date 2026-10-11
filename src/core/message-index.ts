@@ -114,8 +114,6 @@ export class MessageIndex {
 		ensureMemorySchema(this.db);
 		this.db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content, tokenize='trigram')");
 		if (this.embedder) {
-			if (!Number.isInteger(this.embedder.dimensions) || this.embedder.dimensions <= 0)
-				throw new Error("消息向量维度必须为正整数");
 			loadVectorExtension(this.db);
 			// scope（space+channel）作分区键、sent_at 作 metadata，KNN 在分区内按时间过滤，不用先取全局最近邻再丢弃。
 			this.db.exec(
@@ -150,7 +148,7 @@ export class MessageIndex {
 	}
 
 	related(key: MessageKey, limit: number): HistoryHit[] {
-		if (!this.embedder || limit <= 0) return [];
+		if (!this.embedder) return [];
 		const row = this.findRow(key);
 		const vector = row ? this.vectorOf(row.rowid) : null;
 		if (!row || !vector) return [];
@@ -166,7 +164,7 @@ export class MessageIndex {
 		limit: number,
 	): Promise<HistoryHit[]> {
 		const text = query.trim();
-		if (!text || limit <= 0) return [];
+		if (!text) return [];
 		const keyword = this.keywordRows(scope, text, range, limit);
 		const semantic = await this.semanticRows(scope, text, range, limit);
 		// 关键词与向量交替取，去重后各自的最佳命中都能进入结果。
@@ -241,7 +239,6 @@ export class MessageIndex {
 		if (this.wantsVector(row) && !this.hasVector(row.rowid)) {
 			try {
 				[vector] = await this.embedder!.embed([this.embedText(row)]);
-				if (vector && vector.length !== this.embedder!.dimensions) throw new Error("消息向量维度不符");
 			} catch (error) {
 				vector = undefined;
 				log.error("core", "message_embedding_failed", { error_category: errorCategory(error) });

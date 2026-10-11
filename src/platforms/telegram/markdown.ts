@@ -78,10 +78,7 @@ function textFragment(text: string): Fragment {
 function splitAroundIntervals(length: number, intervals: readonly [number, number][]): Array<[number, number]> {
 	if (length <= 0) return [];
 	const merged: Array<[number, number]> = [];
-	for (const [rawStart, rawEnd] of [...intervals].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
-		const start = Math.max(0, Math.min(length, rawStart));
-		const end = Math.max(start, Math.min(length, rawEnd));
-		if (end <= start) continue;
+	for (const [start, end] of [...intervals].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
 		const previous = merged.at(-1);
 		if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
 		else merged.push([start, end]);
@@ -100,9 +97,9 @@ function withStyle(fragment: Fragment, type: "bold" | "italic" | "strikethrough"
 	const blocked = fragment.entities
 		.filter((entity) => CODE_TYPES.has(entity.type))
 		.map((entity): [number, number] => [entity.offset, entity.offset + entity.length]);
-	const additions = splitAroundIntervals(fragment.text.length, blocked)
-		.filter(([start, end]) => end > start)
-		.map(([start, end]) => ({ type, offset: start, length: end - start }) satisfies TelegramMessageEntity);
+	const additions = splitAroundIntervals(fragment.text.length, blocked).map(
+		([start, end]) => ({ type, offset: start, length: end - start }) satisfies TelegramMessageEntity,
+	);
 	return { text: fragment.text, entities: [...fragment.entities, ...additions] };
 }
 
@@ -330,7 +327,7 @@ function normalizedEntities(entities: readonly TelegramMessageEntity[]): Telegra
 
 /** Convert the agent's bounded Markdown to classic Telegram text/entities without parse_mode. */
 export function formatTelegramMarkdown(markdown: string): TelegramFormattedMessage {
-	if (typeof markdown !== "string" || markdown.trim().length === 0) throw new TelegramMarkdownError("empty");
+	if (markdown.trim().length === 0) throw new TelegramMarkdownError("empty");
 	if ([...markdown].length > MAX_CODE_POINTS) throw new TelegramMarkdownError("too_long");
 	try {
 		const tokens = MARKED.Lexer.lex(markdown, { gfm: true, breaks: false });

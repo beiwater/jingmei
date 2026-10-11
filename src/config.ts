@@ -11,7 +11,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL, isSupportedEmbeddingModel } from "./core/embedding-models.ts";
 import { JEV_ENDPOINT, type JevProvider, OPENAI_DECISIONS_ENDPOINT, OPENAI_DECISIONS_MODEL } from "./decision/jev.ts";
 import { TEXT_IMAGE_MAX_CHARS } from "./media/text-image.ts";
 import { DEFAULT_IMAGE_MODEL } from "./tools/antigravity-image.ts";
@@ -53,6 +53,11 @@ export interface JevSettings {
 	emojis?: Partial<Record<Platform, Record<string, string>>>;
 }
 
+export const FEATURE_NAMES = ["history", "memory", "soul", "search", "audit"] as const;
+export type FeatureName = (typeof FEATURE_NAMES)[number];
+/** Install-time switches for optional capabilities; all default to on. */
+export type Features = Record<FeatureName, boolean>;
+
 export interface AppConfig {
 	rootDir: string;
 	dataDir: string;
@@ -67,7 +72,8 @@ export interface AppConfig {
 	textImage?: { thresholdChars: number };
 	/** Present when `kline.enabled`: personas may send live Binance candlestick charts. */
 	kline?: Record<string, never>;
-	/** DEEPSEEK_API_KEY, used by server-side web search. */
+	features: Features;
+	/** DEEPSEEK_API_KEY: server-side web search (unless `features.search` is off) and the default model's credential. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
 	visionModel?: { provider: string; model: string };
@@ -90,11 +96,11 @@ export class ConfigError extends Error {
 const PLATFORMS: readonly Platform[] = ["discord", "telegram"];
 const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const PERSONA_ID = /^[a-z0-9_-]+$/;
-const DISCORD_ID = /^\d{17,20}$/;
-const TELEGRAM_CHAT_ID = /^-?\d+$/;
+export const PERSONA_ID = /^[a-z0-9_-]+$/;
+export const DISCORD_ID = /^\d{17,20}$/;
+export const TELEGRAM_CHAT_ID = /^-?\d+$/;
 const TELEGRAM_USER_ID = /^\d+$/;
-const FISH_REFERENCE_ID = /^[0-9a-f]{32}$/i;
+export const FISH_REFERENCE_ID = /^[0-9a-f]{32}$/i;
 const DEFAULT_ROUTING_SECRET_ENV = "ROUTING_SECRET";
 const DEFAULT_JEV_MODEL = "jev-latest";
 const DEFAULT_JEV_THRESHOLD = 0.8;
@@ -120,6 +126,20 @@ export function parseEnvFile(path: string): Record<string, string> {
 	return env;
 }
 
+/** The inverse of `parseEnvFile`. Keys and values that would not parse back to themselves are rejected without echoing them. */
+export function formatEnvFile(env: Readonly<Record<string, string>>, header: string): string {
+	const lines = Object.entries(env).map(([key, value]) => {
+		if (!ENV_NAME.test(key)) throw new ConfigError(["Invalid .env key"]);
+		if (!value || value !== value.trim() || /[\r\n]/.test(value))
+			throw new ConfigError([`Invalid .env value for ${key}`]);
+		return `${key}: ${value}`;
+	});
+	return `${header
+		.split("\n")
+		.map((line) => `# ${line}`)
+		.join("\n")}\n\n${lines.join("\n")}\n`;
+}
+
 /** `.env` values overridden by `process.env`. */
 function loadEnv(rootDir: string): Record<string, string> {
 	const env = parseEnvFile(join(rootDir, ".env"));
@@ -130,10 +150,7 @@ function loadEnv(rootDir: string): Record<string, string> {
 function readConfigFile(rootDir: string): unknown {
 	const configPath = join(rootDir, CONFIG_FILE);
 	if (!existsSync(configPath)) {
-		const legacy = existsSync(join(rootDir, "discord.config.json"))
-			? "; run `bun scripts/migrate-config.ts` to convert discord.config.json"
-			: "; copy jingmei.config.example.json";
-		throw new ConfigError([`Missing ${configPath}${legacy}`]);
+		throw new ConfigError([`Missing ${CONFIG_FILE}; run \`bun run jingmei init\` or copy jingmei.config.example.json`]);
 	}
 	try {
 		return JSON.parse(readFileSync(configPath, "utf8"));
@@ -278,8 +295,6 @@ function parseSpace(value: unknown): { platform: Platform; rawId: string } | nul
 export function validateConfig(input: unknown, rootDir: string, env: Readonly<Record<string, string>>): AppConfig {
 	const errors: string[] = [];
 	if (!isObject(input)) throw new ConfigError([`${CONFIG_FILE} must be a JSON object`]);
-	if ("guilds" in input)
-		errors.push("top-level guilds is the old discord.config.json shape; run `bun scripts/migrate-config.ts`");
 
 	const secret = (field: string, envName: unknown): string | undefined => {
 		if (typeof envName !== "string" || !ENV_NAME.test(envName)) {
@@ -307,14 +322,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		else return { provider, model };
 	};
 	const httpUrl = (field: string, value: unknown): string | undefined => {
-		if (typeof value === "string") {
-			try {
-				const url = new URL(value);
-				if (url.protocol === "http:" || url.protocol === "https:") return value;
-			} catch {
-				// Report only the field name; a malformed URL may contain credentials.
-			}
-		}
+		// Report only the field name; a malformed URL may contain credentials.
+		if (typeof value === "string" && URL.canParse(value) && /^https?:$/.test(new URL(value).protocol)) return value;
 		errors.push(`${field} must be an http(s) URL`);
 		return undefined;
 	};
@@ -392,10 +401,6 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 				continue;
 			}
 			const before = errors.length;
-			if ("token_env" in entry || "guildIds" in entry || "adminUserIds" in entry)
-				errors.push(
-					`${field} uses old discord.config.json fields (token_env/guildIds/adminUserIds); run \`bun scripts/migrate-config.ts\``,
-				);
 			const id = entry.id;
 			if (typeof id !== "string" || !PERSONA_ID.test(id)) errors.push(`${field}.id must match [a-z0-9_-]+`);
 			else if (seenIds.has(id)) errors.push(`Duplicate persona id: ${id}`);
@@ -626,6 +631,18 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		else if (input.kline.enabled === true) kline = {};
 	}
 
+	const features = Object.fromEntries(FEATURE_NAMES.map((name) => [name, true])) as Features;
+	if (input.features !== undefined) {
+		if (!isObject(input.features)) errors.push("features must be an object");
+		else
+			for (const [name, value] of Object.entries(input.features)) {
+				if (!(FEATURE_NAMES as readonly string[]).includes(name))
+					errors.push(`features.${name} is not a feature; expected ${FEATURE_NAMES.join(", ")}`);
+				else if (typeof value !== "boolean") errors.push(`features.${name} must be a boolean`);
+				else features[name as FeatureName] = value;
+			}
+	}
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -707,6 +724,8 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 					minIntervalMs: minIntervalMs as number,
 					...(emojis ? { emojis } : {}),
 				};
+			else if (value.apiKeyEnv === undefined)
+				errors.push("jev needs apiKeyEnv, or a localJev section / DEEPSEEK_API_KEY for local decisions");
 		}
 	}
 	let events: AppConfig["events"];
@@ -721,6 +740,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			if (summaryModel && typeof embeddingModel === "string") events = { summaryModel, embeddingModel };
 		}
 		if (!jev?.apiKey && !localJev) errors.push("events requires a Jev API key or a localJev LLM");
+		if (!features.history) errors.push("events requires features.history, which supplies the embedding index");
 	}
 
 	if (errors.length > 0) throw new ConfigError(errors);
@@ -731,6 +751,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(discord ? { discord } : {}),
 		...(telegram ? { telegram } : {}),
 		...(voice ? { voice } : {}),
+		features,
 		imageModel,
 		...(textImage ? { textImage } : {}),
 		...(kline ? { kline } : {}),
@@ -748,7 +769,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 export function ensureDeepSeekModelsFile(agentDir: string): string {
 	const modelsPath = join(agentDir, "models.json");
 	if (!existsSync(modelsPath)) {
-		mkdirSync(dirname(modelsPath), { recursive: true });
+		mkdirSync(dirname(modelsPath), { recursive: true, mode: 0o700 });
 		const catalog = {
 			providers: {
 				deepseek: {

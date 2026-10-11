@@ -15,7 +15,7 @@ bun run check     # tsc --noEmit
 bun run lint      # Biome；bun run format 自动修复
 ```
 
-需要 Bun 1.3 以上；CI 使用 Bun 1.3.14。跨平台边界的改动请用测试 bot 和测试群 `bun run start` 实测。
+需要 Linux、可用的 bubblewrap（`run_js` 沙箱，测试会真实创建沙箱）和 Bun 1.3 以上；CI 使用 Bun 1.3.14。跨平台边界的改动请用测试 bot 和测试群 `bun run start` 实测。
 
 ### 提交 PR 前
 
@@ -44,7 +44,7 @@ bun run check     # tsc --noEmit
 bun run lint      # Biome; bun run format fixes formatting
 ```
 
-Bun 1.3 or newer is required; CI uses Bun 1.3.14. Changes crossing the platform boundary should be tried against a test bot and test group with `bun run start`.
+Linux, a working bubblewrap (the `run_js` sandbox; tests really create one) and Bun 1.3 or newer are required; CI uses Bun 1.3.14. Changes crossing the platform boundary should be tried against a test bot and test group with `bun run start`.
 
 ### Before opening a PR
 

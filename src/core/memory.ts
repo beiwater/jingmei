@@ -5,10 +5,14 @@ import type { InboundMessage, SpaceId } from "./types.ts";
 /** Scores each candidate's relevance to `query` in [0,1], same order; throws on failure. */
 export type RelevanceScorer = (query: string, candidates: readonly string[]) => Promise<number[]>;
 
+/** The only fact keys the model may save; the tool schema is built from this list. */
+export const FACT_KEYS = ["preference", "interest", "role", "project", "timezone", "language", "goal", "note"] as const;
+export type FactKey = (typeof FACT_KEYS)[number];
+
 export interface MemberFactInput {
 	spaceId: SpaceId;
 	memberId: string;
-	key: string;
+	key: FactKey;
 	value: string;
 	sourceChannelId: string;
 	sourceMessageId: string;
@@ -38,7 +42,6 @@ type ProfileRow = {
 	birthday_day: number | null;
 };
 
-const MAX_FACT_KEY_LENGTH = 32;
 const MAX_FACT_VALUE_LENGTH = 300;
 const MAX_RECALL_MEMBERS = 20;
 const MAX_RECALL_CHARS = 2_000;
@@ -46,16 +49,6 @@ const RECALL_FACTS = 5;
 const RECALL_RELATIONSHIPS = 4;
 /** With a scorer, fetch this many times the kept count as ranking candidates. */
 const SCORED_CANDIDATES = 4;
-const ALLOWED_FACT_KEYS = new Set([
-	"preference",
-	"interest",
-	"role",
-	"project",
-	"timezone",
-	"language",
-	"goal",
-	"note",
-]);
 const SENSITIVE_KEY = /password|secret|token|credential|medical|health|religion|politic|sexual|address|phone|email/i;
 const UNSAFE_FACT_VALUE =
 	/[\r\n\u0000-\u001f]|(?:ignore|disregard).{0,24}(?:instructions|prompt)|(?:忽略|无视).{0,12}(?:指令|提示词)|(?:api[_ -]?key|password|token|secret)\s*[:=]|\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{20,})\b|[\w.+-]+@[\w.-]+\.[a-z]{2,}/i;
@@ -136,7 +129,7 @@ export class MemberMemory {
 	/** Record one message once, update profile activity, and maintain evidenced social edges. */
 	observe(message: InboundMessage, botUserIds: ReadonlySet<string> = new Set()): void {
 		if (message.isBot || botUserIds.has(message.authorId)) return;
-		const at = finiteTimestamp(message.timestamp);
+		const at = message.timestamp ?? Date.now();
 		this.db.transaction(() => {
 			const inserted =
 				this.db
@@ -188,13 +181,10 @@ export class MemberMemory {
 	}
 
 	rememberFact(input: MemberFactInput): void {
-		const key = input.key.trim().toLowerCase();
 		const value = input.value.trim();
-		if (!ALLOWED_FACT_KEYS.has(key) || key.length > MAX_FACT_KEY_LENGTH || SENSITIVE_KEY.test(key))
-			throw new Error("invalid_memory_fact_key");
 		if (!value || value.length > MAX_FACT_VALUE_LENGTH || UNSAFE_FACT_VALUE.test(value))
 			throw new Error("invalid_memory_fact_value");
-		const at = finiteTimestamp(input.observedAt);
+		const at = input.observedAt ?? Date.now();
 		this.db.transaction(() => {
 			if (this.isOptedOut(input.spaceId, input.memberId)) throw new Error("memory_opted_out");
 			this.upsertProfile(
@@ -213,7 +203,7 @@ export class MemberMemory {
 				value=excluded.value, source_channel_id=excluded.source_channel_id,
 				source_message_id=excluded.source_message_id, observed_at=excluded.observed_at
 			`)
-				.run(input.spaceId, input.memberId, key, value, input.sourceChannelId, input.sourceMessageId, at);
+				.run(input.spaceId, input.memberId, input.key, value, input.sourceChannelId, input.sourceMessageId, at);
 		})();
 	}
 
@@ -327,9 +317,7 @@ export class MemberMemory {
 		);
 		if (!candidates.length || !relevance.query.trim()) return null;
 		try {
-			const scores = await relevance.score(relevance.query, candidates);
-			if (scores.length !== candidates.length || !scores.every(Number.isFinite)) throw new Error("score_shape");
-			return scores;
+			return await relevance.score(relevance.query, candidates);
 		} catch (error) {
 			log.warn("core", "memory_scoring_failed", { error_category: errorCategory(error) });
 			return null;
@@ -500,14 +488,14 @@ function cleanName(name: string): string {
 		.slice(0, 80);
 }
 
-function finiteTimestamp(value?: number): number {
-	return value !== undefined && Number.isFinite(value) ? Math.trunc(value) : Date.now();
+/** Round-trips through a leap year, so February 29 is valid and overflowing days or fractions are not. */
+function isValidBirthday(month: number, day: number): boolean {
+	const date = new Date(Date.UTC(2000, month - 1, day));
+	return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
 function assertBirthday(month: number, day: number): void {
-	const max = month === 2 ? 29 : [4, 6, 9, 11].includes(month) ? 30 : 31;
-	if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(day) || day < 1 || day > max)
-		throw new Error("invalid_birthday");
+	if (!isValidBirthday(month, day)) throw new Error("invalid_birthday");
 }
 
 function extractOwnBirthday(text: string): { month: number; day: number } | null {
@@ -550,32 +538,17 @@ function extractOwnPreference(text: string): string | null {
 	return value;
 }
 
+const MONTH_NAMES = Array.from({ length: 12 }, (_, month) =>
+	new Date(Date.UTC(2000, month, 1)).toLocaleString("en", { month: "long", timeZone: "UTC" }).toLowerCase(),
+);
+
 function monthNumber(value: string): number | null {
-	const months = [
-		"january",
-		"february",
-		"march",
-		"april",
-		"may",
-		"june",
-		"july",
-		"august",
-		"september",
-		"october",
-		"november",
-		"december",
-	];
-	const index = months.findIndex((month) => month.startsWith(value.toLowerCase()));
+	const index = MONTH_NAMES.findIndex((month) => month.startsWith(value.toLowerCase()));
 	return index < 0 ? null : index + 1;
 }
 
 function validBirthday(month: number, day: number): { month: number; day: number } | null {
-	try {
-		assertBirthday(month, day);
-		return { month, day };
-	} catch {
-		return null;
-	}
+	return isValidBirthday(month, day) ? { month, day } : null;
 }
 
 /** Only called for members the adapter resolved as explicitly mentioned in this message. */

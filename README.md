@@ -15,7 +15,7 @@
 
 **中文** · [English](README.en.md)
 
-[快速开始](#快速开始) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
+[快速开始](#快速开始) · [可选功能](#可选功能) · [命令](#命令) · [运维命令](#运维命令) · [配置参考](#配置参考) · [架构](docs/architecture.md) · [部署](docs/deploy.md) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -33,14 +33,14 @@
 - **Jev 秒回表情**（可选）：用 Jev 决策接口（或进程内 LLM 包装器）给消息点一个表情。点名的消息只要选中表情就会点，普通消息只有情绪强烈或确实好笑时才会，并且每个频道限频。不占用主模型，也不拖慢正式回复。详见 [Jev](#jev)。
 - **并行话题**（可选）：`events` 把同一频道的消息归入不同话题，用 `§E` 编号、标题、描述和主要参与者告诉角色当前在回应哪个事件，避免把同时发生的讨论混在一起；还能召回之前暂时结束的话题。
 - **对话段，按需接续**：群消息一律入库并建索引，但只有被路由触发的角色才写自己的会话，没被触发的消息不会进入任何会话。角色被触发时，若距它上次成功回复不超过 5 分钟、之后积累的消息不超过 30 条、会话不超过 40,000 tokens，就接续原会话：把积累的消息作为一条上下文追加，再写触发消息；否则开新段，以触发前最近 30 条消息为种子。每行形如 `[时间] #消息号 ↪ 被回复号 §E话题 作者: 内容 （相关 N 条）`，N 是更早历史里的相关消息数（超过 20 显示 `20+`），写入时固化、之后不变，因此前缀稳定、缓存命中。轮次超时、发送失败或最终出错后下一次一定开新段，重启后同样成立。
-- **历史检索**：角色看到“（相关 N 条）”时，可以调用 `related_messages` 按某条消息查更早的相关聊天，或用 `search_history` 按关键词与语义检索（可按 ISO 时间或 `YYYY-MM-DD` 日期限定范围）；每轮合计最多 3 次，每次最多 20 行，命中带前后各 2 行上下文，只查当前群/频道，已 `/forget` 的成员不会出现。关键词用 SQLite FTS5 trigram，语义用 sqlite-vec 向量（需要开启 `events`，复用其 embedding 模型）。升级前入库的旧消息要运行[回填脚本](#运维命令)才能被检索。
+- **历史检索**：角色看到“（相关 N 条）”时，可以调用 `related_messages` 按某条消息查更早的相关聊天，或用 `search_history` 按关键词与语义检索（可按 ISO 时间或 `YYYY-MM-DD` 日期限定范围）；每轮合计最多 3 次，每次最多 20 行，命中带前后各 2 行上下文，只查当前群/频道，已 `/forget` 的成员不会出现。关键词用 SQLite FTS5 trigram，语义用 sqlite-vec 向量（由 `features.history` 控制，默认开启，使用默认 embedding 模型；`events` 复用同一个模型）。升级前入库的旧消息要运行[回填脚本](#运维命令)才能被检索。
 - **看图与视频抽帧**：每条消息最多 4 张图片，缩放到 1024×1024、200 KB 以内交给模型；视频用 ffmpeg 抽 1–3 帧。主模型不支持图片输入时，Pi 会把图片替换成一条省略说明；也可以配置 `visionModel`，先把图片描述成一两句文字。语音、文件、贴纸以 `[语音]`、`[文件]`、`[贴纸 😀]` 这样的文字占位。
 - **语音**（可选）：接入 Fish Audio 后，角色可以用中文、日语或英语发送带文字稿的 MP3。群友明确要求“用语音回复”时，最终回答也会转成语音。
 - **画图**（可选）：登录 Antigravity provider 后，角色可以在 `send_reply` 里放一个 `image` 部分，按群友的描述生成一张图发出（默认 Nano Banana 2 / `gemini-3.1-flash-image`，约十几秒）。登录方式见[画图](#画图)。**注意**：Google Antigravity 条款明确禁止用第三方工具调用 Antigravity OAuth，已有账号因此被封，建议使用小号。
 - **长文转图**（可选）：开启 `textImage` 后，文字回复超过 300 字（可配置）就不会发出，角色会被告知改用 `send_reply` 的 `text_image` 部分，把完整内容写成 Markdown 渲染成一张图发出：支持标题、列表、表格、代码块、LaTeX 公式（`$…$`、`$$…$$`）、公网图片、函数图（函数、隐函数、参数方程、散点、3D 曲面），以及开启画图时由 AI 新画的插图。纯库实现，不需要浏览器。详见[长文转图](#长文转图)。
-- **K 线图**（可选）：开启 `kline` 后，角色可以在 `send_reply` 里放一个 `kline_image` 部分，发出 Binance 现货交易对（如 BTCUSDT）的实时 K 线图（蜡烛图 + 成交量）。行情由 bot 从 Binance 公共接口取，模型只选交易对与周期，不写数字；纯库实现（ECharts 服务端渲染 + resvg），不需要浏览器。详见[K 线图](#k-线图)。
+- **K 线图**（可选）：开启 `kline` 后，角色可以在 `send_reply` 里放一个 `kline_image` 部分，发出 Binance 现货交易对（如 BTCUSDT）的实时 K 线图（蜡烛图 + 成交量）。行情由 bot 从 Binance 公共接口取，模型只选交易对与周期，不写数字；纯库实现（手写 SVG + resvg），不需要浏览器。详见[K 线图](#k-线图)。
 - **联网搜索**：配置 `DEEPSEEK_API_KEY` 后启用 DeepSeek 服务端联网搜索。消息里明确说“查一下”“搜索”时先搜再答，回答附来源链接；其他需要外部事实的问题，模型也可以自己调用搜索。
-- **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。Linux 首次调用自动试运行 bubblewrap：可用时额外隔离文件系统、网络与 PID；未安装或被系统策略阻止时回退原有 vm 沙箱（vm 本身不是安全边界）。无新增配置；Ubuntu 启用及日志验证见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
+- **计算**：`run_js` 在短时子进程的 node:vm 隔离环境里运行小段纯计算 JavaScript，用于精确计算、日期运算和单位换算。必须在 Linux 上运行，并有可用的 bubblewrap（隔离文件系统、网络与 PID）；启动时试运行一次，不可用就直接报错退出，没有回退。无新增配置；Ubuntu 启用见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)，残余风险见 [docs/architecture.md](docs/architecture.md)。
 - **成员记忆与 soul**：按群记录名字、生日、本人明确说过的稳定信息，以及提及/回复形成的关系。成员记忆不会自动附在输入里，接话角色需要时调用 `recall_member_memory` 按聊天显示名回想（排除 bot 和已 `/forget` 的成员），这样历史更短、缓存更稳。角色会保存作者本人明确陈述的兴趣、角色、项目、时区、语言、目标与偏好，不会在群里复述完整档案或生日。每个角色在每个频道还有私人 soul，学到自身格式、语气、长度等稳定教训后先暂存，开新对话段或压缩成功后才转为正式内容。成员可随时 `/forget`。
   何时保存、何时回想写在 system prompt 里：作者自述长期信息时先保存再回复（玩笑、一时状态、他人信息、敏感信息不存）；被问到成员情况时先回想；查不到就说不记得，不编造。
 - **节日与生日祝福**（可选）：在指定频道、当地时间 09:00 之后发送生日祝福和中国/澳洲节日祝福；发送记录存在数据库里，重启不会重发。
@@ -79,30 +79,44 @@ flowchart LR
 
 ## 快速开始
 
-需要 [Bun](https://bun.sh/) 1.3 以上、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
+需要 Linux、[Bun](https://bun.sh/) 1.3 以上、可用的 bubblewrap（`run_js` 沙箱，缺少则启动报错，见 [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)）、至少一个 Discord bot 或 Telegram bot，以及一个模型 provider 的凭据。视频抽帧另需系统安装 `ffmpeg`（含 `ffprobe`）；没有也能运行，视频只剩 `[视频]` 占位。
 
-macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。消息检索的向量部分（相关条数、语义检索）总是使用这个模型；开启 `events` 时话题也共用它。
+macOS 开发机还需 `brew install sqlite`，供 Bun 加载 sqlite-vec 扩展。首次启动会下载约 96 MB 的默认中文 embedding 模型到 `data/models`（自定义 `dataDir` 时随之变化），需要网络；之后复用本地缓存。`features.history` 设为 `false` 时两者都不需要。消息检索的向量部分（相关条数、语义检索）总是使用这个模型；开启 `events` 时话题也共用它。
 
 ```bash
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
 bun install
+bun run jingmei init
+```
+
+`init` 是推荐的配置方式：一个交互向导，生成 `jingmei.config.json`、`.env` 和 `personas/<id>.md`，不用手改 JSON。先选“推荐 / 最小 / 自定义”（推荐 = 核心功能全开、不加附加功能；最小 = 核心功能全关，不下载 embedding 模型；自定义 = 逐项选核心功能和附加功能，只对选中的附加功能追问参数），再依次选平台、填 bot token（输入不回显，并用与 bot 相同的调用实时验证、显示 bot 名字）、服务器 / 频道 ID（Telegram 为群 ID）、角色 id 和名字、模型（DeepSeek 填 `DEEPSEEK_API_KEY`，或之后用 `bun run jingmei login`）。`ROUTING_SECRET` 随机生成；secret 只写进权限 0600 的 `.env`，不进 JSON。已存在 `jingmei.config.json` 或 `.env` 时 `init` 拒绝运行，不覆盖任何文件；需要交互终端。结束时打印后续步骤（含 Discord 邀请链接）。
+
+写完后：
+
+1. 编辑 `personas/<id>.md`，写下角色的身份、说话方式和边界。
+2. `bun run jingmei doctor`：只读自检，检查配置、`run_js` 沙箱、模型凭据、bot token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg / 字体 / sqlite-vec / embedding 缓存，逐项给出 OK / WARN / FAIL 和修复提示。
+3. 启动：
+
+   ```bash
+   bun run start
+   ```
+
+想手动配置（或脚本化部署）也可以，向导做的事等价于下面的步骤：
+
+```bash
 cp jingmei.config.example.json jingmei.config.json
 cp .env.example .env
 cp personas/template.zh.md personas/luna.md
 ```
 
 1. 编辑 `personas/luna.md`，写下角色的身份、说话方式和边界。
-2. 编辑 `jingmei.config.json`：填入服务器/频道或群 ID，只用一个平台就删掉另一个平台的段落和角色里对应的账号；不用语音、Jev、话题或节日祝福就删掉 `voice`、`jev`、`events`、`celebrations`。字段见[配置参考](#配置参考)。
+2. 编辑 `jingmei.config.json`：填入 Discord 服务器 ID 和频道 ID。示例只有一个 Discord 角色；Telegram、语音、Jev 等见[可选功能](#可选功能)，字段见[配置参考](#配置参考)。
 3. 编辑 `.env`，填 bot token、`ROUTING_SECRET`（任意随机长字符串）和各项 API key。注意格式是 `key: value`，不是 `KEY=value`。
 4. 准备模型凭据，二选一：
    - 示例角色使用 DeepSeek 的 `deepseek-flash`，只需在 `.env` 填 `DEEPSEEK_API_KEY`。启动时会在 `data/pi-agent/models.json` 写入这个模型的目录条目（不含密钥）。
    - 其他 provider：订阅账号（Claude Pro/Max、ChatGPT Plus/Pro、GitHub Copilot 等）用 `bun run jingmei login` 选 provider 走 OAuth 登录，凭据写进 `<dataDir>/pi-agent/auth.json`，bot 启动后直接使用并自动刷新 token；`bun run jingmei logout` 删除。服务器上没有浏览器时，在本机浏览器打开打印出的链接，再把最终跳转 URL 或授权码粘贴回终端。`bun run jingmei model` 列出所有已有凭据的模型。也可以把该 provider 的 API key 环境变量（如 `OPENAI_API_KEY`）放进进程环境。`.env` 只由本项目读取，除 `DEEPSEEK_API_KEY` 外不会转交给 Pi。
-5. 启动：
-
-   ```bash
-   bun run start
-   ```
+5. 运行 `bun run jingmei doctor` 自检，再 `bun run start` 启动。
 
 启动时会校验配置、验证每个 bot token、确认每个角色的模型存在且已认证。配置错误会一次列全；token 或模型不可用也会报错退出。之后去群里 @ 角色或回复它试试。
 
@@ -125,6 +139,8 @@ cp personas/template.zh.md personas/luna.md
 
 ## Telegram 设置
 
+示例配置没有 Telegram；先按[可选功能](#可选功能)加上 `telegram` 段和角色的 `telegram` 账号。
+
 1. 在 [@BotFather](https://t.me/BotFather) 用 `/newbot` 为每个角色创建 bot，token 写进 `.env`（如 `TELEGRAM_LUNA_TOKEN: …`）。
 2. 用 `/setprivacy` 把 privacy mode 设为 **Disable**，或把 bot 设为群管理员，否则它只能看到命令和 @ 它的消息。改完后把 bot 移出群再重新拉入才会生效。启动日志里的 `privacy_mode_enabled` 警告就是在提示这件事。
 3. 把 bot 拉进群，在 `telegram.chatIds` 填入群 ID（超级群形如 `-100…`）。不知道 ID 时，先随便填一个再启动，在群里发条消息，日志里的 `chat_ignored` 事件会带出 `chat_id`。
@@ -133,12 +149,103 @@ Telegram 的限制：**bot 看不到其他 bot 的消息**。同一个群里放�
 
 Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送；大段解释、长清单这类细节由角色放进 ```` ```fold ```` 代码块，显示成默认收起、点开才展开的引用（块内只保留粗体/斜体/删除线，代码以纯文字显示，链接写成“文字 (网址)”）。表情回应只能用 Bot API 允许的表情集合（其中没有 😂）。
 
+## 可选功能
+
+示例配置只有一个 Discord 角色。下面的功能都是在 `jingmei.config.json` 里按需加，每段写明需要的环境变量（写进 `.env`，格式 `key: value`）。字段含义见[配置参考](#配置参考)。
+
+**Telegram**：需要 `.env` 里的 `TELEGRAM_LUNA_TOKEN`（BotFather 给的 token）。顶层加 `telegram` 段，并在角色里加 `telegram` 账号；设置步骤见 [Telegram 设置](#telegram-设置)。
+
+```json
+"telegram": { "chatIds": ["-1001234567890"] }
+```
+
+```json
+"telegram": { "tokenEnv": "TELEGRAM_LUNA_TOKEN" }
+```
+
+第二段加在 `personas[]` 里对应角色对象中，与 `discord` 并列。
+
+**语音**（Fish Audio）：需要 `FISH_AUDIO_API_KEY`。`referenceId` 是 32 位十六进制音色 ID；角色默认使用语音，可用 `voiceEnabled: false` 关闭。
+
+```json
+"voice": {
+	"apiKeyEnv": "FISH_AUDIO_API_KEY",
+	"referenceId": "00000000000000000000000000000000",
+	"model": "s2.1-pro-free"
+}
+```
+
+**画图**：不需要环境变量，而是 Antigravity 的 OAuth 登录，步骤见[画图](#画图)。模型默认 `gemini-3.1-flash-image`，只有要换模型时才需要写：
+
+```json
+"imageGeneration": { "model": "gemini-3.1-flash-image" }
+```
+
+**看图模型**：角色的主模型不能看图时，用另一个模型描述图片。需要该 provider 的凭据（`bun run jingmei login <provider>` 或它的 API key 环境变量）。
+
+```json
+"visionModel": "openrouter/google/gemini-2.5-flash"
+```
+
+**K 线图**与**长文转图**：不需要环境变量，默认关闭，见 [K 线图](#k-线图)、[长文转图](#长文转图)。
+
+```json
+"kline": { "enabled": true },
+"textImage": { "enabled": true, "thresholdChars": 300 }
+```
+
+**功能开关**（`features`）：默认全部开启。下面几项可以单独关掉，工具和提示词随之去掉，用不到的依赖也不再加载。
+
+```json
+"features": { "history": false, "memory": false, "soul": false, "search": false, "audit": false }
+```
+
+| 开关 | 关闭后 |
+|---|---|
+| `history` | 不建消息索引，没有 `related_messages` / `search_history`，上下文行不再带“（相关 N 条）”；不下载约 96 MB 的 embedding 模型，不加载 fastembed 与 sqlite-vec。与 `events` 同时配置会报配置错误 |
+| `memory` | 没有 `remember_member_fact` / `recall_member_memory`，也不再被动收集成员档案、偏好、关系和聊天里自述的生日。保留：`/memory`、`/forget` 仍可查看和删除已有数据，`/birthday` 仍可手动登记生日（`celebrations` 的生日祝福靠它） |
+| `soul` | 没有 `update_soul`，不再把已存的私人 soul 备忘注入 system prompt；已存数据保留在数据库中 |
+| `search` | 没有 `search_web`，也不预取搜索结果；`DEEPSEEK_API_KEY` 仍是默认模型的凭据 |
+| `audit` | 不再对最终文字做自然度审查（泄漏标记检查仍在）；接话判断由 `jev.replyDecision` 单独控制 |
+
+`run_js` 始终启用。开关在启动时读取一次，改动后需重启。
+
+**Jev**（秒回表情、记忆排序，接话判断也会使用）：远程 Jev 需要 `TYPESAFE_API_KEY`；省略 `apiKeyEnv` 则只用进程内包装器，此时必须有 `DEEPSEEK_API_KEY`（或写 `localJev`），否则启动报配置错误。详见 [Jev](#jev)。
+
+```json
+"jev": {
+	"apiKeyEnv": "TYPESAFE_API_KEY",
+	"quickReactions": true,
+	"memoryScoring": true
+}
+```
+
+**话题**（`events`）：需要能解析出决策客户端，即上面的 Jev 配置，或 `DEEPSEEK_API_KEY`；`summaryModel` 的 provider 需要凭据。首次启动会下载 embedding 模型。
+
+```json
+"events": { "summaryModel": "deepseek/deepseek-flash" }
+```
+
+**节日与生日祝福**：不需要环境变量。`space` 与 `channelId` 必须是上面已配置的服务器/频道，`personaId` 是发祝福的角色。
+
+```json
+"celebrations": [
+	{
+		"space": "discord:000000000000000000",
+		"channelId": "000000000000000001",
+		"personaId": "luna",
+		"timeZone": "Australia/Sydney",
+		"calendar": "both"
+	}
+]
+```
+
 ## 命令
 
 | 功能 | Discord（斜杠命令） | Telegram（群内文字命令） |
 |---|---|---|
-| 查看命令 | `/help` | `/help` |
-| 在线角色 | `/status` | `/status` |
+| 查看命令和怎么和角色说话 | `/help` | `/help` |
+| 在线角色（暂停时会说明） | `/status` | `/status` |
 | 直接提问 | `/ask prompt:<问题>` | `/ask <问题>` |
 | 查看记忆 / 重新启用 | `/memory`、`/memory action:enable` | `/memory`、`/memory enable` |
 | 生日：查看 / 设置 / 清除 | `/birthday`、`/birthday date:09-25`、`/birthday date:clear` | `/birthday`、`/birthday 09-25`、`/birthday clear` |
@@ -146,7 +253,9 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | 上下文用量与对话段上限（管理员） | `/context` | `/context` |
 | 手动压缩上下文（管理员） | `/compact` | `/compact` |
 
-- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。
+- Discord 命令的回执只有调用者自己看得见；`/ask` 的答案照常发在频道里。两个平台的命令回执统一为中文，命令名不变。
+- 和角色说话不必用命令：@ 它、回复它的消息，或直接叫它的名字（`/help` 也会这样提示）。
+- bot 被运维暂停时，`/ask` 会直接说明已暂停；`/ask` 没有得到回答（出错、被扣留、超时）时，两个平台都会回一句“没有得到回答，请重试”。
 - 管理员命令只对该角色 `adminUserIds` 里的用户开放，也只注册给配置了管理员的角色。
 - Telegram 命令可加 `@bot用户名` 指定角色；不加时由第一个收到的角色处理。群里有多个角色时，`/context`、`/compact` 必须指定角色。
 - Telegram 没有“仅自己可见”，命令回执直接发在群里，所以 `/memory` 只显示条数，不列出具体内容。
@@ -154,12 +263,14 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 ## 运维命令
 
-在项目目录、以运行 bot 的同一个用户执行。只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
+在项目目录、以运行 bot 的同一个用户执行。除 `init` 与 `doctor` 外只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
 
 | 命令 | 作用 |
 |---|---|
-| `bun run jingmei` | 交互菜单：状态、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei` | 交互菜单（尚无配置时只有“Set up”，即 `init`）：状态、自检、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei init` | 首次配置向导：生成 `jingmei.config.json`、`.env`（0600）和角色文件，实时验证 bot token；已有配置时拒绝运行，需要交互终端 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
+| `bun run jingmei doctor` | 只读自检：配置、`run_js` 沙箱、模型与凭据、Discord / Telegram token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg、字体、sqlite-vec、embedding 缓存；逐项 OK / WARN / FAIL，附一行修复提示，有 FAIL 时退出码非 0。不打印任何 token |
 | `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | 查看并切换角色的聊天模型；不带模型时刷新模型列表后弹出选择 |
 | `bun run jingmei pause` / `resume` | 暂停 / 恢复 |
@@ -188,13 +299,14 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `imageGeneration` | 可选，`{ model }`：画图用的 Antigravity 模型 ID，默认 `gemini-3.1-flash-image`。只有登录了 `antigravity` provider 时画图工具才会启用，见[画图](#画图) |
 | `kline` | 可选，`{ enabled }`：`enabled` 默认 `false`，见[K 线图](#k-线图) |
 | `textImage` | 可选，`{ enabled, thresholdChars }`：`enabled` 默认 `false`；`thresholdChars` 是文字回复的字数上限（50–8000 的整数，默认 `300`），见[长文转图](#长文转图) |
+| `features` | 可选，`history`、`memory`、`soul`、`search`、`audit` 五个布尔开关，默认全为 `true`，见[可选功能](#可选功能) |
 | `jev` | 可选，见 [Jev](#jev) |
 | `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
 | `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型，同时用于消息检索向量（不开话题时消息检索用默认模型）。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
 | `celebrations[]` | 可选，节日与生日祝福目标，见下 |
 | `personas[]` | 角色列表，至少一个 |
 
-联网搜索没有配置项：环境里有 `DEEPSEEK_API_KEY` 就启用。
+联网搜索没有单独的配置段：环境里有 `DEEPSEEK_API_KEY` 就启用，可用 `features.search: false` 关闭。
 
 ### `personas[]`
 
@@ -258,7 +370,7 @@ personas/
 在配置里写 `"kline": { "enabled": true }` 即可开启，不需要浏览器，也不需要 API key。角色的 `send_reply` 因此多出一种 `kline_image` 部分：`symbol`（如 `BTCUSDT`，`BTC/USDT` 也认）、`interval`（`15m`、`1h`、`4h`、`1d`、`1w`）和可选的 `limit`（K 线根数，10–120，默认 60）。
 
 - **数据**：bot 向 Binance 的公开行情镜像 `data-api.binance.vision` 取 K 线，不经过模型，价格不会被编造；只支持 Binance 现货交易对，不认的交易对或网络失败时这次 `send_reply` 一条都不发，角色改用文字说明，日志里记 `reply_part_failed`（`part_type: kline_image`）和错误分类。
-- **渲染**：ECharts 在 Node 里直接生成 SVG（不需要 DOM），再由 `@resvg/resvg-js` 转成 1600×1000 的 PNG。图为蜡烛图加成交量柱，红涨绿跌，时间为 UTC。图中文字用系统字体，Debian/Ubuntu 请确认装有 DejaVu Sans（`fonts-dejavu-core`，通常已随系统安装）。启动时用两根合成 K 线试渲染一次，失败只记 `kline_unavailable` 并关闭该功能；启动日志 `ready` 里 `kline_enabled: true` 即为生效。
+- **渲染**：代码直接手写 SVG（蜡烛、成交量柱、坐标轴），再由 `@resvg/resvg-js` 转成 1600×1000 的 PNG。图为蜡烛图加成交量柱，红涨绿跌，时间为 UTC。图中文字用系统字体，Debian/Ubuntu 请确认装有 DejaVu Sans（`fonts-dejavu-core`，通常已随系统安装）。启动时用两根合成 K 线试渲染一次，失败只记 `kline_unavailable` 并关闭该功能；启动日志 `ready` 里 `kline_enabled: true` 即为生效。
 - **入库内容**：消息配文由数据生成，如 `📈 BTCUSDT 日线 · 最新 67123.45 · 近 60 根 +5.20%`；它是之后每一轮上下文里这条消息的内容，角色需要点评时在后面加一个 `text` 部分。
 
 ## 长文转图
@@ -302,7 +414,7 @@ personas/
 
 包装器默认超时 30 秒，关闭 DeepSeek thinking（`thinking.type=disabled`）；LLM 必须返回 logprobs，缺失会作为 `invalid_response` 调用失败处理。模型弃答时取概率最大的选项（argmax）。
 
-秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器；没有远程 key 且没有可用本地 LLM 时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
+秒回表情和记忆排序仍须显式配置 `jev` 段落；仅配置 `events` 或仅有 DeepSeek key 不会开启它们。接话判断默认开启，有共享决策客户端即可运行；最终文字审查也在有客户端时运行，不受 `replyDecision` 开关控制。`jev` 可省略 `apiKeyEnv`，这时使用本地包装器，但必须有可用的本地 LLM（`localJev` 段落或 `DEEPSEEK_API_KEY`），否则是配置错误。完全不写 `jev` 段落时退回确定性路由与标记检查。显式填写的 `apiKeyEnv` 若在 `.env` / 进程环境中缺失，仍是配置错误，不会悄悄回退。包装器调用按所选 LLM 的费用计费。
 
 **成本**。远程 Jev 只按输入 token 计费，输出免费（撰写时 `jev-1.13` 为每百万 token $0.042，以[官方价格](https://docs.typesafe.ai/models)为准）。一次表情请求只包含当前消息、最多 5 行近期聊天（每行截断到 200 字符）和三个问题，通常只有几百 token；远程请求超时 3 秒。它不消耗主模型的 token；本地包装器则消耗其配置的 LLM token。
 
@@ -375,18 +487,6 @@ journalctl --user -u pi-discord-agent -f
 ```
 
 服务文件假定代码在 `~/apps/pi-extension-discord`、Bun 在 `~/.local/share/pi-discord-bun/node_modules/.bin/bun`，不同的话改这两行即可。数据目录、日志和更新流程见 [docs/deploy.md](docs/deploy.md)。
-
-## 从旧版迁移
-
-旧版只有 Discord，配置叫 `discord.config.json`，数据库叫 `data/discord-agent.db`。
-
-```bash
-bun scripts/migrate-config.ts
-```
-
-脚本把项目根的 `discord.config.json` 转成 `jingmei.config.json`（已存在则拒绝覆盖）：`token_env` 变成 `discord.tokenEnv`，`guildIds` 变成 `spaces`，节日目标的 `guildId` 变成 `space`，其余未知字段丢弃。转完后检查角色 `id` 只含 `a-z 0-9 _ -`，再按需加上 `telegram` 和 `jev` 段落。`.env` 里原有的变量名保持不变即可。
-
-数据库无需手动处理：首次启动时，若没有 `data/jingmei.db` 而有 `data/discord-agent.db`，会连同 `-wal`/`-shm` 一起改名，并把旧的 `discord_*` 表迁移成新表名、把服务器 ID 改写为 `discord:<guildId>`。迁移在一个事务里完成，可重复执行；已有的 Pi 会话文件保留在磁盘上，但没有对话段状态，每个角色被触发时先开一个新对话段。
 
 ## 开发
 

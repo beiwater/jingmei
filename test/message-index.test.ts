@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { ensureMessagesTable } from "../src/core/db.ts";
 import type { Embedder } from "../src/core/embedding.ts";
 import { MemberMemory } from "../src/core/memory.ts";
@@ -8,10 +8,6 @@ import type { SpaceId } from "../src/core/types.ts";
 
 const SPACE = "discord:g1" as SpaceId;
 const BASE = 1_700_000_000_000;
-const databases: Database[] = [];
-afterEach(() => {
-	for (const db of databases.splice(0)) db.close();
-});
 
 // 关键词 → 正交单位向量：同主题距离 0，两个主题混合的消息与单主题距离约 0.77（超出 0.7 阈值），无关主题约 1.41。
 const TOPICS = [["苹果", "水果"], ["香蕉"], ["天气"]];
@@ -26,7 +22,6 @@ function topicVector(text: string): Float32Array {
 
 function setup(options: { embedder?: boolean } = {}) {
 	const db = new Database(":memory:");
-	databases.push(db);
 	ensureMessagesTable(db);
 	let inflight = 0;
 	let maxInflight = 0;

@@ -4,17 +4,19 @@
 import type { AppConfig } from "../../config.ts";
 import {
 	contextCommandError,
+	HELP_INTRO,
 	memoryCommandError,
 	parseBirthdayDate,
 	runContextCommand,
+	statusReply,
 } from "../../core/member-commands.ts";
 import type { MemberMemory } from "../../core/memory.ts";
 import type { ConversationCore, Persona, SpaceId } from "../../core/types.ts";
 import type { TelegramEntity } from "./normalize.ts";
 
 export const TELEGRAM_COMMANDS = [
-	{ command: "help", description: "查看命令" },
-	{ command: "status", description: "查看在线角色" },
+	{ command: "help", description: "查看命令和使用方法" },
+	{ command: "status", description: "查看在线状态" },
 	{ command: "ask", description: "直接向这个角色提问" },
 	{ command: "memory", description: "查看或重新启用你在本群的长期记忆（/memory enable）" },
 	{ command: "birthday", description: "查看、设置或清除生日（MM-DD 或 clear）" },
@@ -61,6 +63,8 @@ export interface CommandContext {
 	config: AppConfig;
 	memberMemory: MemberMemory;
 	getCore(): ConversationCore;
+	/** True while an operator has paused the bot. */
+	isPaused(): boolean;
 }
 
 function formatBirthday(birthday: { month: number; day: number }): string {
@@ -73,11 +77,17 @@ export async function runCommand(context: CommandContext): Promise<string> {
 	const isAdmin = persona.adminUserIds.includes(`telegram:${userId}`);
 	switch (command.name) {
 		case "help":
-			return isAdmin
-				? "命令：/ask /status /memory /birthday /forget /context /compact"
-				: "命令：/ask /status /memory /birthday /forget";
+			return [
+				HELP_INTRO,
+				...(isAdmin ? [...TELEGRAM_COMMANDS, ...TELEGRAM_ADMIN_COMMANDS] : TELEGRAM_COMMANDS).map(
+					({ command: name, description }) => `/${name} ${description}`,
+				),
+			].join("\n");
 		case "status":
-			return `在线。角色：${context.chatPersonas.map((candidate) => `@${candidate.accounts.telegram!.username}`).join("、")}。`;
+			return statusReply(
+				context.chatPersonas.map((candidate) => `@${candidate.accounts.telegram!.username}`),
+				context.isPaused(),
+			);
 		case "forget":
 			memberMemory.forgetMember(spaceId, userId);
 			return "已删除你在本群的长期档案和关系记录，并停止继续建立档案。";
@@ -98,11 +108,8 @@ export async function runCommand(context: CommandContext): Promise<string> {
 		}
 		case "birthday":
 			return runBirthday(context);
-		case "context":
-		case "compact":
+		default: // context, compact
 			return runAdminCommand(context, isAdmin);
-		default:
-			throw new Error(`unhandled_command:${command.name}`);
 	}
 }
 

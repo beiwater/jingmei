@@ -5,6 +5,7 @@
 import { setTimeout } from "node:timers/promises";
 import { errorCategory, log } from "../../observability/log.ts";
 import { type BotApi, TelegramApiError } from "./api.ts";
+import type { TelegramUpdate } from "./normalize.ts";
 
 const POLL_TIMEOUT_SEC = 25;
 const MAX_BACKOFF_MS = 60_000;
@@ -18,7 +19,7 @@ export class Poller {
 		private readonly api: BotApi,
 		private readonly personaId: string,
 		/** Must not block: long work is scheduled by the caller so polling continues. */
-		private readonly onUpdate: (update: unknown) => void,
+		private readonly onUpdate: (update: TelegramUpdate) => void,
 	) {}
 
 	async stop(): Promise<void> {
@@ -31,7 +32,7 @@ export class Poller {
 	async run(): Promise<void> {
 		let backoffMs = 1000;
 		while (!this.stopped) {
-			let updates: unknown[];
+			let updates: TelegramUpdate[];
 			try {
 				updates = await this.api.getUpdates(this.offset, POLL_TIMEOUT_SEC, this.abort.signal);
 				backoffMs = 1000;
@@ -64,10 +65,7 @@ export class Poller {
 			}
 			for (const update of updates) {
 				if (this.stopped) break;
-				if (!update || typeof update !== "object" || !("update_id" in update)) continue;
-				const updateId = update.update_id;
-				if (typeof updateId !== "number") continue;
-				this.offset = Math.max(this.offset, updateId + 1);
+				this.offset = Math.max(this.offset, update.update_id + 1);
 				try {
 					this.onUpdate(update);
 				} catch (err) {
@@ -82,10 +80,7 @@ export class Poller {
 
 	/** Backoff that aborts early on stop() so shutdown never waits out a sleep. */
 	private async sleep(ms: number): Promise<void> {
-		try {
-			await setTimeout(ms, undefined, { signal: this.abort.signal });
-		} catch (error) {
-			if (!(this.abort.signal.aborted && error instanceof Error && error.name === "AbortError")) throw error;
-		}
+		// Only an AbortError can reject.
+		await setTimeout(ms, undefined, { signal: this.abort.signal }).catch(() => {});
 	}
 }

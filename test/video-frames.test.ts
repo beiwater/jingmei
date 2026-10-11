@@ -17,7 +17,7 @@ describe("video frame sampling", () => {
 			which: (command) => `/usr/bin/${command}`,
 			run: async (argv) => {
 				if (argv[0]?.endsWith("ffprobe")) {
-					return { exitCode: 0, stdout: JSON.stringify({ format: { duration } }) };
+					return { exitCode: 0, stdout: `${duration}\n` };
 				}
 				actual.push(argv[argv.indexOf("-ss") + 1]!);
 				writeFileSync(argv.at(-1)!, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
@@ -44,7 +44,7 @@ describe("video frame sampling", () => {
 					expect(new Uint8Array(readFileSync(sourcePath))).toEqual(sourceBytes);
 					expect(statSync(sourcePath).mode & 0o777).toBe(0o600);
 					expect(statSync(dirname(sourcePath)).mode & 0o777).toBe(0o700);
-					return { exitCode: 0, stdout: JSON.stringify({ format: { duration: "10" }, streams: [{}] }) };
+					return { exitCode: 0, stdout: "10.000000\n" };
 				}
 				writeFileSync(argv.at(-1)!, new Uint8Array([0xff, 0xd8, 0xff, 0xd9]));
 				return { exitCode: 0, stdout: "" };
@@ -60,6 +60,15 @@ describe("video frame sampling", () => {
 		expect(commands.every((argv) => !argv.includes("sh") && !argv.includes("-c"))).toBe(true);
 		expect(commands.every((argv) => !existsSync(argv.at(-1)!))).toBe(true);
 		expect(existsSync(dirname(commands[0]!.at(-1)!))).toBe(false);
+	});
+
+	test.each(["N/A\n", "", "0\n", "abc"])("an unusable probe duration %j is a fixed outcome", async (stdout) => {
+		const runner: VideoCommandRunner = {
+			which: (command) => `/usr/bin/${command}`,
+			run: async () => ({ exitCode: 0, stdout }),
+		};
+		const result = await extractVideoFrames({ sourceBytes: new Uint8Array([1]), sourceExtension: "mp4" }, { runner });
+		expect(result).toEqual({ ok: false, outcome: "video_probe_failed" });
 	});
 
 	test("missing ffmpeg is a fixed outcome, not an exception", async () => {

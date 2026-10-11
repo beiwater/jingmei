@@ -12,7 +12,7 @@
 4. `bun run lint`：Biome lint + 格式检查（`bun run format` 自动修复）
 5. 真实平台 smoke：跨边界改动才需要。用测试 bot 和测试群/频道 `bun run start`，观察日志与实际回复
 
-CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile`、`bun test`、`bun run check`、`bun run lint`。
+CI（`.github/workflows/ci.yml`）先安装 bubblewrap（`run_js` 测试和启动断言要真实创建沙箱；Ubuntu 24.04 runner 还需放开 AppArmor 对非特权 user namespace 的限制），再按顺序运行 `bun install --frozen-lockfile`、`bun test`、`bun run check`、`bun run lint`。本地跑 `bun test` 同样需要 Linux 与可用的 bubblewrap。
 
 ## 网络隔离
 
@@ -42,13 +42,16 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 |---|---|
 | `network-isolation.test.ts` | 有真实凭据时仍拒绝 Discord / Telegram（含 Discord 子域名） |
 | `log.test.ts` | `persona_id` 原样保留以区分多角色；token/key/prompt/content/url/path 字段仍脱敏；字符串中的 Telegram token、`sk-` key、URL、绝对路径被替换 |
-| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`discord.config.json` 迁移结果可加载、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
+| `config.test.ts` | `jingmei.config.json` 默认值与密钥解析；`replyDecision=true`、`replyThreshold=0.7` 与 `(0,1]` 校验；Jev endpoint 与本地 LLM 默认/覆盖/无鉴权、显式缺失 key 报错、events 摘要/embedding 校验与决策来源要求；reasoning 档位、`visionModel` 拆分、管理员 ID 按平台规范化、一次收集全部错误且不回显密钥、空间与每空间 `routingP` 之和、平台段落与账号的相互要求、`process.env` 覆盖 `.env`、`.env` 解析错误只报行号、`formatEnvFile` 与 `parseEnvFile` 往返且拒绝解析不回去的键值、缺配置文件时提示 `jingmei init`、DeepSeek 模型目录只生成一次且不含密钥；`kline` 默认关闭、`enabled` 须为布尔 |
+| `features.test.ts` | `features` 默认全开、可单独关闭，未知键与非布尔值一并报错，`events` 配 `history: false` 报错而 `celebrations` 配 `memory: false` 合法；会话工具名列表在全开与逐项关闭时精确匹配，关闭的工具不出现在 system prompt；`audit: false` 跳过自然度审查但泄漏检查仍在 |
+| `init.test.ts` | `jingmei init`：`buildInitFiles` 的最小 / 双平台 / 全部附加功能输出都通过真实 `validateConfig`，JSON 中没有任何 secret，无效回答（非法 id、`events` 缺 history、无 key 的进程内 Jev）在写任何文件前就被拒绝；Discord 邀请链接带所需权限位且无管理员位；`.env` 序列化与 `parseEnvFile` 往返、会解析不回去的键值被拒且不回显；`writeInstall` 写出 0600 的 `.env`、可被 `loadConfig` 读取的配置，已有文件不被替换、失败时回滚；已存在配置或 `.env` 时向导不提问直接拒绝；脚本化终端走完推荐 / 最小 / 自定义路径：token 验证失败可重试、非法 id 被重新询问、privacy mode 与 Message Content Intent 警告、只对选中的附加功能追问、拒绝最终确认则什么都不写、输出与提示里没有 secret |
+| `lazy-modules.test.ts` | `embedding-models.ts` 的静态模型白名单与 fastembed 内置模型枚举一致（防漂移）；通过预加载 `trace-heavy-modules.ts` 观察运行时求值：`jingmei stats`、仅导入 `bot.ts` 与仅导入 `init.ts` / `doctor.ts` 都不加载 fastembed / onnxruntime / sqlite-vec / notjev / lunar-typescript，对照探针确认预加载确实能看到它们 |
+| `doctor.test.ts` | `jingmei doctor`：健康安装只有 OK；配置错误一次列全并跳过依赖配置的检查；每项检查独立失败、互不影响，挂起的检查按超时报告；模型未知 / 未认证 / 不支持看图给出登录提示；Message Content Intent 两个特权位任一即通过、都没有为 FAIL、读不到仅 WARN；Telegram privacy mode 为 WARN、每个配置的群单独 `getChat`；可选依赖只在对应功能开启时检查；真实 Discord / Telegram probe 用注入的全局 fetch 验证端点与错误脱敏；报告和失败详情从不包含 token、密钥、URL 或工作目录；只有 FAIL 计入非零退出码 |
 | `events.test.ts` | 人类消息话题归属、人与 bot 回复直接继承且不决策、空间/频道隔离；裸媒体/低内容继承及十分钟边界、视觉描述/Unicode 正文保留决策；`new` 概率低于 0.6 选最佳旧话题、达到阈值或无概率保留新话题；两小时活跃边界与旧话题召回；3、6、12……后台 single-flight 摘要、参与度与向量刷新；messages 幂等迁移 |
 | `local-jev.test.ts` | 进程内 LLM→Jev 的决策概率与答案边界、logprobs 各话题概率传递、OpenAI-compatible 请求及鉴权、DeepSeek 关闭 thinking、弃答取 argmax、缺 logprobs 视为失败、超时与中止传递、不泄露 provider 错误正文 |
-| `migration.test.ts` | 旧 `discord-agent.db` 改名并把 `discord_*` 表迁移为按空间的新表且只迁移一次；已有 `jingmei.db` 时不动旧文件 |
 | `router.test.ts` | 路由优先级（提及 > 回复 > 名字）、平台账号与角色作用域、bot 不触发、HMAC 抽样稳定；30 秒冷却与 10 分钟/30 条/3 条/多于 1 个其他作者/25% 占比门控边界；directed 绕过门控与抽样，chat-in 不绕过；搜索预取与语音请求识别；平台限定管理员的上下文权限 |
 | `context.test.ts` | 已完成轮次丢弃 thinking、工具循环保留 thinking；暂停入库但不回复，恢复计数；图片输入与 `visionModel`/Pi 降级；当前事件说明写入时固化为 `turnNote`，投影对每条带它的消息都拼接；`jingmei_withheld_v1` 持久且隐藏，投影只移除被扣留轮次 assistant 与标记、保留正常历史；成员记忆不自动注入 |
-| `conversation-turn.test.ts` | 真实 Pi 会话总期限释放 lane、后续消息继续；error/aborted 不发半截文字、日志不泄漏、重试成功不误报；接话单次请求、门控只省 chat-in、directed 绕过门控/无候选、阈值与失败及关闭回退；每条人类消息的 `route` 日志字段（候选、门控、决策、分数、暂停）且无正文，bot 消息不记；最终文字泄漏/自然度先重写一次（带原因，重写通过即发出）、仍不过只发被捂嘴提示、`send_reply` 两次被拒同样只发提示、审查失败按路由区分且不重写不提示、明确语音审查与无客户端泄漏检查、不入库/不计数；“正在输入”在模型运行期间按周期刷新、回复发出后停止、不超过上限；无回声平台发送入库继承话题，有回声平台不预先入库；角色本地图库按 id 发送原文件并结束本轮；`send_reply` 多部分一次模型调用按序发出、只有首条回复原消息、各条入库且后续条无 `reply_to` 但继承话题、工具旁的文字不再发；被审查扣留时一条不发 |
+| `conversation-turn.test.ts` | 真实 Pi 会话总期限释放 lane、后续消息继续；error/aborted 不发半截文字、日志不泄漏、重试成功不误报；接话单次请求、门控只省 chat-in、directed 绕过门控/无候选、阈值与失败及关闭回退；每条人类消息的 `route` 日志字段（候选、门控、决策、分数、暂停）且无正文，bot 消息不记；最终文字泄漏/自然度先重写一次（带原因，重写通过即发出）、仍不过只发被捂嘴提示、`send_reply` 两次被拒同样只发提示、审查失败按路由区分且不重写不提示、明确语音审查与无客户端泄漏检查、不入库/不计数；“正在输入”在模型运行期间按周期刷新、回复发出后停止、不超过上限；无回声平台发送入库继承话题，有回声平台不预先入库；角色本地图库按 id 发送原文件并结束本轮；`send_reply` 多部分只用一次模型调用、工具旁的文字不再发、入库行只有首条带 `reply_to` 且各条继承话题（顺序与入库内容见 `send-reply.test.ts`）；被审查扣留时一条不发，工具旁的文字也不发 |
 | `conversation-turn.test.ts`（持久入站回归） | 未完成轮次重启恢复、重复 redelivery 忽略、expired pending 清理并保留历史、恢复 payload 图片字节省略；完成/失败/暂停/抛错清理；超过 3 分钟只入库（明确提及也不回、不判断/不秒回表情/不记忆）且仍进入下一段、3 分钟精确边界；后排队 bot 消息不污染 recent-lines/接话门控 |
 | `bot-state.test.ts` | CLI 连接写入的暂停对 bot 连接立即可见、重复暂停保留首次时间；累计运行时长：已结束运行求和、运行中算到当前、崩溃的运行止于最后心跳；本次与累计回复数 |
 | `model-select.test.ts` | CLI 连接写入的模型覆盖让运行中 bot 已打开的会话下一轮换模型；1M 窗口完整使用与报告，`/context` 报告窗口条数、对话段上限和窗口后备点；后启动的 provider 目录经一次离线刷新后可用；选择在重启后保留；找不到的模型退回配置模型且只刷新一次；清除后恢复配置模型 |
@@ -61,22 +64,28 @@ CI（`.github/workflows/ci.yml`）按顺序运行 `bun install --frozen-lockfile
 | `history-tools.test.ts` | `related_messages` 与 `search_history` 共用每轮 3 次预算且无进行中回复时拒绝；日期按 UTC 日、ISO 时间精确解析，无效或颠倒范围不调用索引；只查工具作用域的群/频道；输出标 `★` 锚点、压平并截断正文、不超过 20 行；无结果是简短说明而非错误；检索不返回提问消息本身；索引失败成为工具错误 |
 | `conversation-segment.test.ts` | 未触发的消息只入库与索引、不写会话也不调模型；新段种子为触发前最近 30 条已处理消息（一条 context 消息）；相关条数写入时计算一次、只数早于种子窗口的历史、无索引时不写；接续只追加未见消息且已写内容不变；5 分钟、30 条（不含自己）、40,000 tokens 的边界；超时轮次、重启后与旧会话（无对话段状态）的开新段判断；开新段时暂存 soul 转正并进入 system prompt；种子带早先的图片且最多 4 张；各角色按自己的状态独立轮换；`sessions` 迁移幂等且保留旧行 |
 | `celebrations.test.ts` | 悉尼夏令时切换下仍在当地 09:00 后发送；农历节日与两种日历的元旦合并；2027 年春节按目标当地日期发送且相邻日不发；2026、2027 年端午/中秋与闰月不重复；劳动节与 Boxing Day；2026、2027 年 NSW 复活节日期；跨 tick 和重启幂等；失败当天重试；中断的发送重启后恢复；暂停期间不发、恢复后当天补发；2 月 29 日生日；生日按空间查找并经该空间的平台发送 |
-| `discord-transport.test.ts` | Snowflake 保持字符串；按可读边界分段不丢字；分段发送禁用提及并校验频道；只在允许频道点表情且幂等；Unicode 与自定义表情语法；按 `retry_after` 重试且不暴露响应内容；平台 transport 按角色路由且禁止提及；Gateway 连接带 API 版本、identify、心跳与 resume |
-| `discord-media.test.ts` | Discord CDN 图片有界下载并校验真实格式；真实小 PNG 转为 Pi 图片；拒绝非 CDN、非图片、声明或实际超大、HTML/畸形字节；缩放失败的超大原图被拒；视频下载同样受 CDN 与大小限制 |
-| `telegram-platform.test.ts` | 归一化：@用户名和 text_mention 解析为 ID、UTF-16 偏移、论坛话题根不算回复、匿名管理员归属、非图片媒体占位、视频抽帧或 `[视频]`、照片与静态贴纸成图、超过 3 分钟的消息不下载媒体只留标记；适配器入口丢弃允许列表外的群（不分发、不回复、不下载）；文字命令解析、非开头命令当聊天、多角色时管理员命令要求指定；Markdown→entities（嵌套样式、代码、列表、astral emoji 的实体范围合法）、非公网链接去链接、代码块语言清洗、`fold` 块成为只含样式实体的折叠引用且链接写出网址；表情白名单、实体被拒退回纯文本一次且不 @、超长回复分条且只有第一条回复原消息 |
+| `discord-transport.test.ts` | Snowflake 保持字符串；按可读边界分段不丢字；分段发送禁用提及并校验频道；只在允许频道点表情且幂等；Unicode 与自定义表情语法；按 `retry_after` 重试且不暴露响应内容；平台 transport 按角色路由且禁止提及；Gateway 事件只投递允许频道及其线程的消息与交互；Gateway 连接带 API 版本、identify、心跳与 resume；不可恢复关闭码（4004/4013/4014）报告带提示的致命错误且不重连 |
+| `discord-media.test.ts` | Discord CDN 图片有界下载并校验真实格式；真实小 PNG 转为 Pi 图片；拒绝非 CDN、声明或实际超大、HTML/畸形字节；缩放失败的超大原图被拒；视频下载同样受 CDN 与大小限制 |
+| `telegram-platform.test.ts` | 归一化：@用户名和 text_mention 解析为 ID、UTF-16 偏移、论坛话题根不算回复、匿名管理员归属、非图片媒体占位、视频抽帧或 `[视频]`、照片与静态贴纸成图、超过 3 分钟的消息不下载媒体只留标记；适配器入口丢弃允许列表外的群（不分发、不回复、不下载）；文字命令解析、非开头命令当聊天、多角色时管理员命令要求指定、`/help` 说明如何对话、`/status` 标明暂停；`/ask` 无回答或失败时回一句提示、暂停时直接说明且不调用核心；Markdown→entities（嵌套样式、代码、列表、astral emoji 的实体范围合法）、非公网链接去链接、代码块语言清洗、`fold` 块成为只含样式实体的折叠引用且链接写出网址；表情白名单、实体被拒退回纯文本一次且不 @、超长回复分条且只有第一条回复原消息 |
 | `video-frames.test.ts` | 按时长选择的代表帧 seek 位置（含 1 秒与 3 秒边界）；只探测一次、最多抽三帧并清理临时文件；缺 ffmpeg 返回固定结果而不抛错 |
 | `reaction-assets.test.ts` | 未配置本地图库时只能选内置的 4 张 PNG；拒绝编造 ID、路径穿越和调用方给的路径 |
 | `reaction-catalog.test.ts` | 接受旧目录名前缀与目录相对路径、绝对配置目录、JPEG content type、额外元数据；收集缺失文件、路径穿越、内置 id 重名和错误扩展名；拒绝绝对文件路径、逃逸符号链接、非法 id/配文/名称及无效 catalog/配置目录 |
-| `runjs.test.ts` | `run_js` 基本计算与输出、超时、异步膨胀、输出上限、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
-| `runjs-sandbox.test.ts` | bwrap 缺失 / userns 探测拒绝时选择 vm 且计算可用；成功 / 失败探测缓存与并发共享、一次性脱敏日志；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
+| `runjs.test.ts` | `run_js` 基本计算与输出、语法错/抛错/rejected promise 都是结构化失败、超时、异步膨胀、各类超大输出（日志行、错误、结果）有界、用户打印无法伪造结果帧、超长代码拒绝；宿主隔离：无 `process`、`require`、`Bun`、`fetch`，子进程环境无密钥 |
+| `runjs-sandbox.test.ts` | 启动断言：bwrap 可用时通过、缺失时抛 `RunJsSandboxError`；argv 仅只读绑定系统运行时和三个必要文件，不绑定 home、repo、data、`.env` 或配置，隔离网络 / PID 并使用新 tmpfs cwd |
+| `public-url.test.ts` | 公网 URL 过滤：只接受 http(s) 公网主机名与全球可路由 IPv6 字面量（含边界地址）；拒绝非 http(s)、带凭据、`localhost`/`.local`/`.internal`、私网与回环/链路本地 IPv4、以及各类内嵌 IPv4、文档、保留、唯一本地、链路本地、组播 IPv6 |
 | `web-search.test.ts` | DeepSeek 服务端搜索工具、返回有界文本与公网来源 URL；空或超长查询不发请求；HTTP 错误分类不回显密钥；响应大小上限与超时分类 |
 | `fish-tts.test.ts` | Fish Audio 请求与 MP3 返回；无效输入不发请求；不暴露 provider 错误正文；拒绝 JSON 响应与超大音频；中止映射为超时 |
 | `text-image.test.ts` | 渲染器：中文、LaTeX 公式、表格、代码块出一张固定宽度的合法 PNG，文字越长图越高；图片只从公网 URL 下载（私网、本机、本地路径、引用式写法一律不请求），最多 4 张，下载失败/非图片/网络错误只显示占位；原始 Typst、`<svg>`、`<a>`、数学里的 `#` 转义被当成文字而不执行（执行就会让编译失败）；空与超长输入不做任何工作；过高的页面报 `too_large`；`plot` 代码块画出 2D/3D 图且写错的只留说明、图例文字不会被当成 Typst 执行；`image` 代码块交给画图函数（最多 2 张），失败或未开启时只留占位。`plot.test.ts`：表达式解析（优先级、一元负号、乘方右结合、省略乘号、函数与常量、方程）与拒绝一切非白名单输入；tan 在极点断开且点都在范围内；隐函数自动找范围并等比例；坏规格给出可读原因；代码块替换、数量上限、表达式文本不进 Typst。`textImage` 配置默认关闭、阈值默认 300 与边界校验。`conversation-turn.test.ts`：超长文字被扣留一次并通过工具发图（只发一条、入库的是配文）；模型重试后仍超长则按原样发送文字；未超长与未启用时不重试 |
 | `image-generation.test.ts` | Antigravity 画图请求带存储的 project、模型与宽高比，跳过 thought 图取最终 PNG/JPEG；无效凭据/提示词不发请求；429、HTTP 错误、无图、超大图与超时分类且不回显 token |
 | `kline.test.ts` | K 线：交易对写法归一（`btc/usdt`→`BTCUSDT`），带参数拼接或过短的写法不发请求；只请求固定公开主机、查询参数正确、`redirect: "error"`，返回按时间升序的数值 K 线；HTTP 400 → `invalid_symbol`，5xx、网络错误、非 JSON、行数不足或字段非数字 → `fetch_failed`；渲染出 1600×1000 的合法 PNG，配文由数据生成（最新价、窗口涨跌）；涨红跌绿、平盘与极小价格仍可渲染；渲染器先取数再画图，坏交易对在请求前失败 |
-| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
+| `send-reply.test.ts` | `send_reply`：图/文/语音按给定顺序发出，只有第一条回复原消息，每条按源消息入库（只有首条带回复 ID），之后同轮再发被拒；表情图以原文件和自带配文发出并入库；画图与 TTS 并行准备、全部就绪前不发任何一条；同种媒体超过 1 个在任何工作前整体拒绝；schema 限总数 1–4、只接受该角色可用的种类、表情图 id 不接受路径；任一部分准备失败（画图、渲染、读图）一条不发、错误列出部分序号与错误码、回到 idle 可重试；发送中途失败保留已发、不再发后续、以 terminate 结束；首条发送失败回到 idle；超时中止后不再发；开启长文转图时超长文字部分在任何工作前被拒；审查扣留或配文含内部标记时不准备不发送并结束本轮，纯表情图不请求自然度审查；无配文的长文图取 Markdown 首行标题入库；`kline_image` 经渲染器取图、以数据生成的配文入库且只有模型自己的文字过审查、未开启时 schema 不含该种类、间隔/条数/交易对越界被 schema 拒绝、每轮至多 1 个、取数失败一条不发并回到 idle |
 
-`test/network-guard.ts` 是预加载文件，不是测试。
+`test/network-guard.ts` 与 `test/trace-heavy-modules.ts` 是预加载文件，不是测试。`test/support/` 是共享测试夹具，同样不是测试：
+
+- `core.ts`：`makePersona(overrides)`、`makeTransport(overrides)`——默认关闭一切可选能力 / 接受一切发送，测试只写自己要变的字段；`conversationOptions(...)` 给出内存库 + 全新 `BotState`/`MemberMemory`/`SoulStore` 的 `ConversationOptions`，需要共享库或重启时传入 `db`。
+- `cleanup.ts`：`useCleanups()` 在文件顶层调用一次，注册 `afterEach` 并返回后进先出的清理栈（`push`）和随栈清理的临时目录 `tmpDir()`；`personaFile(dir)`（`core.ts`）写入真实角色 prompt 文件。
+- `fish.ts`：`mockFishTts(cleanups, onRequest?)`，把 Fish Audio TTS 请求答成固定 MP3 字节，其余网络请求一律报错。
+- `pi.ts`：`makeModel`、`makeRuntime`（`ModelRuntime` 的模型/鉴权桩）、`assistantMessage`、`streamOf`/`scriptedStream`（确定性 provider 流）、`IMAGE`，以及驱动真实 Pi 会话的私有接缝 `seamOf`/`onSession`。
 
 ## 写测试的规则
 

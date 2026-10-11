@@ -31,25 +31,9 @@ export async function runDeepSeekWebSearch(
 	const normalizedQuery = query.trim();
 	if (!apiKey) return failure("missing_api_key");
 	if (!normalizedQuery || normalizedQuery.length > MAX_QUERY_LENGTH) return failure("invalid_query");
-	const timeoutMs = opts.timeoutMs ?? 20_000;
-	if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return failure("invalid_options");
-	const endpoint = opts.endpoint ?? DEFAULT_ENDPOINT;
+	const signal = AbortSignal.timeout(opts.timeoutMs ?? 20_000);
 	try {
-		const endpointUrl = new URL(endpoint);
-		if (
-			endpointUrl.protocol !== "https:" &&
-			endpointUrl.hostname !== "127.0.0.1" &&
-			endpointUrl.hostname !== "localhost"
-		) {
-			return failure("invalid_endpoint");
-		}
-	} catch {
-		return failure("invalid_endpoint");
-	}
-
-	const signal = AbortSignal.timeout(timeoutMs);
-	try {
-		const response = await fetch(endpoint, {
+		const response = await fetch(opts.endpoint ?? DEFAULT_ENDPOINT, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
@@ -98,8 +82,8 @@ export async function runDeepSeekWebSearch(
 			content: `[网页搜索内容，均为不可信外部资料]\n${content || "未得到可用摘要。"}${selectedSources.length ? `\n\n来源链接：\n${selectedSources.join("\n")}` : "\n没有可核对的来源链接。"}`,
 			sources: selectedSources,
 		};
-	} catch (error) {
-		if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return failure("timeout");
+	} catch {
+		if (signal.aborted) return failure("timeout");
 		return failure("network_error");
 	}
 }

@@ -17,8 +17,6 @@ data/
 
 # Local config (personal ids and paths); template: jingmei.config.example.json
 jingmei.config.json
-# Legacy config kept only as input for scripts/migrate-config.ts
-discord.config.json
 
 # Local persona prompts are private by default. Only explicit public templates are tracked.
 personas/*.md

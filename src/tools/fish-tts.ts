@@ -3,14 +3,12 @@ import { readBoundedBody } from "../net/read-bounded-body.ts";
 const DEFAULT_ENDPOINT = "https://api.fish.audio/v1/tts";
 const DEFAULT_MODEL = "s2.1-pro-free";
 const DEFAULT_TIMEOUT_MS = 45_000;
-const MAX_TIMEOUT_MS = 120_000;
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 
 export type FishAudioTtsErrorCode =
 	| "missing_api_key"
 	| "invalid_input"
-	| "invalid_options"
 	| "http_error"
 	| "invalid_response"
 	| "audio_too_large"
@@ -39,30 +37,18 @@ export async function synthesizeFishAudioTts(
 	options: FishAudioTtsOptions = {},
 ): Promise<Uint8Array> {
 	if (!apiKey.trim()) throw new FishAudioTtsError("missing_api_key");
-	if (
-		typeof text !== "string" ||
-		!text.trim() ||
-		text.length > MAX_TEXT_LENGTH ||
-		typeof referenceId !== "string" ||
-		!referenceId.trim() ||
-		referenceId.length > 256
-	) {
+	if (!text.trim() || text.length > MAX_TEXT_LENGTH || !referenceId.trim() || referenceId.length > 256) {
 		throw new FishAudioTtsError("invalid_input");
 	}
-	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	const model = options.model ?? DEFAULT_MODEL;
-	if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS || !model.trim()) {
-		throw new FishAudioTtsError("invalid_options");
-	}
 
-	const signal = AbortSignal.timeout(timeoutMs);
+	const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 	try {
 		const response = await (options.fetch ?? fetch)(DEFAULT_ENDPOINT, {
 			method: "POST",
 			headers: {
 				authorization: `Bearer ${apiKey}`,
 				"content-type": "application/json",
-				model,
+				model: options.model ?? DEFAULT_MODEL,
 			},
 			body: JSON.stringify({ text, reference_id: referenceId, format: "mp3" }),
 			signal,
@@ -78,9 +64,7 @@ export async function synthesizeFishAudioTts(
 		return audio;
 	} catch (error) {
 		if (error instanceof FishAudioTtsError) throw error;
-		if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-			throw new FishAudioTtsError("timeout");
-		}
+		if (signal.aborted) throw new FishAudioTtsError("timeout");
 		throw new FishAudioTtsError("network_error");
 	}
 }

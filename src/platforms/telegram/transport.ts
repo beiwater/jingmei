@@ -195,12 +195,6 @@ export class TelegramPlatformTransport implements PlatformTransport {
 		readonly quickReactions: Readonly<Record<string, string>> = TELEGRAM_QUICK_REACTIONS,
 	) {}
 
-	private api(personaId: string): BotApi {
-		const api = this.apis.get(personaId);
-		if (!api) throw new Error("telegram_persona_unavailable");
-		return api;
-	}
-
 	async sendMessage(input: {
 		personaId: string;
 		channelId: string;
@@ -209,7 +203,7 @@ export class TelegramPlatformTransport implements PlatformTransport {
 		attachments?: readonly OutboundAttachment[];
 		mention?: readonly PersonaAccount[];
 	}): Promise<{ id: string }> {
-		const api = this.api(input.personaId);
+		const api = this.apis.get(input.personaId)!;
 		const chatId = Number(input.channelId);
 		let replyTo = input.replyToMessageId ? Number(input.replyToMessageId) : undefined;
 		const mentionIds = new Set(input.mention?.map((user) => user.userId));
@@ -237,7 +231,8 @@ export class TelegramPlatformTransport implements PlatformTransport {
 	}
 
 	async startTyping(personaId: string, channelId: string): Promise<void> {
-		await this.api(personaId)
+		await this.apis
+			.get(personaId)!
 			.sendChatAction(Number(channelId))
 			.catch((error: unknown) =>
 				log.warn("telegram", "typing_failed", { persona_id: personaId, error_category: errorCategory(error) }),
@@ -245,8 +240,7 @@ export class TelegramPlatformTransport implements PlatformTransport {
 	}
 
 	async addReaction(personaId: string, channelId: string, messageId: string, emoji: string): Promise<void> {
-		if (!isReactionEmoji(emoji)) throw new Error("telegram_reaction_invalid");
-		await this.api(personaId).setMessageReaction(Number(channelId), Number(messageId), emoji);
+		await this.apis.get(personaId)!.setMessageReaction(Number(channelId), Number(messageId), emoji);
 	}
 
 	/** Resolved into a notifying `text_mention` only when `user` is also passed as a `mention` recipient. */

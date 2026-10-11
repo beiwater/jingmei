@@ -1,31 +1,23 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { BotState, HEARTBEAT_MS } from "../src/core/bot-state.ts";
 import { openDatabase } from "../src/core/db.ts";
+import { useCleanups } from "./support/cleanup.ts";
 
 const MINUTE = 60_000;
-const dirs: string[] = [];
-afterEach(() => {
-	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
-function dataDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "jingmei-bot-state-"));
-	dirs.push(dir);
-	return dir;
-}
+const cleanups = useCleanups();
+afterEach(() => setSystemTime());
 
 test("a pause written by the CLI connection reaches the running bot's connection and keeps its first time", () => {
-	const dir = dataDir();
+	const dir = cleanups.tmpDir();
 	const botDb = openDatabase(dir);
 	const cliDb = openDatabase(dir);
 	const bot = new BotState(botDb);
 	const cli = new BotState(cliDb);
 	expect(bot.pausedAt()).toBeNull();
-	expect(cli.pause(1_000)).toBe(true);
-	expect(cli.pause(2_000)).toBe(false);
+	setSystemTime(new Date(1_000));
+	expect(cli.pause()).toBe(true);
+	setSystemTime(new Date(2_000));
+	expect(cli.pause()).toBe(false);
 	expect(bot.pausedAt()).toBe(1_000);
 	expect(cli.resume()).toBe(true);
 	expect(cli.resume()).toBe(false);
@@ -35,24 +27,30 @@ test("a pause written by the CLI connection reaches the running bot's connection
 });
 
 test("runtime sums finished runs, counts a live run up to now, and stops counting a crashed run at its last heartbeat", () => {
-	const db = openDatabase(dataDir());
+	const db = openDatabase(cleanups.tmpDir());
 	const state = new BotState(db);
 	expect(state.summary(0)).toMatchObject({ current: null, lastSeenAt: null, runs: 0, runtimeMs: 0, messages: 0 });
 
-	state.startRun(0);
+	// Not 0: Bun before 1.4 treats setSystemTime(new Date(0)) as "reset to the real clock".
+	const first = MINUTE;
+	setSystemTime(new Date(first));
+	state.startRun();
 	state.recordReply();
-	state.stopRun(10 * MINUTE);
+	setSystemTime(new Date(first + 10 * MINUTE));
+	state.stopRun();
 
 	const t = 100 * MINUTE;
-	state.startRun(t);
+	setSystemTime(new Date(t));
+	state.startRun();
 	state.recordReply();
 	state.recordReply();
-	state.heartbeat(t + 5 * MINUTE);
+	setSystemTime(new Date(t + 5 * MINUTE));
+	state.heartbeat();
 	expect(state.summary(t + 5 * MINUTE + 30_000)).toMatchObject({
 		current: { startedAt: t, replies: 2 },
 		lastSeenAt: null,
 		runs: 2,
-		firstStartedAt: 0,
+		firstStartedAt: first,
 		runtimeMs: 15 * MINUTE + 30_000,
 		replies: 3,
 	});

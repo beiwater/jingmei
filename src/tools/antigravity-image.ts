@@ -96,8 +96,7 @@ export async function generateAntigravityImage(
 	prompt: string,
 	options: AntigravityImageOptions = {},
 ): Promise<GeneratedImage> {
-	if (typeof prompt !== "string" || !prompt.trim() || prompt.length > MAX_PROMPT_LENGTH)
-		throw new AntigravityImageError("invalid_input");
+	if (!prompt.trim() || prompt.length > MAX_PROMPT_LENGTH) throw new AntigravityImageError("invalid_input");
 	const { token, projectId } = parseCredential(apiKey);
 	const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 	try {
@@ -124,8 +123,7 @@ export async function generateAntigravityImage(
 		return extractImage(new TextDecoder().decode(body));
 	} catch (error) {
 		if (error instanceof AntigravityImageError) throw error;
-		if (signal.aborted || (error instanceof DOMException && error.name === "AbortError"))
-			throw new AntigravityImageError("timeout");
+		if (signal.aborted) throw new AntigravityImageError("timeout");
 		throw new AntigravityImageError("network_error");
 	}
 }

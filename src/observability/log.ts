@@ -49,7 +49,6 @@ function safeScalar(key: string, value: unknown): string | number | boolean | nu
 	if (typeof value === "boolean") return value;
 	if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
 	if (typeof value === "string") return redactString(value);
-	if (typeof value === "bigint") return value.toString().slice(0, MAX_LOG_STRING);
 	if (value instanceof Error) return safeName(value.name, "error");
 	return undefined;
 }
@@ -76,8 +75,8 @@ function formatLogRecord(
 		schema: LOG_SCHEMA_VERSION,
 		ts: now.toISOString(),
 		level,
-		component: safeName(component, "unknown"),
-		event: safeName(event, "unknown"),
+		component,
+		event,
 		...(Object.keys(safeFields).length > 0 ? { fields: safeFields } : {}),
 	};
 	let line = JSON.stringify(record);
@@ -103,11 +102,7 @@ export function setLogSink(next: LogSink): () => void {
 }
 
 function writeLog(level: LogLevel, component: string, event: string, fields: LogFields = {}): void {
-	try {
-		sink(formatLogRecord(level, component, event, fields));
-	} catch {
-		// Observability must never change the business outcome.
-	}
+	sink(formatLogRecord(level, component, event, fields));
 }
 
 export const log = {

@@ -5,10 +5,10 @@ import { join } from "node:path";
 import { withLoader } from "fox-girl-loader";
 import { ConfigError, ensureDeepSeekModelsFile, loadConfig, piAgentDir } from "./config.ts";
 import { BotState, HEARTBEAT_MS } from "./core/bot-state.ts";
-import { CelebrationScheduler } from "./core/celebrations.ts";
+import type { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
 import { openDatabase } from "./core/db.ts";
-import { createFastEmbedder, DEFAULT_EMBEDDING_MODEL } from "./core/embedding.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "./core/embedding-models.ts";
 import { createPiEventSummarizer, EventTracker } from "./core/events.ts";
 import { MemberMemory } from "./core/memory.ts";
 import { MessageIndex } from "./core/message-index.ts";
@@ -28,10 +28,12 @@ import { errorCategory, log } from "./observability/log.ts";
 import { createDiscordPlatform } from "./platforms/discord/index.ts";
 import { createTelegramPlatform } from "./platforms/telegram/index.ts";
 import { ANTIGRAVITY_PROVIDER_ID, AntigravityImageError, generateAntigravityImage } from "./tools/antigravity-image.ts";
+import { assertRunJsSandbox, RunJsSandboxError } from "./tools/run-js.ts";
 import type { ImageGenerator } from "./core/tools.ts";
 
 async function main(): Promise<void> {
 	const config = loadConfig();
+	await assertRunJsSandbox();
 	const agentDir = piAgentDir(config.dataDir);
 	mkdirSync(agentDir, { recursive: true, mode: 0o700 });
 	ensureDeepSeekModelsFile(agentDir);
@@ -41,22 +43,19 @@ async function main(): Promise<void> {
 	const db = openDatabase(config.dataDir);
 	const memberMemory = new MemberMemory(db);
 	const botState = new BotState(db);
-	let core: Conversation | undefined;
+	// Platform handlers only fire after `platform.start()`, by which time `core` exists.
 	const deps = {
 		config,
 		personas,
 		memberMemory,
-		getCore: () => {
-			if (!core) throw new Error("conversation core is not ready");
-			return core;
-		},
+		getCore: (): Conversation => core,
+		isPaused: () => botState.pausedAt() !== null,
 	};
 	// Each factory verifies its tokens and fills `persona.accounts[platform]` before returning.
 	const platforms = [
 		...(config.discord ? [await createDiscordPlatform(deps)] : []),
 		...(config.telegram ? [await createTelegramPlatform(deps)] : []),
 	];
-	if (!platforms.length) throw new Error("no platform configured");
 	const transports = new Map<Platform, PlatformTransport>(
 		platforms.map((platform) => [platform.transport.platform, platform.transport]),
 	);
@@ -72,6 +71,8 @@ async function main(): Promise<void> {
 	if (config.events) assertBotModelConfigured({ ...config.events.summaryModel, purpose: "events" }, modelRuntime);
 
 	const jev = config.jev;
+	// The key stays in the environment as the default model's credential; `features.search` only gates the tool.
+	const searchApiKey = config.features.search ? config.webSearchApiKey : undefined;
 	const remoteDecision = jev?.apiKey
 		? createJevClient({ provider: jev.provider, endpoint: jev.endpoint, apiKey: jev.apiKey, model: jev.model })
 		: undefined;
@@ -79,22 +80,27 @@ async function main(): Promise<void> {
 	const decision =
 		remoteDecision && localDecision ? withFallback(remoteDecision, localDecision) : (remoteDecision ?? localDecision);
 	// The message index always has vectors; topic tracking, when enabled, shares the same local model.
-	const embedder = await createFastEmbedder({
-		model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
-		cacheDir: join(config.dataDir, "models"),
-	});
+	// `features.history` off skips the model download, sqlite-vec and the index; config rejects `events` without it.
 	let events: EventTracker | undefined;
-	if (config.events) {
-		if (!decision) throw new Error("events requires a decision client");
-		events = new EventTracker({
-			db,
-			decision,
-			embedder,
-			summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
+	let messageIndex: MessageIndex | undefined;
+	if (config.features.history) {
+		const { createFastEmbedder } = await import("./core/embedding.ts");
+		const embedder = await createFastEmbedder({
+			model: config.events?.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
+			cacheDir: join(config.dataDir, "models"),
 		});
+		if (config.events) {
+			events = new EventTracker({
+				db,
+				decision: decision!,
+				embedder,
+				summarize: createPiEventSummarizer(modelRuntime, config.events.summaryModel),
+			});
+		}
+		const index = new MessageIndex({ db, embedder });
+		memberMemory.onForget((spaceId, userId) => index.forgetAuthor(spaceId, userId));
+		messageIndex = index;
 	}
-	const messageIndex = new MessageIndex({ db, embedder });
-	memberMemory.onForget((spaceId, userId) => messageIndex.forgetAuthor(spaceId, userId));
 	// Reuses the pi-provider-antigravity login; Pi refreshes the token under its auth.json lock.
 	const imageGenerator: ImageGenerator | undefined = modelRuntime.hasConfiguredAuth(ANTIGRAVITY_PROVIDER_ID)
 		? async (prompt, aspectRatio) => {
@@ -116,7 +122,7 @@ async function main(): Promise<void> {
 			log.warn("core", "text_image_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	// A synthetic render proves ECharts and resvg load; live data is fetched per request, not at startup.
+	// A synthetic render proves resvg loads; live data is fetched per request, not at startup.
 	let kline: KlineRenderer | undefined;
 	if (config.kline) {
 		try {
@@ -126,7 +132,7 @@ async function main(): Promise<void> {
 			log.warn("core", "kline_unavailable", { error_category: errorCategory(error) });
 		}
 	}
-	core = new Conversation({
+	const core = new Conversation({
 		db,
 		botState,
 		dataDir: config.dataDir,
@@ -134,11 +140,13 @@ async function main(): Promise<void> {
 		personas,
 		transports,
 		modelRuntime,
-		memberMemory,
-		soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }),
-		messageIndex,
+		...(config.features.memory ? { memberMemory } : {}),
+		...(config.features.soul
+			? { soulStore: new SoulStore({ db, personaIds: personas.map((persona) => persona.id) }) }
+			: {}),
+		...(messageIndex ? { messageIndex } : {}),
 		...(events ? { events } : {}),
-		...(config.webSearchApiKey ? { webSearchApiKey: config.webSearchApiKey } : {}),
+		...(searchApiKey ? { webSearchApiKey: searchApiKey } : {}),
 		...(config.voice ? { voice: config.voice } : {}),
 		...(imageGenerator ? { imageGenerator } : {}),
 		...(textImage ? { textImage } : {}),
@@ -151,6 +159,7 @@ async function main(): Promise<void> {
 						quickReactions: jev?.quickReactions ?? false,
 						memoryScoring: jev?.memoryScoring ?? false,
 						replyDecision: jev?.replyDecision ?? true,
+						audit: config.features.audit,
 						replyThreshold: jev?.replyThreshold ?? 0.7,
 						threshold: jev?.threshold ?? 0.8,
 						minIntervalMs: jev?.minIntervalMs ?? 60_000,
@@ -159,14 +168,19 @@ async function main(): Promise<void> {
 				}
 			: {}),
 	});
-	const scheduler = new CelebrationScheduler({
-		db,
-		targets: config.celebrations,
-		transports,
-		listBirthdays: (spaceId, month, day) => memberMemory.listBirthdays(spaceId, month, day),
-		isPaused: () => botState.pausedAt() !== null,
-		onError: (error) => log.error("core", "celebration_failed", { error_category: errorCategory(error) }),
-	});
+	// The lunar calendar library loads only when there is a greeting target.
+	let scheduler: CelebrationScheduler | undefined;
+	if (config.celebrations.length) {
+		const { CelebrationScheduler } = await import("./core/celebrations.ts");
+		scheduler = new CelebrationScheduler({
+			db,
+			targets: config.celebrations,
+			transports,
+			listBirthdays: (spaceId, month, day) => memberMemory.listBirthdays(spaceId, month, day),
+			isPaused: () => botState.pausedAt() !== null,
+			onError: (error) => log.error("core", "celebration_failed", { error_category: errorCategory(error) }),
+		});
+	}
 
 	let shuttingDown = false;
 	let heartbeat: Timer | undefined;
@@ -174,24 +188,24 @@ async function main(): Promise<void> {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		log.info("core", "shutdown", { signal });
-		await scheduler.stop();
+		await scheduler?.stop();
 		await Promise.allSettled(platforms.map((platform) => platform.stop()));
-		await core?.close();
+		await core.close();
 		await events?.idle();
-		await messageIndex.idle();
+		await messageIndex?.idle();
 		clearInterval(heartbeat);
 		botState.stopRun();
 		db.close();
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(0)));
-	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
+	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
+	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
 
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.
 	void core
-		?.recoverPending()
+		.recoverPending()
 		.catch((error: unknown) => log.error("core", "inbound_recovery_failed", { error_category: errorCategory(error) }));
-	scheduler.start();
+	scheduler?.start();
 	botState.startRun();
 	heartbeat = setInterval(() => botState.heartbeat(), HEARTBEAT_MS);
 	const transcoder = inspectVideoTranscoder();
@@ -200,7 +214,11 @@ async function main(): Promise<void> {
 	log.info("core", "ready", {
 		platforms: [...transports.keys()].join(","),
 		persona_count: personas.length,
-		search_enabled: !!config.webSearchApiKey,
+		search_enabled: !!searchApiKey,
+		history_enabled: !!messageIndex,
+		memory_enabled: config.features.memory,
+		soul_enabled: config.features.soul,
+		audit_enabled: config.features.audit && !!decision,
 		voice_enabled: !!config.voice,
 		image_generation_enabled: !!imageGenerator,
 		text_image_enabled: !!textImage,
@@ -227,8 +245,13 @@ export async function startBot(): Promise<void> {
 			error_category: errorCategory(error),
 			detail: error instanceof Error ? error.message : undefined,
 		});
-		// Both messages are built from config/model names only, never secret values.
-		if (error instanceof ConfigError || error instanceof PiModelConfigurationError) console.error(error.message);
+		// These messages are built from config/model names and the sandbox probe result, never secret values.
+		if (
+			error instanceof ConfigError ||
+			error instanceof PiModelConfigurationError ||
+			error instanceof RunJsSandboxError
+		)
+			console.error(error.message);
 		process.exitCode = 1;
 	}
 }

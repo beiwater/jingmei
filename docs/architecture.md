@@ -46,7 +46,7 @@ flowchart LR
 | `src/core/prompt.ts` | system prompt |
 | `src/core/tools.ts` | 模型工具（含 `related_messages` / `search_history`） |
 | `src/core/quick-reactions.ts` | Jev 秒回表情 |
-| `src/core/events.ts` / `embedding.ts` | 话题归属、摘要与参与度刷新；fastembed 中文向量（`maxLength: 128`，消息索引共用） |
+| `src/core/events.ts` / `embedding.ts` / `embedding-models.ts` | 话题归属、摘要与参与度刷新；fastembed 中文向量（`maxLength: 128`，消息索引共用）。`embedding-models.ts` 是不导入 fastembed 的支持模型白名单与默认模型，供配置校验使用 |
 | `src/core/message-index.ts` | 按条消息检索索引：FTS5 关键词表、sqlite-vec 消息向量、相关条数、历史检索、`/forget` 清理 |
 | `src/core/memory.ts` / `soul.ts` / `celebrations.ts` | 成员记忆、私人 soul、节日生日祝福 |
 | `src/core/db.ts` | 打开数据库、旧库改名与旧表迁移、messages 与 sessions 幂等迁移（含对话段列与 `message_images`）与 sqlite-vec 加载 |
@@ -63,12 +63,14 @@ flowchart LR
 
 ## 启动
 
+重依赖按需加载，只有对应功能开启才进入进程：`fastembed`（含 onnxruntime）仅在 `features.history` 开启时由 `bot.ts` 动态导入 `embedding.ts`；`sqlite-vec` 在 `MessageIndex` / `EventTracker` 首次加载向量扩展时 `require`；`lunar-typescript` 仅在配置了 `celebrations` 时随动态导入的 `celebrations.ts` 加载；`notjev` 在本地决策客户端第一次请求时动态导入。`src/cli.ts` 只在 `start` 子命令里动态导入 `bot.ts`，因此 `pause` / `resume` / `stats` / `model` / `login` / `logout` 不加载这些包（`test/lazy-modules.test.ts` 守护）。
+
 1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
 2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。
-3. 开启 `events` 时先 `useExtensibleSqlite()`（macOS 使用 Homebrew SQLite），再 `openDatabase()` 并加载 sqlite-vec。没有 `jingmei.db` 而有 `discord-agent.db` 时连同 `-wal`/`-shm` 改名，再迁移 `discord_*` 表。
+3. `useExtensibleSqlite()`（macOS 使用 Homebrew SQLite），再 `openDatabase()`。
 4. 按配置创建 Discord/Telegram 平台：每个 token 先验证身份（Discord `/users/@me`，Telegram `getMe`），填入 `persona.accounts`。
 5. `createInstalledPiModelRuntime()`：整个进程一个 Pi `ModelRuntime`，agent 目录是 `data/pi-agent`（`models.json`、`auth.json` 都在这里）。provider 扩展只从 agent 目录加载，项目 `.pi/` 扩展不被信任、不加载。每个角色的模型、reasoning 档位和认证逐一 `assertBotModelConfigured`；`visionModel` 另需支持图片输入。
-6. 在 `${dataDir}/models` 准备 fastembed 模型缓存（`events.embeddingModel`，未开话题时用默认 `fast-bge-small-zh-v1.5`；首次下载约 96 MB），创建 `MessageIndex`，并把 `MemberMemory.onForget` 接到它的 `forgetAuthor`。开启话题时另外校验 `summaryModel`，用同一个 embedder 和共享决策客户端创建 `EventTracker`。创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。关闭时先等待核心 lane，再依次等待 `events.idle()` 与消息索引 `idle()` 后关数据库。
+6. `features.history` 开启时（默认），在 `${dataDir}/models` 准备 fastembed 模型缓存（`events.embeddingModel`，未开话题时用默认 `fast-bge-small-zh-v1.5`；首次下载约 96 MB），创建 `MessageIndex`，并把 `MemberMemory.onForget` 接到它的 `forgetAuthor`；关闭时不建索引、不下载模型、不加载 sqlite-vec，`events` 与之同配是配置错误。开启话题时另外校验 `summaryModel`，用同一个 embedder 和共享决策客户端创建 `EventTracker`。创建核心与祝福调度器，逐个 `start()` 平台（注册命令、开始接收）。缺 ffmpeg/ffprobe 只记 `video_frames_unavailable` 警告。关闭时先等待核心 lane，再依次等待 `events.idle()` 与消息索引 `idle()` 后关数据库。
 7. 平台全部启动后 `BotState.startRun()` 在 `bot_runs` 新增一次运行，每分钟心跳更新 `last_seen_at`；正常关闭时写 `stopped_at`。崩溃的运行停在最后一次心跳，`stats` 把超过两次心跳没有更新的运行视为已停止。
 
 ## 一条消息的路径
@@ -179,18 +181,22 @@ Pi 0.84.1 的 split-turn 前缀摘要不接收 `customInstructions`；上述附�
 
 ## 工具
 
+`features` 的五个开关（`history`、`memory`、`soul`、`search`、`audit`，默认全开）在启动时一次决定下表的“注册条件”；`audit` 关闭只跳过最终文字的自然度审查（泄漏检查与 `jev.replyDecision` 不受影响）。
+
 | 工具 | 注册条件 | 说明 |
 |---|---|---|
-| `run_js` | 总是 | 纯计算沙箱，见下文威胁模型 |
-| `remember_member_fact` / `recall_member_memory` | 总是 | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
-| `related_messages` / `search_history` | 挂载消息索引 | 查当前群/频道更早的历史：前者按某条消息的号码查相关消息，后者按关键词 + 语义检索（可限时间范围）；两者每轮合计最多 3 次，详见“历史检索索引” |
-| `update_soul` | 总是 | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
-| `search_web` | 有 `DEEPSEEK_API_KEY` | DeepSeek 服务端搜索，每次调用最多搜一次 |
+| `run_js` | 总是（启动时 bwrap 试运行失败则整个进程不启动） | 纯计算沙箱，见下文威胁模型 |
+| `remember_member_fact` / `recall_member_memory` | `features.memory`（默认开） | 作者明确陈述稳定信息时保存；回想用 `member` 传聊天显示名或 ID，限本频道近期出现或被当前作者提及/回复的人类，精确名字优先再忽略大小写，歧义失败且不列出档案，每轮最多 3 次 |
+| `related_messages` / `search_history` | `features.history`（默认开；挂载消息索引） | 查当前群/频道更早的历史：前者按某条消息的号码查相关消息，后者按关键词 + 语义检索（可限时间范围）；两者每轮合计最多 3 次，详见“历史检索索引” |
+| `update_soul` | `features.soul`（默认开） | 学到自身格式、语气、长度等稳定教训时暂存私人 soul 笔记 |
+| `search_web` | 有 `DEEPSEEK_API_KEY` 且 `features.search` 不为 `false` | DeepSeek 服务端搜索，每次调用最多搜一次 |
 | `send_reply` | 总是；部分种类按条件出现 | 本轮回复按顺序拆成 1–4 部分（`parts`），每部分发成一条消息，发完结束本轮（`terminate`）。schema 只列出该角色可用的种类，会话内固定，不随轮次变化：`text` 总有（≤ 2000 字；开启 `textImage` 时还不得超过 `thresholdChars`）；`voice` 需配了 `voice` 且 `voiceEnabled`（≤ 400 字，Fish Audio MP3，配文是 `🎙️ 文字稿`）；`image` 需 `antigravity` provider 已登录且 `imageGenerationEnabled`；`reaction_image` 需 `sendReactionImages`（内置或该角色 `reactionImages` 图库的 id，id 排序固定；默认用 catalog 配文；启动校验路径与元数据）；`text_image` 需 `textImage.enabled` 且启动试渲染成功；`kline_image` 需 `kline.enabled` 且启动试渲染成功（见下一行）。除 `text` 外每种每次最多 1 个（总数 4 由 schema 限制，种类上限由代码检查）。流程：种类上限与文字长度 → 泄漏检查与自然度审查（见“最终文字扣留”）→ 所有部分 `Promise.allSettled` 并行准备（画图、渲染、TTS、读文件）→ 全部成功才严格按顺序发送，只有第一条带 `replyToMessageId`。任一部分准备失败：一条不发，`turn.reply` 回到 idle，错误结果列出失败的部分序号、种类与错误码（记 `reply_part_failed { persona_id, part_type, error_category }`），模型可去掉它重发或改发文字。发送中途失败（或本轮已超时）：已发出的保留并入库，后面的不再发，`turn.reply` 记为已发送（首条消息 ID），以错误结果 + `terminate` 结束本轮并告诉模型不要重发；第一条就失败则什么都没发，回到 idle。一轮只能有一次成功的 `send_reply`（或一次表情） |
 | `send_reply` 的 `image` | 同上 | 用 `pi-provider-antigravity` 存在 `auth.json` 的凭据（`ModelRuntime.getAuth` 负责加锁刷新，API key 是 `{token, projectId}` JSON）向 `daily-cloudcode-pa` `streamGenerateContent` 发一次 `image_gen` 请求，取最后一个非 thought 的 PNG/JPEG（≤ 10 MiB）；比例默认 1:1，配文默认 `🎨` |
 | `send_reply` 的 `text_image` | 同上 | 把 Markdown（≤ 8000 字，含 `$…$` LaTeX 公式、表格、代码块、公网图片）渲染成一张 PNG，配文取参数或首行标题；`plot` 代码块由 `src/media/plot.ts` 处理：白名单表达式解析器（数字、x/y/t、四则与乘方、常用函数，无属性访问与任意名称）在 JS 里取样（函数 400 点、参数方程 600 点、隐函数 83×83 网格且向外多取一格以便裁掉库补的边界线、3D 每边 ≤ 24 格），只把数字与转义后的图例字符串生成 Typst，交给 cetz 0.4.0 + cetz-plot 0.1.2 / plotsy-3d 0.2.1 绘制，每张 ≤ 3 个；`image` 代码块在角色开启画图时调用同一个 `ImageGenerator`（4:3，每张 ≤ 2 个，与公网图片下载并行），结果按图片白名单嵌入；渲染链路 cmarker 0.1.8 + mitex 0.2.7（Typst 包，首次渲染按固定版本下载并缓存；cmarker 0.1.9 起要求 Typst ≥ 0.15，而内置编译器是 0.14）→ `typst-ts-node-compiler` 导出 SVG → `@resvg/resvg-js` 转 PNG，字体用系统 CJK 字体。工作区根目录是 `<tmpdir>/jingmei-text-image` 这个空目录，编译器读不到别处；用户内容只以数据（`doc.md`、图片字节）进入，cmarker 的 `raw-typst` 关闭，`<svg>`/`<a>` 处理器被替换，`image` 只接受本次下载的文件名白名单；图片只下载公网 URL（`parsePublicHttpUrl`，`redirect: "error"`，≤ 4 张、每张 ≤ 4 MiB）。高度 > 8000 px 或 > 9 MB 渲染失败 |
-| `send_reply` 的 `kline_image` | 需 `kline.enabled` 且启动试渲染成功 | 参数 `symbol`（`normalizeSymbol`：去掉 `/ _ -`、转大写、`[A-Z0-9]{5,20}`，其余在联网前就拒绝）、`interval`（`15m/1h/4h/1d/1w`，schema 里是字面量并集）、可选 `limit`（10–120，默认 60）。`src/tools/market-klines.ts` 只向固定主机 `data-api.binance.vision` 的 `/api/v3/klines` 发一次 GET（`redirect: "error"`、10 秒超时、响应 ≤ 256 KiB），HTTP 400 记 `invalid_symbol`，其他失败或形状不对记 `fetch_failed`；数字全部来自行情，不经模型。`src/media/kline-image.ts` 用 ECharts（`echarts/core` 按需加载，SVG 渲染器，`ssr: true`，无 DOM）生成蜡烛图 + 成交量柱的 SVG，再由 `@resvg/resvg-js`（加载系统字体）转 800×500 @2x 的 PNG，红涨绿跌、时间 UTC。配文由数据确定性生成（交易对、周期、最新价、窗口涨跌幅），并作为入库内容；它不进自然度审查（不是模型的话）。失败按 `send_reply` 的通用规则（一条不发、`KlineError.code` 作错误码）处理 |
+| `send_reply` 的 `kline_image` | 需 `kline.enabled` 且启动试渲染成功 | 参数 `symbol`（`normalizeSymbol`：去掉 `/ _ -`、转大写、`[A-Z0-9]{5,20}`，其余在联网前就拒绝）、`interval`（`15m/1h/4h/1d/1w`，schema 里是字面量并集）、可选 `limit`（10–120，默认 60）。`src/tools/market-klines.ts` 只向固定主机 `data-api.binance.vision` 的 `/api/v3/klines` 发一次 GET（`redirect: "error"`、10 秒超时、响应 ≤ 256 KiB），HTTP 400 记 `invalid_symbol`，其他失败或形状不对记 `fetch_failed`；数字全部来自行情，不经模型。`src/media/kline-image.ts` 手写 SVG（`<line>` + `<rect>`，坐标轴刻度用 `plot.ts` 的 `niceStep`）生成蜡烛图 + 成交量柱，再由 `@resvg/resvg-js`（加载系统字体）转 800×500 @2x 的 PNG，红涨绿跌、时间 UTC。配文由数据确定性生成（交易对、周期、最新价、窗口涨跌幅），并作为入库内容；它不进自然度审查（不是模型的话）。失败按 `send_reply` 的通用规则（一条不发、`KlineError.code` 作错误码）处理 |
 | `react_to_message` | 未开启 Jev 秒回表情 | 给本轮消息或本频道近期人类消息点表情并结束本轮 |
+
+工具集在启动时由配置决定，进程生命周期内固定；system prompt 的工具说明按同一组开关生成，关闭的工具不会被提及（全部开启时与引入 `features` 前逐字节一致）。`test/features.test.ts` 守护各开关下的工具名列表。
 
 `send_reply` 与 `react_to_message` 只在被路由角色的当前回复轮内生效，一轮只能用其中之一成功回复一次。
 
@@ -227,6 +233,7 @@ flowchart TD
 
 ## 成员记忆、soul、祝福
 
+- **开关**：`features.memory` 关闭时核心不收到 `MemberMemory`：不调用 `observe`（不再被动建档案、偏好、关系、自述生日），不注册两个记忆工具、提示词也不提；`MemberMemory` 仍由 bot 创建并交给平台命令与祝福调度器，所以 `/memory`、`/forget` 继续作用于已有数据，`/birthday` 仍可手动登记（生日祝福靠它，故与 `celebrations` 并存合法）。`features.soul` 关闭时核心不收到 `SoulStore`：无 `update_soul`、不注入正式/暂存 soul、压缩与开新段不再晋升；`session_souls` 表与已存数据原样保留。
 - **记忆**：`memory_profiles` 记名字、活跃度、生日；`memory_facts` 只收白名单键（preference、interest、role、project、timezone、language、goal、note），拒绝敏感键和可疑内容；`memory_relationships` 来自提及、回复和明确的朋友/同学说法。`/forget` 删档案与关系并写入 `memory_opt_out`，同时通过 `onForget` 删除该成员的消息索引行，之后不再收集也不再索引，直到 `/memory enable`。
 - **按需回想**：成员记忆不自动注入输入；角色需要时调用 `recall_member_memory`（按聊天显示名，排除角色 bot 和 opt-out，可用 Jev 相关度排序），结果只出现在该轮的工具结果中，不公开完整档案或生日，也不把推断当作事实。
 - **soul**：`session_souls` 按 `(角色, 空间, 频道)` 存正式内容（≤ 4 KiB）和暂存笔记（总计 ≤ 1 KiB，单条 ≤ 300 字符）。学到关于自身风格的稳定教训时用 `update_soul` 暂存，不写入成员资料；暂存笔记以 `discord_pending_soul_v1` 追加进会话尾部；开新对话段时先事务性并入正式 soul 再建会话，压缩成功后同样并入，只重载该会话。
@@ -258,8 +265,6 @@ flowchart TD
 | `bot_pause` | 单行（`id = 1`）`paused_at`；存在即暂停 |
 | `persona_models` | `persona_id` 主键 → `jingmei model` 选择的 `provider`、`model`、`updated_at`；无记录即用配置模型 |
 
-**旧库迁移**（`migrateLegacyTables`）：每张 `discord_*` 表改名为去掉前缀的名字（`discord_core_` 连同 `core_` 一起去掉），`guild_id` 列改名为 `space_id` 并加 `discord:` 前缀。整个迁移一个事务、可重复执行；目标表已存在则报错而不是覆盖。
-
 ## 平台适配器
 
 | | Discord | Telegram |
@@ -278,17 +283,17 @@ flowchart TD
 
 - **威胁**：run_js 输入来自 LLM，LLM 上下文来自群消息 → 群成员可经 prompt injection 让 bot 执行攻击者构造的 JS。最坏情况是读到主进程同 uid 可读的 `.env`（全部 bot token / API key）并联网外发。
 - **防到什么**：vm context 由 `Object.create(null)` 创建且 `codeGeneration: { strings: false, wasm: false }`，context 内不存在任何 host realm 对象/函数——`console.log.constructor` / `this.constructor.constructor` / `Function` / `eval` 都拿不到 host `Function`。console 在 context 内部 bootstrap；结果只在 context 内 `JSON.stringify` 后以字符串跨界。子进程 env 只有 `PATH`、隔离 tmp cwd、`--smol`、同步代码 vm timeout 3 s、进程级 5 s SIGKILL 兜底、输出 4 KB 上限。
-- **自动 OS 隔离**：首次有效 `run_js` 调用在 Linux 上用相同 bwrap 参数和 Bun / wrapper 试运行 `1 + 1`，并发调用共享一次探测；可用性结果缓存到进程退出。未安装、AppArmor 拒绝 user namespace、挂载或运行时失败都选择原有 vm 路径；不新增配置。只记录一次 `run_js_sandbox`，字段 `{ kind: "bwrap" | "vm" }`，不记录探测错误、路径或 stderr。安装或修改系统策略后需重启再探测。
-- **bwrap 增加的边界**：`--unshare-all` 隔离网络及 PID 等命名空间；`--die-with-parent`、`--new-session` 配合 PID namespace，让 sandbox 结束时其中孙进程一并退出。只读挂载 `/usr`、存在时的 `/lib`、`/lib64`、`/etc/ld.so.cache`，以及 Bun 可执行文件、wrapper 和输入代码三个单独文件（映射到 `/runjs/`），不挂载它们的父目录。根文件系统不包含服务用户 home、bot 数据目录、`.env`、`jingmei.config.json` 或 repo；工作目录是新建 tmpfs `/tmp`，另提供 namespace 内的 `/proc` 和最小 `/dev`。保留原有 vm、PATH-only 环境、输出上限与超时控制。
+- **强制 OS 隔离**：`run_js` 总是经 bwrap 运行，没有 vm 回退。启动时 `assertRunJsSandbox()` 走与正式调用相同的路径试运行 `1 + 1`；非 Linux、未安装 bwrap、AppArmor 拒绝 user namespace、挂载或运行时失败都抛 `RunJsSandboxError`，`startBot` 把它打印到 stderr 并以非零码退出。不新增配置。运行期 bwrap 突然不可用时，单次调用返回结构化失败。
+- **bwrap 增加的边界**：`--unshare-all` 隔离网络及 PID 等命名空间；`--die-with-parent`、`--new-session` 配合 PID namespace，让 sandbox 结束时其中孙进程一并退出。只读挂载 `/usr`、存在时的 `/lib`、`/lib64`、`/etc/ld.so.cache`，以及 Bun 可执行文件、wrapper 和输入代码三个单独文件（映射到 `/runjs/`），不挂载它们的父目录。根文件系统不包含服务用户 home、bot 数据目录、`.env`、`jingmei.config.json` 或 repo；工作目录是新建 tmpfs `/tmp`，另提供 namespace 内的 `/proc` 和最小 `/dev`。bwrap 内仍保留 vm、PATH-only 环境、输出上限与超时控制。
 - **残余风险**：
-  1. node:vm 不是安全边界。回退 vm 时，若引擎漏洞打穿 realm 隔离，子进程仍以服务用户运行，可读磁盘上的 `.env`、数据目录并联网；auto 策略不保证每台机器都有 OS 隔离，运维须确认日志 `kind: "bwrap"`。
+  1. node:vm 不是安全边界；它是 bwrap 内的第二层。引擎漏洞打穿 realm 隔离后，攻击者仍被限制在 bwrap 的命名空间与只读运行时挂载里。
   2. `--smol` 不是硬内存上限，靠 5 s SIGKILL 兜底。
-  3. vm 回退时 SIGKILL 只杀直接子进程，逃逸后派生的孙进程不受超时约束；bwrap 路径通过 PID namespace 关闭这条逃逸路径。
+  3. SIGKILL 只杀直接子进程；逃逸后派生的孙进程由 PID namespace 与 `--die-with-parent` 回收。
   4. vm timeout 只约束同步代码；异步膨胀由 SIGKILL 兜底。
   5. bwrap 不隔离宿主内核，不提供 seccomp 或硬 CPU / 内存配额；内核漏洞及资源耗尽仍是风险，且沙箱可读取挂载的系统运行时文件。生产仍应使用专用低权服务用户。
-- **部署与验证**：Ubuntu 24.04 的 AppArmor userns 策略可能使已安装的 bwrap 仍不可用；按 [deploy.md](deploy.md#run_js-操作系统沙箱) 配置并确认一次性日志，不把“已安装”当作“已隔离”。
+- **部署与验证**：Ubuntu 24.04 的 AppArmor userns 策略可能使已安装的 bwrap 仍不可用；按 [deploy.md](deploy.md#run_js-操作系统沙箱) 配置；启动试运行会真实创建一次沙箱，不把“已安装”当作“已隔离”。
 
-`test/runjs.test.ts` 覆盖 vm 边界；`test/runjs-sandbox.test.ts` 覆盖缺少 / 拒绝 bwrap 时的回退、一次性探测及仅绑定运行时文件的安全边界。改沙箱后必须重跑。
+`test/runjs.test.ts` 覆盖 vm 边界；`test/runjs-sandbox.test.ts` 覆盖启动断言（可用时通过、bwrap 缺失时抛错）及仅绑定运行时文件的安全边界。改沙箱后必须重跑。
 
 ## 日志
 

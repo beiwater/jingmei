@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { migrateDiscordConfig } from "../scripts/migrate-config.ts";
-import { ConfigError, ensureDeepSeekModelsFile, loadConfig, parseEnvFile, validateConfig } from "../src/config.ts";
-import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding.ts";
+import {
+	ConfigError,
+	ensureDeepSeekModelsFile,
+	formatEnvFile,
+	loadConfig,
+	loadOperatorConfig,
+	parseEnvFile,
+	validateConfig,
+} from "../src/config.ts";
+import { DEFAULT_EMBEDDING_MODEL } from "../src/core/embedding-models.ts";
 import { JEV_ENDPOINT, OPENAI_DECISIONS_ENDPOINT, OPENAI_DECISIONS_MODEL } from "../src/decision/jev.ts";
 
 const GUILD = "1552560014353506386";
@@ -59,6 +66,15 @@ function errorsOf(run: () => unknown): readonly string[] {
 }
 
 describe("config", () => {
+	test("the shipped example config loads with the shipped .env.example", () => {
+		const example = JSON.parse(readFileSync(join(import.meta.dir, "../jingmei.config.example.json"), "utf8"));
+		const exampleEnv = parseEnvFile(join(import.meta.dir, "../.env.example"));
+		const config = validateConfig(example, root, exampleEnv);
+		expect(config.personas.map((persona) => persona.id)).toEqual(["luna"]);
+		expect(config.discord).toBeDefined();
+		expect(config.telegram).toBeUndefined();
+	});
+
 	test("kline charts are off unless enabled, and the switch must be a boolean", () => {
 		expect(validateConfig(base(), root, env).kline).toBeUndefined();
 		expect(validateConfig(base({ kline: { enabled: false } }), root, env).kline).toBeUndefined();
@@ -158,7 +174,9 @@ describe("config", () => {
 		});
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.apiKey).toBeUndefined();
 		expect(validateConfig(base({ jev: {} }), root, resolved).jev?.quickReactions).toBe(true);
-		expect(validateConfig(base({ jev: {} }), root, env).jev).toBeUndefined();
+		expect(errorsOf(() => validateConfig(base({ jev: {} }), root, env))).toEqual([
+			expect.stringContaining("jev needs apiKeyEnv"),
+		]);
 	});
 
 	test("the OpenAI provider gets its own endpoint and model and replaces the DeepSeek default", () => {
@@ -437,53 +455,34 @@ describe("config", () => {
 		expect(parseEnvFile(path)).toEqual({ A_KEY: "one: two" });
 	});
 
-	test("migrates discord.config.json into a loadable jingmei config", () => {
-		const migrated = migrateDiscordConfig({
-			guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }],
-			dataDir: "data",
-			routingSecretEnv: "ROUTING_SECRET",
-			celebrations: [{ guildId: GUILD, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" }],
-			personas: [
-				{
-					id: "luna",
-					name: "Luna",
-					token_env: "DISCORD_LUNA_TOKEN",
-					personaPath: "personas/luna.md",
-					provider: "deepseek",
-					model: "deepseek-flash",
-					reasoningEffort: "high",
-					routingP: 0.65,
-					guildIds: [GUILD],
-					aliases: ["L"],
-					adminUserIds: [CHANNEL],
-				},
-			],
-		});
-		expect(migrated).toEqual({
-			dataDir: "data",
-			routingSecretEnv: "ROUTING_SECRET",
-			discord: { guilds: [{ guildId: GUILD, channelIds: [CHANNEL] }] },
-			celebrations: [
-				{ space: `discord:${GUILD}`, channelId: CHANNEL, personaId: "luna", timeZone: "UTC", calendar: "both" },
-			],
-			personas: [
-				{
-					id: "luna",
-					name: "Luna",
-					personaPath: "personas/luna.md",
-					provider: "deepseek",
-					model: "deepseek-flash",
-					reasoningEffort: "high",
-					routingP: 0.65,
-					aliases: ["L"],
-					spaces: [`discord:${GUILD}`],
-					discord: { tokenEnv: "DISCORD_LUNA_TOKEN", adminUserIds: [CHANNEL] },
-				},
-			],
-		});
-		const config = validateConfig(migrated, root, env);
-		expect(config.personas[0]?.adminUserIds).toEqual([`discord:${CHANNEL}`]);
-		expect(config.celebrations[0]?.spaceId).toBe(`discord:${GUILD}`);
+	test("a missing config file points at jingmei init", () => {
+		for (const load of [() => loadConfig(root), () => loadOperatorConfig(root)])
+			expect(errorsOf(load)).toEqual([
+				"Missing jingmei.config.json; run `bun run jingmei init` or copy jingmei.config.example.json",
+			]);
+	});
+
+	test("formatEnvFile round-trips through parseEnvFile, with comments and colons in values", () => {
+		const env = { ROUTING_SECRET: "abc", DISCORD_LUNA_TOKEN: "MTI.x:y#z", TELEGRAM_LUNA_TOKEN: "123456:ABC-def" };
+		const path = join(root, "env");
+		writeFileSync(path, formatEnvFile(env, "first line\nsecond line"));
+		expect(readFileSync(path, "utf8")).toStartWith("# first line\n# second line\n");
+		expect(parseEnvFile(path)).toEqual(env);
+	});
+
+	test("formatEnvFile rejects keys and values that would not parse back, without echoing them", () => {
+		const invalid: Array<Record<string, string>> = [
+			{ KEY: "two\nlines" },
+			{ KEY: " padded" },
+			{ KEY: "" },
+			{ "bad key": "v" },
+		];
+		for (const bad of invalid) {
+			const message = errorsOf(() => formatEnvFile(bad, "h")).join();
+			expect(message).not.toBe("");
+			expect(message).not.toContain("padded");
+			expect(message).not.toContain("two");
+		}
 	});
 
 	test("creates the DeepSeek model catalog once without secrets", () => {
@@ -493,5 +492,10 @@ describe("config", () => {
 		writeFileSync(path, "{}");
 		expect(ensureDeepSeekModelsFile(join(root, "agent"))).toBe(path);
 		expect(readFileSync(path, "utf8")).toBe("{}");
+	});
+
+	test("creates the agent directory private so a fresh install is not world-readable", () => {
+		ensureDeepSeekModelsFile(join(root, "fresh", "pi-agent"));
+		expect(statSync(join(root, "fresh", "pi-agent")).mode & 0o777).toBe(0o700);
 	});
 });

@@ -15,7 +15,7 @@
 
 [中文](README.md) · **English**
 
-[Quick start](#quick-start) · [Commands](#commands) · [Operator commands](#operator-commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Optional features](#optional-features) · [Commands](#commands) · [Operator commands](#operator-commands) · [Configuration](#configuration-reference) · [Architecture](docs/architecture.md) · [Deployment](docs/deploy.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -33,15 +33,14 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 - **Jev quick reactions** (optional): a Jev decision API (or an in-process LLM wrapper) puts an emoji on messages. Addressed messages get the selected emoji unless the decision is `none`; ordinary messages only when strongly emotional or genuinely funny, rate-limited per channel. It does not use the main model and never delays the real reply. See [Jev](#jev).
 - **Concurrent topics** (optional): `events` assigns channel messages to topics. `§E` IDs, titles, descriptions and leading participants tell the character which event it is answering, keeping simultaneous discussions separate and recalling older topics when they resume.
 - **Conversation segments, continued on demand**: every group message is stored and indexed, but only the character the router triggers writes to its own session; messages that trigger nobody enter no session. When a character is triggered, its previous session continues if its last successful reply was at most 5 minutes ago, at most 30 messages have accumulated since, and the session is at most 40,000 tokens: the accumulated messages are appended as one context message, then the trigger. Otherwise a new segment starts, seeded with the 30 most recent messages before the trigger. Each line looks like `[time] #messageId ↪ replyId §E<topic> author: text （相关 N 条）`, where N is the number of related messages in earlier history (shown as `20+` above 20). It is fixed when the line is written and never recomputed, so the prefix stays stable and cache hits survive. After a turn timeout, send failure or final error, the next trigger always starts a new segment, also across restarts.
-- **History search**: when a line shows "（相关 N 条）", a character can call `related_messages` to see the earlier related chat for a message, or `search_history` to search by keyword and meaning (optionally limited by ISO time or `YYYY-MM-DD` date). The two share at most 3 lookups per turn, each returns at most 20 lines, hits come with 2 lines of context on each side, only the current group/channel is searched, and members who used `/forget` never appear. Keywords use SQLite FTS5 trigram; meaning uses sqlite-vec vectors (requires `events`, which supplies the embedding model). Messages stored before the upgrade become searchable only after running the [backfill script](#operator-commands).
+- **History search**: when a line shows "（相关 N 条）", a character can call `related_messages` to see the earlier related chat for a message, or `search_history` to search by keyword and meaning (optionally limited by ISO time or `YYYY-MM-DD` date). The two share at most 3 lookups per turn, each returns at most 20 lines, hits come with 2 lines of context on each side, only the current group/channel is searched, and members who used `/forget` never appear. Keywords use SQLite FTS5 trigram; meaning uses sqlite-vec vectors (controlled by `features.history`, on by default, using the default embedding model; `events` shares it). Messages stored before the upgrade become searchable only after running the [backfill script](#operator-commands).
 - **Images and video frames**: up to 4 images per message, scaled to fit 1024×1024 and 200 KB, reach the model; videos are sampled into 1–3 frames with ffmpeg. When the main model has no image input, Pi replaces each image with an omission note; alternatively set `visionModel` to describe images in a sentence or two first. Voice, files and stickers become text placeholders such as `[语音]`, `[文件]`, `[贴纸 😀]`.
 - **Voice** (optional): with Fish Audio, characters can send MP3s with a transcript in Chinese, Japanese or English. When a member explicitly asks for a voice reply, the final answer is also turned into audio.
 - **Drawing** (optional): once the Antigravity provider is signed in, characters can put an `image` part in `send_reply` to draw one picture from a member's description and send it (Nano Banana 2 / `gemini-3.1-flash-image` by default, about 15 seconds). See [Drawing](#drawing) for sign-in. **Warning**: Google's Antigravity terms explicitly forbid third-party tools using Antigravity OAuth and accounts have been banned for it; use a secondary account.
 - **Long text as an image** (optional): with `textImage` enabled, a text reply over 300 characters (configurable) is not sent; the character is told to use a `text_image` part of `send_reply` instead, which renders its full Markdown to one image: headings, lists, tables, code blocks, LaTeX math (`$…$`, `$$…$$`), public images, graphs (functions, implicit curves, parametric curves, scatter points, 3D surfaces) and, when drawing is enabled, pictures newly drawn by AI. Pure libraries, no browser. See [Long text as an image](#long-text-as-an-image).
-- **Candlestick charts** (optional): with `kline` enabled, a character can put a `kline_image` part in `send_reply` to send a live candlestick chart with volume for a Binance spot pair (for example BTCUSDT). The bot fetches the prices from Binance's public API; the model only picks the pair and interval and never writes numbers. Pure libraries (ECharts server-side rendering + resvg), no browser. See [Candlestick charts](#candlestick-charts).
-- **Candlestick charts** (optional): with `kline` enabled, a character can put a `kline_image` part in `send_reply` to send a live candlestick chart with volume for a Binance spot pair (for example BTCUSDT). The bot fetches the prices from Binance's public API; the model only picks the pair and interval and never writes numbers. Pure libraries (ECharts server-side rendering + resvg), no browser. See [Candlestick charts](#candlestick-charts).
+- **Candlestick charts** (optional): with `kline` enabled, a character can put a `kline_image` part in `send_reply` to send a live candlestick chart with volume for a Binance spot pair (for example BTCUSDT). The bot fetches the prices from Binance's public API; the model only picks the pair and interval and never writes numbers. Pure libraries (hand-written SVG + resvg), no browser. See [Candlestick charts](#candlestick-charts).
 - **Web search**: with `DEEPSEEK_API_KEY` set, DeepSeek server-side web search is enabled. Messages that explicitly say “查一下” / “搜索” / “look up” are searched first and answered with source links; the model can also search on its own when a question depends on external facts.
-- **Calculation**: `run_js` runs small pure-computation JavaScript in a node:vm realm inside a short-lived child process for exact arithmetic, date math and unit conversions. On the first Linux call it automatically probes bubblewrap: when usable, filesystem, network and PID isolation are added; when missing or blocked by system policy, it falls back to the existing vm sandbox (vm itself is not a security boundary). No new configuration is needed. See [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱) for Ubuntu setup and log verification, and [docs/architecture.md](docs/architecture.md) for residual risks.
+- **Calculation**: `run_js` runs small pure-computation JavaScript in a node:vm realm inside a short-lived child process for exact arithmetic, date math and unit conversions. It requires Linux with a working bubblewrap (filesystem, network and PID isolation); startup runs it once and exits with an error when it is unusable, with no fallback. No new configuration is needed. See [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱) for Ubuntu setup, and [docs/architecture.md](docs/architecture.md) for residual risks.
 - **Member memory and soul**: per group, profiles hold names, birthdays, stable self-stated facts, and relationships formed by mentions and replies. Member memory is not attached to the input automatically; the replying character calls `recall_member_memory` with a chat display name when it needs it (bots and members who used `/forget` are excluded), keeping history shorter and the cache stable. Characters save explicit self-stated interests, roles, projects, timezones, languages, goals, and preferences, never reciting full profiles or birthdays publicly. Each character keeps a private soul per channel; stable lessons about its own formatting, tone, or response length are staged and become formal when a new conversation segment starts or after successful compaction. Members can `/forget` at any time.
   The system prompt spells out when to save and when to recall: save before replying when the author states lasting facts about themselves (never jokes, passing states, other people's details or sensitive data); recall before answering about a member; if nothing is found, say so instead of inventing memories.
 - **Holiday and birthday greetings** (optional): sent to a chosen channel after 09:00 local time, covering birthdays and Chinese/Australian holidays; deliveries are recorded in the database, so restarts never resend.
@@ -80,30 +79,44 @@ Full data flow, schema and the run_js threat model: [docs/architecture.md](docs/
 
 ## Quick start
 
-You need [Bun](https://bun.sh/) 1.3 or newer, at least one Discord or Telegram bot, and credentials for a model provider. Video frames additionally need `ffmpeg` (including `ffprobe`) on the host; without it everything else works and videos become a `[视频]` placeholder.
+You need Linux, [Bun](https://bun.sh/) 1.3 or newer, a working bubblewrap (the `run_js` sandbox; startup fails without it, see [docs/deploy.md](docs/deploy.md#run_js-操作系统沙箱)), at least one Discord or Telegram bot, and credentials for a model provider. Video frames additionally need `ffmpeg` (including `ffprobe`) on the host; without it everything else works and videos become a `[视频]` placeholder.
 
-macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. The first startup downloads the default Chinese embedding model (about 96 MB) into `data/models` (under your custom `dataDir` if set), requiring network access; later starts reuse that cache. The vector part of message search (related counts, semantic search) always uses this model; topics share it when `events` is enabled.
+macOS development also needs `brew install sqlite` so Bun can load sqlite-vec. The first startup downloads the default Chinese embedding model (about 96 MB) into `data/models` (under your custom `dataDir` if set), requiring network access; later starts reuse that cache; neither is needed with `features.history` set to `false`. The vector part of message search (related counts, semantic search) always uses this model; topics share it when `events` is enabled.
 
 ```bash
 git clone https://github.com/beiwater/jingmei.git
 cd jingmei
 bun install
+bun run jingmei init
+```
+
+`init` is the recommended way to configure: an interactive wizard that creates `jingmei.config.json`, `.env` and `personas/<id>.md`, so you never hand-edit JSON. It first asks Recommended / Minimal / Custom (Recommended = every core feature on, no add-ons; Minimal = every core feature off, no embedding model download; Custom = pick core features and add-ons one by one, asking for parameters only for the add-ons you pick). Then it asks for the platform(s), each bot token (masked, and verified live with the same call the bot makes, showing the bot's name), the server / channel ids (the group ids on Telegram), the persona id and name, and the model (DeepSeek with `DEEPSEEK_API_KEY`, or sign in later with `bun run jingmei login`). `ROUTING_SECRET` is generated randomly; secrets go only into `.env` (mode 0600), never into the JSON. `init` refuses to run when `jingmei.config.json` or `.env` already exists, never overwrites anything, and needs an interactive terminal. It ends by printing the next steps (including the Discord invite link).
+
+After it finishes:
+
+1. Edit `personas/<id>.md`: the character's identity, voice and boundaries.
+2. `bun run jingmei doctor`: a read-only self-check of the config, the `run_js` sandbox, model credentials, bot tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg / fonts / sqlite-vec / the embedding cache for the features you enabled. One OK / WARN / FAIL line each, with a fix hint.
+3. Start:
+
+   ```bash
+   bun run start
+   ```
+
+To configure by hand instead (or to script deployments), the wizard does the equivalent of:
+
+```bash
 cp jingmei.config.example.json jingmei.config.json
 cp .env.example .env
 cp personas/template.en.md personas/luna.md
 ```
 
 1. Edit `personas/luna.md`: the character's identity, voice and boundaries.
-2. Edit `jingmei.config.json`: fill in server/channel or group IDs. If you use only one platform, delete the other platform's section and the matching account in each persona; delete `voice`, `jev`, `events` or `celebrations` if you don't want them. Fields are listed in [Configuration reference](#configuration-reference).
+2. Edit `jingmei.config.json`: fill in your Discord server ID and channel ID. The example has a single Discord character; Telegram, voice, Jev and the rest are in [Optional features](#optional-features), and fields are in [Configuration reference](#configuration-reference).
 3. Edit `.env`: bot tokens, `ROUTING_SECRET` (any long random string) and API keys. The format is `key: value`, not `KEY=value`.
 4. Provide model credentials, either way:
    - The example persona uses DeepSeek `deepseek-flash`; just set `DEEPSEEK_API_KEY` in `.env`. On startup a catalog entry for this model (without the key) is written to `data/pi-agent/models.json`.
    - Other providers: for subscription accounts (Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, ...) run `bun run jingmei login` and pick a provider to sign in with OAuth. Credentials go to `<dataDir>/pi-agent/auth.json`; the bot uses them on startup and refreshes tokens automatically. `bun run jingmei logout` removes them. On a server without a browser, open the printed link on your own machine, then paste the final redirect URL or code back into the terminal. `bun run jingmei model` lists every model that has credentials. Alternatively put that provider's API key variable (for example `OPENAI_API_KEY`) in the process environment. `.env` is read only by this project and, apart from `DEEPSEEK_API_KEY`, is not passed to Pi.
-5. Start:
-
-   ```bash
-   bun run start
-   ```
+5. Run `bun run jingmei doctor` to self-check, then `bun run start`.
 
 Startup validates the configuration, verifies every bot token, and checks that every persona's model exists and is authenticated. Configuration errors are listed all at once; an invalid token or unavailable model also stops startup. Then @-mention or reply to a character in the group.
 
@@ -126,6 +139,8 @@ On startup each character registers its slash commands in its servers. Replies u
 
 ## Telegram setup
 
+The example config has no Telegram; first add the `telegram` section and the persona's `telegram` account from [Optional features](#optional-features).
+
 1. Create one bot per character with `/newbot` at [@BotFather](https://t.me/BotFather) and put the token in `.env` (e.g. `TELEGRAM_LUNA_TOKEN: …`).
 2. Use `/setprivacy` to set privacy mode to **Disable**, or make the bot a group admin; otherwise it only sees commands and messages addressed to it. After changing it, remove the bot from the group and add it again. The `privacy_mode_enabled` warning in the startup log points at this.
 3. Add the bot to the group and put the group ID (supergroups look like `-100…`) in `telegram.chatIds`. If you don't know it, start with any placeholder, send a message in the group, and read `chat_id` from the `chat_ignored` log event.
@@ -134,12 +149,103 @@ Telegram limitation: **bots cannot see other bots' messages**. With several char
 
 Telegram replies convert Markdown into message entities and are split above 4096 characters. Characters put long explanations and lists in a ```` ```fold ```` block, shown as a quote that stays collapsed until tapped (inside it only bold/italic/strikethrough survive, code shows as plain text and links are written as "label (url)"). Reactions are limited to the emoji set allowed by the Bot API (which has no 😂).
 
+## Optional features
+
+The example config has one Discord character. Everything below is added to `jingmei.config.json` as needed; each snippet says which environment variable it needs (put it in `.env`, `key: value` format). Field meanings are in the [Configuration reference](#configuration-reference).
+
+**Telegram**: needs `TELEGRAM_LUNA_TOKEN` in `.env` (the BotFather token). Add a top-level `telegram` section and a `telegram` account on the persona; setup steps are in [Telegram setup](#telegram-setup).
+
+```json
+"telegram": { "chatIds": ["-1001234567890"] }
+```
+
+```json
+"telegram": { "tokenEnv": "TELEGRAM_LUNA_TOKEN" }
+```
+
+The second snippet goes in the persona object under `personas[]`, next to `discord`.
+
+**Voice** (Fish Audio): needs `FISH_AUDIO_API_KEY`. `referenceId` is a 32-hex voice ID; a persona uses voice by default and can opt out with `voiceEnabled: false`.
+
+```json
+"voice": {
+	"apiKeyEnv": "FISH_AUDIO_API_KEY",
+	"referenceId": "00000000000000000000000000000000",
+	"model": "s2.1-pro-free"
+}
+```
+
+**Drawing**: needs no environment variable, but an Antigravity OAuth login; steps in [Drawing](#drawing). The model defaults to `gemini-3.1-flash-image`, so write this only to change it:
+
+```json
+"imageGeneration": { "model": "gemini-3.1-flash-image" }
+```
+
+**Vision model**: describes images with another model when a persona's main model cannot see images. Needs credentials for that provider (`bun run jingmei login <provider>` or its API key variable).
+
+```json
+"visionModel": "openrouter/google/gemini-2.5-flash"
+```
+
+**Candlestick charts** and **long text as an image**: no environment variable; both are off by default. See [Candlestick charts](#candlestick-charts) and [Long text as an image](#long-text-as-an-image).
+
+```json
+"kline": { "enabled": true },
+"textImage": { "enabled": true, "thresholdChars": 300 }
+```
+
+**Feature switches** (`features`): everything is on by default. Each of these can be turned off alone, which removes the tools and prompt lines and stops loading dependencies nothing uses.
+
+```json
+"features": { "history": false, "memory": false, "soul": false, "search": false, "audit": false }
+```
+
+| Switch | When `false` |
+|---|---|
+| `history` | No message index, no `related_messages` / `search_history`, no "（相关 N 条）" on context lines; the ~96 MB embedding model is not downloaded and fastembed and sqlite-vec are not loaded. Combining it with `events` is a configuration error |
+| `memory` | No `remember_member_fact` / `recall_member_memory`, and no passive collection of member profiles, preferences, relationships or birthdays stated in chat. Kept: `/memory` and `/forget` still show and delete existing data, and `/birthday` still records a birthday by hand (which `celebrations` birthday greetings rely on) |
+| `soul` | No `update_soul`, and stored private soul notes are no longer injected into the system prompt; stored data stays in the database |
+| `search` | No `search_web` and no prefetched search results; `DEEPSEEK_API_KEY` remains the default model's credential |
+| `audit` | No natural-tone audit of final text (the leak-marker check still runs); reply decisions are controlled separately by `jev.replyDecision` |
+
+`run_js` is always on. Switches are read once at startup; restart after changing them.
+
+**Jev** (quick reactions, memory ranking; participation decisions use it too): remote Jev needs `TYPESAFE_API_KEY`; omit `apiKeyEnv` to use only the in-process wrapper, which then requires `DEEPSEEK_API_KEY` (or a `localJev` section), otherwise startup fails with a configuration error. See [Jev](#jev).
+
+```json
+"jev": {
+	"apiKeyEnv": "TYPESAFE_API_KEY",
+	"quickReactions": true,
+	"memoryScoring": true
+}
+```
+
+**Topics** (`events`): needs a resolvable decision client, that is the Jev section above or `DEEPSEEK_API_KEY`; the `summaryModel` provider needs credentials. The first start downloads an embedding model.
+
+```json
+"events": { "summaryModel": "deepseek/deepseek-flash" }
+```
+
+**Holiday and birthday greetings**: no environment variable. `space` and `channelId` must be a server/channel you configured above; `personaId` is the character that posts.
+
+```json
+"celebrations": [
+	{
+		"space": "discord:000000000000000000",
+		"channelId": "000000000000000001",
+		"personaId": "luna",
+		"timeZone": "Australia/Sydney",
+		"calendar": "both"
+	}
+]
+```
+
 ## Commands
 
 | Action | Discord (slash commands) | Telegram (text commands in the group) |
 |---|---|---|
-| List commands | `/help` | `/help` |
-| Online characters | `/status` | `/status` |
+| List commands and how to talk to a character | `/help` | `/help` |
+| Online characters (says so when paused) | `/status` | `/status` |
 | Ask directly | `/ask prompt:<question>` | `/ask <question>` |
 | Show memory / re-enable | `/memory`, `/memory action:enable` | `/memory`, `/memory enable` |
 | Birthday: show / set / clear | `/birthday`, `/birthday date:09-25`, `/birthday date:clear` | `/birthday`, `/birthday 09-25`, `/birthday clear` |
@@ -147,7 +253,9 @@ Telegram replies convert Markdown into message entities and are split above 4096
 | Context usage and segment limits (admin) | `/context` | `/context` |
 | Compact context now (admin) | `/compact` | `/compact` |
 
-- Discord command responses are visible only to the caller; the answer to `/ask` is posted in the channel as usual.
+- Discord command responses are visible only to the caller; the answer to `/ask` is posted in the channel as usual. Command replies are in Chinese on both platforms (the project is Chinese-first); command names are unchanged.
+- You don't need a command to talk to a character: @mention it, reply to its message, or call it by name (`/help` says so).
+- While an operator has paused the bot, `/ask` says it is paused; when `/ask` gets no answer (error, withheld, timeout) both platforms reply that no answer came and to try again.
 - Admin commands are open only to the character's `adminUserIds` and registered only for characters that have admins.
 - Telegram commands can target a character with `@botusername`; without it the first character to receive the command handles it. With several characters in a group, `/context` and `/compact` must name one.
 - Telegram has no caller-only replies, so command responses go to the group and `/memory` shows counts rather than the remembered details.
@@ -155,12 +263,14 @@ Telegram replies convert Markdown into message entities and are split above 4096
 
 ## Operator commands
 
-Run them in the project directory as the same user that runs the bot. They read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
+Run them in the project directory as the same user that runs the bot. Apart from `init` and `doctor`, they read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
 
 | Command | What it does |
 |---|---|
-| `bun run jingmei` | Interactive menu: status, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
+| `bun run jingmei` | Interactive menu (before a config exists it offers only "Set up", i.e. `init`): status, check install, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
+| `bun run jingmei init` | First-run wizard: creates `jingmei.config.json`, `.env` (mode 0600) and a persona file, verifying bot tokens live; refuses to run when a config exists and needs an interactive terminal |
 | `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
+| `bun run jingmei doctor` | Read-only self-check: config, the `run_js` sandbox, models and credentials, Discord / Telegram tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg, fonts, sqlite-vec and the embedding cache for the features you enabled. One OK / WARN / FAIL line each with a one-line fix hint; exits non-zero on any FAIL. Never prints a token |
 | `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential; signing in refreshes that provider's model list |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | Show and switch a persona's chat model; without a model it refreshes the model lists and opens a picker |
 | `bun run jingmei pause` / `resume` | Pause / resume |
@@ -189,13 +299,14 @@ There are exactly two sources: `jingmei.config.json` for settings and `.env` for
 | `imageGeneration` | Optional `{ model }`: the Antigravity model ID used for drawing, default `gemini-3.1-flash-image`. The drawing tool is enabled only when the `antigravity` provider is signed in, see [Drawing](#drawing) |
 | `kline` | Optional `{ enabled }`: `enabled` defaults to `false`, see [Candlestick charts](#candlestick-charts) |
 | `textImage` | Optional `{ enabled, thresholdChars }`: `enabled` defaults to `false`; `thresholdChars` is the length limit of a text reply (integer 50–8000, default `300`), see [Long text as an image](#long-text-as-an-image) |
+| `features` | Optional; boolean switches `history`, `memory`, `soul`, `search`, `audit`, all `true` by default; see [Optional features](#optional-features) |
 | `jev` | Optional, see [Jev](#jev) |
 | `localJev` | Optional in-process LLM→Jev wrapper: required `baseUrl` (http(s)) and `model`, optional `apiKeyEnv` (omit for unauthenticated local services). Requires an OpenAI-compatible endpoint with logprobs. If the section is absent and `DEEPSEEK_API_KEY` resolves, defaults to DeepSeek / `deepseek-flash` |
 | `events` | Optional; presence enables topics. Required `summaryModel`: `"provider/model"` (first slash splits; model and authentication checked at startup). `embeddingModel` defaults to `fast-bge-small-zh-v1.5` (512 dimensions), and must be supported by fastembed; it also supplies the message-search vectors (without topics, message search uses the default model). Requires a remote Jev or local LLM decision client |
 | `celebrations[]` | Optional greeting targets, see below |
 | `personas[]` | Characters, at least one |
 
-Web search has no setting: it is on whenever `DEEPSEEK_API_KEY` is present.
+Web search has no section of its own: it is on whenever `DEEPSEEK_API_KEY` is present, and `features.search: false` turns it off.
 
 ### `personas[]`
 
@@ -259,7 +370,7 @@ Each drawing is one request (about 15 seconds with `gemini-3.1-flash-image`). On
 Turn it on with `"kline": { "enabled": true }`; no browser and no API key are needed. `send_reply` then gains a `kline_image` part with `symbol` (such as `BTCUSDT`; `BTC/USDT` is accepted too), `interval` (`15m`, `1h`, `4h`, `1d`, `1w`) and an optional `limit` (number of candles, 10–120, default 60).
 
 - **Data**: the bot fetches candles from Binance's public market-data mirror `data-api.binance.vision`, not through the model, so prices cannot be invented. Only Binance spot pairs work; for an unknown pair or a network failure the whole `send_reply` sends nothing, the character explains in text, and the log records `reply_part_failed` (`part_type: kline_image`) with an error category.
-- **Rendering**: ECharts generates the SVG directly in Node (no DOM needed) and `@resvg/resvg-js` turns it into a 1600×1000 PNG: candlesticks over volume bars, red for up and green for down, times in UTC. Text uses system fonts; on Debian/Ubuntu make sure DejaVu Sans (`fonts-dejavu-core`, usually preinstalled) is present. Startup does one trial render of two synthetic candles; if it fails the bot only logs `kline_unavailable` and the feature stays off. `kline_enabled: true` in the startup `ready` log means it is active.
+- **Rendering**: The SVG is written directly by code (candles, volume bars, axes) and `@resvg/resvg-js` turns it into a 1600×1000 PNG: candlesticks over volume bars, red for up and green for down, times in UTC. Text uses system fonts; on Debian/Ubuntu make sure DejaVu Sans (`fonts-dejavu-core`, usually preinstalled) is present. Startup does one trial render of two synthetic candles; if it fails the bot only logs `kline_unavailable` and the feature stays off. `kline_enabled: true` in the startup `ready` log means it is active.
 - **Stored content**: the message caption is generated from the data, for example `📈 BTCUSDT 日线 · 最新 67123.45 · 近 60 根 +5.20%`; that is what later turns see for this message. A character that wants to comment adds a `text` part after the chart.
 
 ## Long text as an image
@@ -303,7 +414,7 @@ Turn it on with `"textImage": { "enabled": true }`; no browser is needed. Render
 
 The wrapper has a 30-second default timeout and disables DeepSeek thinking (`thinking.type=disabled`). Its LLM must return logprobs; missing logprobs become an `invalid_response` call failure. When the model abstains, the wrapper takes the highest-probability option (argmax).
 
-Quick reactions and memory ranking still require an explicit `jev` section; `events` alone or a DeepSeek key alone does not enable them. Participation decisions default to enabled whenever a shared decision client exists; final-text audits also run with a client regardless of `replyDecision`. You may omit `jev.apiKeyEnv` to use only the wrapper. With neither a remote key nor a resolved local LLM, routing falls back to deterministic sampling/gates and marker checks. An explicitly named `apiKeyEnv` missing from `.env` / the process environment is still a configuration error, not a silent fallback. Wrapper calls are billed by the chosen LLM provider.
+Quick reactions and memory ranking still require an explicit `jev` section; `events` alone or a DeepSeek key alone does not enable them. Participation decisions default to enabled whenever a shared decision client exists; final-text audits also run with a client regardless of `replyDecision`. You may omit `jev.apiKeyEnv` to use only the wrapper, but then a local LLM must exist (a `localJev` section or `DEEPSEEK_API_KEY`); otherwise it is a configuration error. Without any `jev` section, routing falls back to deterministic sampling/gates and marker checks. An explicitly named `apiKeyEnv` missing from `.env` / the process environment is still a configuration error, not a silent fallback. Wrapper calls are billed by the chosen LLM provider.
 
 **Cost**. Remote Jev bills input tokens only; output is free (`jev-1.13` was $0.042 per million tokens at the time of writing — see the [official pricing](https://docs.typesafe.ai/models)). A reaction request carries just the message, up to 5 recent chat lines (each cut to 200 characters) and three questions — typically a few hundred tokens — and the remote request times out after 3 seconds. It uses none of the main model's tokens; the local wrapper consumes tokens from its configured LLM.
 
@@ -376,18 +487,6 @@ journalctl --user -u pi-discord-agent -f
 ```
 
 The unit assumes the code lives in `~/apps/pi-extension-discord` and Bun at `~/.local/share/pi-discord-bun/node_modules/.bin/bun`; adjust those two lines if yours differ. Data directory, logs and updates are covered in [docs/deploy.md](docs/deploy.md).
-
-## Migrating from the old version
-
-The old version was Discord-only, configured by `discord.config.json`, with its database at `data/discord-agent.db`.
-
-```bash
-bun scripts/migrate-config.ts
-```
-
-The script converts `discord.config.json` in the project root into `jingmei.config.json` (refusing to overwrite an existing one): `token_env` becomes `discord.tokenEnv`, `guildIds` becomes `spaces`, a celebration's `guildId` becomes `space`, and unknown fields are dropped. Afterwards check that persona `id`s use only `a-z 0-9 _ -`, then add `telegram` and `jev` sections as needed. Existing `.env` variable names keep working.
-
-The database needs no manual step: on first start, if `data/jingmei.db` does not exist but `data/discord-agent.db` does, it is renamed together with its `-wal`/`-shm` files, the old `discord_*` tables are migrated to the new names, and server IDs are rewritten as `discord:<guildId>`. The migration runs in one transaction and is safe to repeat; existing Pi session files stay on disk but carry no segment state, so each character's first trigger starts a new segment.
 
 ## Development
 

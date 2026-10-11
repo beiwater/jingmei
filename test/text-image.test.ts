@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Resvg } from "@resvg/resvg-js";
 import { validateConfig } from "../src/config.ts";
 import { renderTextImage, TEXT_IMAGE_MAX_CHARS, TextImageError } from "../src/media/text-image.ts";
+import { useCleanups } from "./support/cleanup.ts";
+import { personaFile } from "./support/core.ts";
+
+const cleanups = useCleanups();
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -169,32 +170,26 @@ describe("renderTextImage", () => {
 
 describe("textImage config", () => {
 	function load(textImage: unknown) {
-		const dir = mkdtempSync(join(tmpdir(), "jingmei-textimage-"));
-		try {
-			const personaPath = join(dir, "persona.md");
-			writeFileSync(personaPath, "x");
-			return validateConfig(
-				{
-					telegram: { chatIds: ["-100111"] },
-					...(textImage === undefined ? {} : { textImage }),
-					personas: [
-						{
-							id: "luna",
-							name: "Luna",
-							personaPath,
-							provider: "p",
-							model: "m",
-							routingP: 0,
-							telegram: { tokenEnv: "BOT_TOKEN" },
-						},
-					],
-				},
-				dir,
-				{ ROUTING_SECRET: "fixture", BOT_TOKEN: "fixture" },
-			);
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		const dir = cleanups.tmpDir();
+		return validateConfig(
+			{
+				telegram: { chatIds: ["-100111"] },
+				...(textImage === undefined ? {} : { textImage }),
+				personas: [
+					{
+						id: "luna",
+						name: "Luna",
+						personaPath: personaFile(dir),
+						provider: "p",
+						model: "m",
+						routingP: 0,
+						telegram: { tokenEnv: "BOT_TOKEN" },
+					},
+				],
+			},
+			dir,
+			{ ROUTING_SECRET: "fixture", BOT_TOKEN: "fixture" },
+		);
 	}
 
 	test("is off unless enabled, and the threshold defaults to 300", () => {

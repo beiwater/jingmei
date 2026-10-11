@@ -1,4 +1,4 @@
-import { createClient, type WireQuestion, wire } from "notjev";
+import type { WireQuestion } from "notjev";
 import { createJevClientWithTransport, type JevClient, JevError } from "./jev.ts";
 
 export interface LocalJevLlm {
@@ -14,25 +14,34 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export function createLocalJevClient(llm: LocalJevLlm, fetchImpl: typeof fetch = fetch): JevClient {
 	const baseUrl = llm.baseUrl.replace(/\/+$/, "");
 	const deepseek = new URL(baseUrl).hostname === "api.deepseek.com" || llm.model.startsWith("deepseek-");
-	const client = createClient({
-		baseUrl,
-		model: llm.model,
-		apiKey: llm.apiKey,
-		fetch: fetchImpl,
-		timeoutMs: llm.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-		path: baseUrl.endsWith("/v1") ? "/chat/completions" : "/v1/chat/completions",
-		env: {},
-		retries: 0,
-		topLogprobs: 20,
-		// DeepSeek 的 thinking 默认开启；官方协议用 thinking.type 禁用，不接受模板参数。
-		// https://api-docs.deepseek.com/api/create-chat-completion
-		templateKwargs: null,
-		extra: deepseek ? { thinking: { type: "disabled" } } : undefined,
-	});
+	// notjev 在第一次决策时才加载：关了所有决策功能的安装不付这个代价。
+	let loaded:
+		| Promise<{ wire: typeof import("notjev").wire; client: ReturnType<typeof import("notjev").createClient> }>
+		| undefined;
+	const load = () =>
+		(loaded ??= import("notjev").then(({ createClient, wire }) => ({
+			wire,
+			client: createClient({
+				baseUrl,
+				model: llm.model,
+				apiKey: llm.apiKey,
+				fetch: fetchImpl,
+				timeoutMs: llm.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+				path: baseUrl.endsWith("/v1") ? "/chat/completions" : "/v1/chat/completions",
+				env: {},
+				retries: 0,
+				topLogprobs: 20,
+				// DeepSeek 的 thinking 默认开启；官方协议用 thinking.type 禁用，不接受模板参数。
+				// https://api-docs.deepseek.com/api/create-chat-completion
+				templateKwargs: null,
+				extra: deepseek ? { thinking: { type: "disabled" } } : undefined,
+			}),
+		})));
 
 	return createJevClientWithTransport(async (state, questions) => {
 		const signal = AbortSignal.timeout(llm.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 		try {
+			const { client, wire } = await load();
 			// notjev 只接受字符串 state/instructions；TypeSafe 接受结构化 JSON。
 			const wireQuestions: Record<string, WireQuestion> = {};
 			for (const [id, question] of Object.entries(questions)) {
