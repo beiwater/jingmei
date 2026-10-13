@@ -1,21 +1,18 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { loadConfig } from "./config.ts";
+import { existsSync, type FSWatcher, readFileSync, statSync, watch } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
+import { loadConfig, readPersonaPaths } from "./config.ts";
 import { errorCategory, log } from "./observability/log.ts";
 import { RELOAD_FILE, UPDATE_LOCK_FILE } from "./update.ts";
 
 interface RuntimeOptions {
 	rootDir?: string;
 	command?: string[];
-	/** Validate with the same config reader as the bot; return resolved persona paths to watch. */
-	validate?: () => string[];
-	pollMs?: number;
 	settleMs?: number;
 	graceMs?: number;
 }
 
-/** Content hashes handle editor atomic renames and creation/deletion without retaining secret text. */
+/** Hash only after filesystem events, to ignore duplicate notifications and same-content saves. */
 function snapshot(paths: string[]): string {
 	const hash = createHash("sha256");
 	for (const path of paths) {
@@ -32,23 +29,20 @@ function snapshot(paths: string[]): string {
 
 /** One supervisor, one bot worker. Reloads drain the old worker before creating its replacement. */
 export async function superviseBot(options: RuntimeOptions = {}): Promise<number> {
-	const rootDir = options.rootDir ?? process.cwd();
-	const validate = options.validate ?? (() => loadConfig(rootDir).personas.map((persona) => persona.personaPath));
+	const rootDir = resolve(options.rootDir ?? process.cwd());
+	const lock = join(rootDir, UPDATE_LOCK_FILE);
 	const fixed = [join(rootDir, "jingmei.config.json"), join(rootDir, ".env"), join(rootDir, RELOAD_FILE)];
 	let paths = fixed;
-	try {
-		paths = [...fixed, ...validate()];
-	} catch {
-		// Let the worker report initial configuration errors using the usual startup diagnostics.
-	}
-	let baseline = snapshot(paths);
-	let pending = baseline;
-	let changedAt = 0;
+	let baseline = "";
 	let rejected: string | undefined;
 	let stopping = false;
 	let reloading = false;
+	let watchFailed = false;
+	let debounce: Timer | undefined;
 	let forceStop: Timer | undefined;
+	let wakeUpdateWait: (() => void) | undefined;
 	let child: ReturnType<typeof Bun.spawn>;
+	const watchers = new Map<string, { watcher: FSWatcher; dev: number; ino: number }>();
 	const stopWorker = (signal: "SIGINT" | "SIGTERM") => {
 		child.kill(signal);
 		forceStop = setTimeout(() => {
@@ -59,40 +53,96 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 	const stop = (signal: "SIGINT" | "SIGTERM") => {
 		if (stopping) return;
 		stopping = true;
+		clearTimeout(debounce);
+		wakeUpdateWait?.();
 		if (!reloading) stopWorker(signal);
 	};
-	const onInterrupt = () => stop("SIGINT");
-	const onTerminate = () => stop("SIGTERM");
-	process.on("SIGINT", onInterrupt);
-	process.on("SIGTERM", onTerminate);
-	const poll = setInterval(() => {
-		if (stopping || reloading || existsSync(join(rootDir, UPDATE_LOCK_FILE))) return;
-		const current = snapshot(paths);
-		if (current === baseline) {
-			pending = baseline;
-			rejected = undefined;
-			return;
-		}
-		if (current !== pending) {
-			pending = current;
-			changedAt = Date.now();
-			return;
-		}
-		if (Date.now() - changedAt < (options.settleMs ?? 500)) return;
+	const schedule = () => {
+		wakeUpdateWait?.();
+		if (stopping || reloading) return;
+		clearTimeout(debounce);
+		debounce = setTimeout(reconcile, options.settleMs ?? 500);
+	};
+	const refreshWatches = () => {
+		let next = paths;
 		try {
-			paths = [...fixed, ...validate()];
-			baseline = pending = snapshot(paths);
+			next = [...fixed, ...readPersonaPaths(rootDir)];
+		} catch {
+			// A partial JSON edit retains the last known targets until its next filesystem event.
+		}
+		const directories = new Set<string>();
+		for (const path of next) {
+			let directory = dirname(path);
+			while (!existsSync(directory)) directory = dirname(directory);
+			// Parent-directory watches survive atomic file saves; the extra parent handles directory replacement.
+			directories.add(directory);
+			directories.add(dirname(directory));
+		}
+		const added: string[] = [];
+		try {
+			for (const directory of directories) {
+				const { dev, ino } = statSync(directory);
+				const previous = watchers.get(directory);
+				if (previous?.dev === dev && previous.ino === ino) continue;
+				const watcher = watch(directory, (_event, filename) => {
+					const changed = filename === null ? undefined : resolve(directory, filename);
+					if (changed && ![...paths, lock].some((path) => path === changed || path.startsWith(changed + sep))) return;
+					schedule();
+				});
+				watcher.on("error", (error) => {
+					log.error("runtime", "watch_failed", { error_category: errorCategory(error) });
+					watchFailed = true;
+					stop("SIGTERM");
+				});
+				previous?.watcher.close();
+				watchers.set(directory, { watcher, dev, ino });
+				added.push(directory);
+			}
+		} catch (error) {
+			for (const directory of added) {
+				watchers.get(directory)?.watcher.close();
+				watchers.delete(directory);
+			}
+			throw error;
+		}
+		for (const [directory, { watcher }] of watchers) {
+			if (directories.has(directory)) continue;
+			watcher.close();
+			watchers.delete(directory);
+		}
+		paths = next;
+	};
+	function reconcile() {
+		if (stopping || reloading || existsSync(lock)) return;
+		try {
+			// Discover new or missing targets even if full configuration validation will fail.
+			refreshWatches();
+			const current = snapshot(paths);
+			if (current === baseline) return;
+			loadConfig(rootDir);
+			baseline = current;
 			rejected = undefined;
 			reloading = true;
 			log.info("runtime", "reload_requested", {});
 			stopWorker("SIGTERM");
 		} catch (error) {
-			// Retry incomplete edits (e.g. a newly configured persona file not yet created), without log spam.
+			const current = snapshot(paths);
 			if (rejected !== current) log.warn("runtime", "reload_rejected", { error_category: errorCategory(error) });
 			rejected = current;
 		}
-	}, options.pollMs ?? 500);
+	}
+	const onInterrupt = () => stop("SIGINT");
+	const onTerminate = () => stop("SIGTERM");
+	process.on("SIGINT", onInterrupt);
+	process.on("SIGTERM", onTerminate);
 	try {
+		try {
+			refreshWatches();
+		} catch (error) {
+			log.error("runtime", "watch_failed", { error_category: errorCategory(error) });
+			return 1;
+		}
+		baseline = snapshot(paths);
 		for (;;) {
 			child = Bun.spawn(options.command ?? [process.execPath, join(import.meta.dir, "main.ts"), "--jingmei-worker"], {
 				cwd: rootDir,
@@ -102,24 +152,31 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 			});
 			const code = await child.exited;
 			clearTimeout(forceStop);
+			if (watchFailed) return 1;
 			if (stopping) return code === 0 || child.signalCode === "SIGINT" || child.signalCode === "SIGTERM" ? 0 : code;
 			if (!reloading) return code;
-			// An update may have started while the old worker was draining. Never boot into a partial install.
-			while (!stopping && existsSync(join(rootDir, UPDATE_LOCK_FILE))) await Bun.sleep(options.pollMs ?? 500);
+			// Wake on lock-directory events or shutdown, without polling while an update finishes.
+			while (!stopping && existsSync(lock))
+				await new Promise<void>((wake) => {
+					wakeUpdateWait = wake;
+				});
+			wakeUpdateWait = undefined;
+			if (watchFailed) return 1;
 			if (stopping) return 0;
 			try {
-				paths = [...fixed, ...validate()];
-			} catch {
-				// The replacement worker reports any configuration errors introduced during the drain.
+				refreshWatches();
+			} catch (error) {
+				log.error("runtime", "watch_failed", { error_category: errorCategory(error) });
+				return 1;
 			}
-			// The replacement reads all edits made during the drain, so do not immediately reload it again.
-			baseline = pending = snapshot(paths);
+			baseline = snapshot(paths);
 			reloading = false;
 			log.info("runtime", "reloading", {});
 		}
 	} finally {
-		clearInterval(poll);
+		clearTimeout(debounce);
 		clearTimeout(forceStop);
+		for (const { watcher } of watchers.values()) watcher.close();
 		process.off("SIGINT", onInterrupt);
 		process.off("SIGTERM", onTerminate);
 	}

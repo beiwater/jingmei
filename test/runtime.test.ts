@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { RELOAD_FILE, UPDATE_LOCK_FILE } from "../src/update.ts";
 import { useCleanups } from "./support/cleanup.ts";
@@ -20,17 +20,38 @@ async function running(options: { drainMs?: number | null; graceMs?: number } = 
 	const config = join(dir, "jingmei.config.json");
 	const persona = join(dir, "pet.md");
 	const trace = join(dir, "trace");
-	const putConfig = (path = persona) => writeFileSync(config, JSON.stringify({ personaPath: path }));
+	const putConfig = (path = persona) =>
+		writeFileSync(
+			config,
+			JSON.stringify({
+				routingSecretEnv: "JINGMEI_TEST_ROUTING",
+				discord: { guilds: [{ guildId: "000000000000000000", channelIds: ["000000000000000001"] }] },
+				personas: [
+					{
+						id: "pet",
+						name: "Pet",
+						provider: "fixture",
+						model: "fixture",
+						personaPath: path,
+						routingP: 0,
+						discord: { tokenEnv: "JINGMEI_TEST_TOKEN" },
+					},
+				],
+			}),
+		);
+	const envText = (version: string) =>
+		`JINGMEI_TEST_ROUTING: fixture\nJINGMEI_TEST_TOKEN: fixture\nVERSION: ${version}\n`;
 	putConfig();
 	writeFileSync(persona, "first");
-	writeFileSync(join(dir, ".env"), "initial");
+	writeFileSync(join(dir, ".env"), envText("initial"));
 	writeFileSync(
 		join(dir, "worker.ts"),
 		`
 import { appendFileSync, readFileSync } from "node:fs";
+import { parseEnvFile } from ${JSON.stringify(resolve(import.meta.dir, "../src/config.ts"))};
 const record = (s: string) => appendFileSync("trace", s + "\\n");
 const config = JSON.parse(readFileSync("jingmei.config.json", "utf8"));
-record("start:" + readFileSync(config.personaPath, "utf8") + ":" + readFileSync(".env", "utf8"));
+record("start:" + readFileSync(config.personas[0].personaPath, "utf8") + ":" + parseEnvFile(".env").VERSION);
 let draining = false;
 const stop = () => {
   if (draining) return;
@@ -47,15 +68,9 @@ setInterval(() => {}, 1000);
 	writeFileSync(
 		join(dir, "runner.ts"),
 		`
-import { existsSync, readFileSync } from "node:fs";
 import { superviseBot } from ${JSON.stringify(runtime)};
 process.exitCode = await superviseBot({
-  command: [process.execPath, "worker.ts"], pollMs: 25, settleMs: 75, graceMs: ${options.graceMs ?? 2000},
-  validate: () => {
-    const config = JSON.parse(readFileSync("jingmei.config.json", "utf8"));
-    if (!existsSync(config.personaPath)) throw new Error("missing persona");
-    return [config.personaPath];
-  }
+  command: [process.execPath, "worker.ts"], settleMs: 75, graceMs: ${options.graceMs ?? 2000},
 });
 `,
 	);
@@ -72,7 +87,7 @@ process.exitCode = await superviseBot({
 	const lines = () => (existsSync(trace) ? readFileSync(trace, "utf8").trim().split("\n") : []);
 	const starts = () => lines().filter((line) => line.startsWith("start:"));
 	await until(() => starts().length === 1);
-	return { dir, config, persona, putConfig, child, lines, starts };
+	return { dir, config, persona, putConfig, envText, child, lines, starts };
 }
 
 test("persona and atomic .env edits drain one worker before starting its replacement", async () => {
@@ -80,7 +95,7 @@ test("persona and atomic .env edits drain one worker before starting its replace
 	writeFileSync(bot.persona, "second");
 	await until(() => bot.starts().length === 2);
 	expect(bot.lines()).toEqual(["start:first:initial", "drain", "end", "start:second:initial"]);
-	writeFileSync(join(bot.dir, "env.tmp"), "changed");
+	writeFileSync(join(bot.dir, "env.tmp"), bot.envText("changed"));
 	renameSync(join(bot.dir, "env.tmp"), join(bot.dir, ".env"));
 	await until(() => bot.starts().length === 3);
 	expect(bot.starts().at(-1)).toBe("start:second:changed");
@@ -104,6 +119,44 @@ test("invalid config preserves the worker; newly configured persona files are di
 	writeFileSync(nextPersona, "newer");
 	await until(() => bot.starts().length === 3);
 	expect(bot.starts().at(-1)).toBe("start:newer:initial");
+});
+
+test("repeated atomic saves retain monitoring and unchanged contents never restart the worker", async () => {
+	const bot = await running();
+	writeFileSync(join(bot.dir, "unrelated.txt"), "unrelated");
+	writeFileSync(bot.persona, "first");
+	await Bun.sleep(300);
+	expect(bot.starts()).toHaveLength(1);
+	for (const [index, value] of ["second", "third"].entries()) {
+		const temporary = join(bot.dir, "pet.tmp");
+		writeFileSync(temporary, value);
+		renameSync(temporary, bot.persona);
+		await until(() => bot.starts().length === index + 2);
+		expect(bot.starts().at(-1)).toBe(`start:${value}:initial`);
+	}
+	writeFileSync(bot.persona, "fourth");
+	await until(() => bot.starts().length === 4);
+	expect(bot.starts().at(-1)).toBe("start:fourth:initial");
+});
+
+test("missing external persona directories and replacement directories remain monitored", async () => {
+	const bot = await running();
+	const external = cleanups.tmpDir();
+	const directory = join(external, "new");
+	const persona = join(directory, "pet.md");
+	bot.putConfig(persona);
+	await Bun.sleep(250);
+	expect(bot.starts()).toHaveLength(1);
+	mkdirSync(directory);
+	writeFileSync(persona, "external");
+	await until(() => bot.starts().length === 2);
+	renameSync(directory, join(external, "old"));
+	mkdirSync(directory);
+	writeFileSync(persona, "replacement");
+	await until(() => bot.starts().length === 3);
+	writeFileSync(persona, "later");
+	await until(() => bot.starts().length === 4);
+	expect(bot.starts().at(-1)).toBe("start:later:initial");
 });
 
 test("update lock defers reload; success marker reloads even without config changes", async () => {
@@ -157,6 +210,22 @@ test("a stuck worker is terminated after the drain deadline before replacement",
 	expect(bot.lines()).toEqual(["start:first:initial", "drain", "start:replacement:initial"]);
 });
 
+test("stopping while waiting for an update lock wakes the supervisor without another worker", async () => {
+	const bot = await running();
+	writeFileSync(bot.persona, "updated");
+	await until(() => bot.lines().includes("drain"));
+	writeFileSync(join(bot.dir, UPDATE_LOCK_FILE), "");
+	await until(() => bot.lines().includes("end"));
+	bot.child.kill("SIGTERM");
+	const timer = setTimeout(() => bot.child.kill("SIGKILL"), 1000);
+	try {
+		expect(await bot.child.exited).toBe(0);
+		expect(bot.starts()).toHaveLength(1);
+	} finally {
+		clearTimeout(timer);
+	}
+});
+
 test("unrequested worker exits propagate so systemd retains its restart policy", async () => {
 	const dir = cleanups.tmpDir();
 	for (const code of [0, 7]) {
@@ -164,7 +233,7 @@ test("unrequested worker exits propagate so systemd retains its restart policy",
 			join(dir, "runner.ts"),
 			`
 import { superviseBot } from ${JSON.stringify(runtime)};
-process.exitCode = await superviseBot({ command: [process.execPath, "-e", "process.exit(${code})"], validate: () => [] });
+process.exitCode = await superviseBot({ command: [process.execPath, "-e", "process.exit(${code})"] });
 `,
 		);
 		const child = Bun.spawn([process.execPath, "runner.ts"], { cwd: dir, stdout: "ignore", stderr: "ignore" });
