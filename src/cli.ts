@@ -163,15 +163,15 @@ function showStats(): string {
 	return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
 }
 
-/** Print the exact report the bot would send, and whether it is on. Needs the full config, like `doctor`. */
+/** Print the exact event the bot would send, and whether it is on. Needs the full config, like `doctor`. */
 async function showTelemetry(): Promise<string> {
 	const config = loadConfig();
-	const { TELEMETRY_ENDPOINT, buildTelemetryPayload, loadTelemetryState } = await import("./tools/telemetry.ts");
-	p.note(JSON.stringify(buildTelemetryPayload(config, loadTelemetryState(config.dataDir).instance), null, 2), "Report");
+	const { POSTHOG_KEY, buildTelemetryEvent, loadTelemetryState } = await import("./tools/telemetry.ts");
+	p.note(JSON.stringify(buildTelemetryEvent(config, loadTelemetryState(config.dataDir).instance), null, 2), "Report");
 	if (!config.telemetry) return "Disabled: nothing is sent";
-	return TELEMETRY_ENDPOINT
+	return POSTHOG_KEY
 		? "Enabled: sent at start and every 24 hours. Turn off with telemetry.enabled=false or DO_NOT_TRACK=1"
-		: "This build has no receiver configured: nothing is sent";
+		: "This build has no PostHog key configured: nothing is sent";
 }
 
 /** First-run wizard: writes jingmei.config.json, .env and a persona file; it never overwrites. */

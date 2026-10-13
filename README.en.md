@@ -479,14 +479,14 @@ Topic summaries are instructed to neutrally describe what is being discussed or 
 
 ## Usage statistics
 
-To learn how many people run Jingmei, the bot **sends an anonymous instance-level report**. It is on by default, and the first start prints a notice once.
+To learn how many people run Jingmei, the bot **sends an anonymous instance-level report** to [PostHog](https://posthog.com). It is on by default, and the first start prints a notice once.
 
 - **Sent**: a random instance id generated locally (kept in `<dataDir>/telemetry.json`, unrelated to tokens or group ids), the Jingmei and Bun versions, OS and architecture, which platforms and features are enabled (booleans), and the number of personas and channels, bucketed only (`0`, `1`, `2-5`, `6-20`, `21+`).
-- **Never sent**: tokens or keys, group / channel / member ids, message or prompt content, paths, hostnames, model names. The receiver does not store request IPs and deletes instances not seen for 90 days.
+- **Never sent**: tokens or keys, group / channel / member ids, message or prompt content, paths, hostnames, model names. Every event carries `$geoip_disable`, and the PostHog project discards client IPs, so no IP is stored.
 - **Frequency**: once at start, then every 24 hours; failures are silent and never affect the bot.
-- **Inspect**: `bun run jingmei telemetry` prints the exact JSON that would be sent next.
+- **Inspect**: `bun run jingmei telemetry` prints the exact event that would be sent next.
 - **Turn off**: set `"telemetry": { "enabled": false }` in `jingmei.config.json`, or set `DO_NOT_TRACK=1` in the environment.
-- **Receiver**: [`deploy/telemetry-worker`](deploy/telemetry-worker) (Cloudflare Worker + D1); its source is the whole of what is promised above. A build with no receiver configured sends nothing. Deployment is in [docs/deploy.md](docs/deploy.md#部署遥测接收端) (Chinese).
+- **Wiring**: while `POSTHOG_KEY` in `src/tools/telemetry.ts` is empty nothing is sent; setup is in [docs/deploy.md](docs/deploy.md#配置-posthog-使用统计) (Chinese).
 
 ## Deployment
 

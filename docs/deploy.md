@@ -123,18 +123,14 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 - 向量使用 `events.embeddingModel`（未开话题时用默认模型）与 `data/models` 里的模型缓存。已 `/forget` 的成员的消息不会被索引。
 - 回填与 bot 共用同一个 `data/jingmei.db`，部署新版本后运行一次即可，之后无需再跑。
 
-## 部署遥测接收端
+## 配置 PostHog 使用统计
 
-[使用统计](../README.md#使用统计)的接收端在 `deploy/telemetry-worker`（Cloudflare Worker + D1）。只有维护发行版的人需要部署；自己跑 bot 的人不需要。
+[使用统计](../README.md#使用统计)发往 PostHog。只有维护发行版的人需要配置；自己跑 bot 的人不需要。
 
-```bash
-cd deploy/telemetry-worker
-bunx wrangler d1 create jingmei-telemetry        # 把输出的 database_id 填进 wrangler.toml
-bunx wrangler d1 execute jingmei-telemetry --remote --file schema.sql
-bunx wrangler deploy                              # 输出 https://jingmei-telemetry.<账号>.workers.dev
-```
-
-然后把该地址写进 `src/tools/telemetry.ts` 的 `TELEMETRY_ENDPOINT` 并发布新版本；在此之前发行版不会发送任何东西。`GET /stats` 返回最近 90 天与 30 天内上报过的实例数。Worker 不读取也不存储请求 IP，但 Cloudflare 本身会在边缘看到连接；对外说明时应如实写出这一点。
+1. 在 PostHog 建一个项目，记下区域（US 或 EU）。
+2. **先**在 Settings → Project → IP data capture configuration 打开 **Discard client IP data**。README 和首次启动的告知都承诺“不保存 IP”，这一项是客户端无法代为保证的；EU 组织的新项目默认已关闭 IP 采集，但仍应核对。
+3. 把项目 token（`phc_...`，只写、可公开）填进 `src/tools/telemetry.ts` 的 `POSTHOG_KEY`，EU 项目同时把 `POSTHOG_HOST` 改为 `https://eu.i.posthog.com`，然后发布新版本。填写前发行版不会发送任何东西。
+4. 在 PostHog 里看 `jingmei_report` 事件，按 `distinct_id`（实例）去重计数即得安装数；`properties` 里的 `version`、`os`、`feature_*` 可用来分组。
 
 ## 排查
 

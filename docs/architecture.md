@@ -57,7 +57,6 @@ flowchart LR
 | `src/platforms/telegram/` | Bot API 客户端、长轮询、归一化、Markdown→entities、文字命令 |
 | `src/media/image.ts` / `video-frames.ts` | 图片转码缩放；ffmpeg 视频抽帧 |
 | `src/tools/` | `run_js` 沙箱、DeepSeek 联网搜索、Fish Audio TTS、匿名实例统计（`telemetry.ts`，见[使用统计](#使用统计)） |
-| `deploy/telemetry-worker/` | 统计接收端（Cloudflare Worker + D1）：白名单校验、每实例一行、90 天保留；不读请求 IP |
 | `src/net/` | 公网 URL 过滤、有界读取响应体 |
 | `src/observability/log.ts` | 唯一的结构化日志出口 |
 | `scripts/backfill-message-index.ts` | 历史消息回填索引（最新优先、可中断重跑），见 [deploy.md](deploy.md#升级后回填历史消息索引) |
@@ -298,9 +297,9 @@ flowchart TD
 
 ## 使用统计
 
-`src/tools/telemetry.ts`，默认开启，由 `telemetry.enabled` 或环境变量 `DO_NOT_TRACK` 关闭（`config.ts` 解析为 `AppConfig.telemetry`）。`bot.ts` 的 `startBot()` 在启动加载动画结束后调用 `startTelemetry()`：首次运行向 stderr 打印一次告知文字（以 `<dataDir>/telemetry.json` 里的 `noticed` 记忆），然后启动时与之后每 24 小时 `POST` 一次载荷，5 秒超时，失败只记 `debug` 日志。`TELEMETRY_ENDPOINT` 常量为空时什么都不发、也不打印告知。
+`src/tools/telemetry.ts`，默认开启，由 `telemetry.enabled` 或环境变量 `DO_NOT_TRACK` 关闭（`config.ts` 解析为 `AppConfig.telemetry`）。`bot.ts` 的 `startBot()` 在启动加载动画结束后调用 `startTelemetry()`：首次运行向 stderr 打印一次告知文字（以 `<dataDir>/telemetry.json` 里的 `noticed` 记忆），然后启动时与之后每 24 小时向 PostHog `POST {POSTHOG_HOST}/i/v0/e/` 一个 `jingmei_report` 事件，5 秒超时，失败只记 `debug` 日志。`POSTHOG_KEY` 常量为空时什么都不发、也不打印告知。
 
-载荷是固定白名单：`schema`、随机 `instance` UUID、`version`、`runtime`（bun / os / arch）、`platforms`、分档后的 `personas` 与 `spaces`、各功能的布尔值。不含 token、ID、正文、路径、模型名。新增字段必须同时改客户端、`deploy/telemetry-worker/index.ts` 的白名单与 `test/telemetry.test.ts`。接收端对任何多余或越界的字段整份拒绝，而不是存下来。`bun run jingmei telemetry` 打印下一次会发送的完整载荷。
+事件是固定白名单：`distinct_id` 是随机实例 UUID，`properties` 只有 `version`、`bun`、`os`、`arch`、`platforms`、分档后的 `personas` 与 `spaces`、各功能的 `feature_*` 布尔值，以及 `$geoip_disable`。不含 token、ID、正文、路径、模型名。新增属性必须同时改 `buildTelemetryEvent` 与 `test/telemetry.test.ts` 的白名单断言，并更新 README 的上报内容说明。`bun run jingmei telemetry` 打印下一次会发送的完整事件。
 
 ## 日志
 

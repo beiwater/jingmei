@@ -479,14 +479,14 @@ Telegram 自定义表情表中不在 Bot API 允许集合里的表情会被丢�
 
 ## 使用统计
 
-为了知道有多少人在用精魅，bot 会**匿名上报实例级统计**，默认开启，首次启动时会在日志里打印一次说明。
+为了知道有多少人在用精魅，bot 会**匿名上报实例级统计**到 [PostHog](https://posthog.com)，默认开启，首次启动时会打印一次说明。
 
 - **上报内容**：本地随机生成的实例 ID（存在 `<dataDir>/telemetry.json`，与 token、群 ID 无关）、精魅版本、Bun 版本、操作系统与架构、启用了哪些平台、启用了哪些功能（布尔值）、角色数和频道数（只分档：`0`、`1`、`2-5`、`6-20`、`21+`）。
-- **不会上报**：token 与密钥、群 / 频道 / 成员 ID、消息与 prompt 内容、路径、主机名、模型名。接收端不记录请求 IP，超过 90 天没有上报的实例会被删除。
+- **不会上报**：token 与密钥、群 / 频道 / 成员 ID、消息与 prompt 内容、路径、主机名、模型名。每个事件都带 `$geoip_disable`，PostHog 项目也开启了丢弃客户端 IP，不保存 IP。
 - **频率**：启动时一次，之后每 24 小时一次；失败静默，不影响 bot。
-- **查看**：`bun run jingmei telemetry` 打印下一次要发送的完整 JSON。
+- **查看**：`bun run jingmei telemetry` 打印下一次要发送的完整事件。
 - **关闭**：`jingmei.config.json` 写 `"telemetry": { "enabled": false }`，或设置环境变量 `DO_NOT_TRACK=1`。
-- **接收端**：[`deploy/telemetry-worker`](deploy/telemetry-worker)（Cloudflare Worker + D1），源码就是上面承诺的全部逻辑。发行版没有配置接收端时什么都不会发送，部署方式见 [docs/deploy.md](docs/deploy.md#部署遥测接收端)。
+- **接线**：`src/tools/telemetry.ts` 里的 `POSTHOG_KEY` 为空时什么都不会发送，配置方式见 [docs/deploy.md](docs/deploy.md#配置-posthog-使用统计)。
 
 ## 部署
 
