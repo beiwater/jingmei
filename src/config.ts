@@ -165,6 +165,15 @@ export function loadConfig(rootDir = process.cwd()): AppConfig {
 	return validateConfig(readConfigFile(rootDir), rootDir, loadEnv(rootDir));
 }
 
+/** Watch targets must include missing persona files while an otherwise incomplete config is being edited. */
+export function readPersonaPaths(rootDir = process.cwd()): string[] {
+	const input = readConfigFile(rootDir);
+	if (!isObject(input) || !Array.isArray(input.personas)) return [];
+	return input.personas.flatMap((persona) =>
+		isObject(persona) && nonEmptyString(persona.personaPath) ? [resolvePath(rootDir, persona.personaPath)] : [],
+	);
+}
+
 /** Pi's agent directory (`models.json`, `auth.json`) under the data dir. */
 export function piAgentDir(dataDir: string): string {
 	return join(dataDir, "pi-agent");

@@ -300,8 +300,15 @@ async function switchModel(ref?: string, personaId?: string): Promise<string> {
 	return `${persona.id} now uses ${choice}; the running bot switches before each channel's next reply`;
 }
 
+async function updateBot(): Promise<string> {
+	const { updateProject } = await import("./update.ts");
+	const { previous, current } = await updateProject(process.cwd(), (step) => p.log.step(step));
+	return `${previous === current ? `Already at ${current}; dependencies checked` : `Updated ${previous} → ${current}`}. Reload requested for any running bot; otherwise start it with bun run start.`;
+}
+
 const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
 	init: createInstall,
+	update: updateBot,
 	stats: showStats,
 	doctor: checkInstall,
 	telemetry: showTelemetry,
@@ -325,6 +332,7 @@ async function menu(): Promise<never> {
 				? [
 						{ value: "stats", label: "Status", hint: "uptime and totals" },
 						{ value: "doctor", label: "Check install", hint: "config, tokens, models, dependencies" },
+						{ value: "update", label: "Update", hint: "pull, install and reload the running bot" },
 						{ value: "model", label: "Switch model" },
 						paused ? { value: "resume", label: "Resume replies" } : { value: "pause", label: "Pause replies" },
 						{ value: "login", label: "Sign in to a provider" },
@@ -351,7 +359,15 @@ async function menu(): Promise<never> {
 const start = defineCommand({
 	meta: { name: "start", description: "Run the bot in the foreground (same as bun run start)" },
 	// The bot pulls in the embedding model, vector store and decision wrapper; operator commands must not.
-	run: async () => (await import("./bot.ts")).startBot(),
+	run: async () => {
+		process.exitCode = await (await import("./runtime.ts")).superviseBot();
+		process.exit();
+	},
+});
+
+const update = defineCommand({
+	meta: { name: "update", description: "Pull the tracking branch, install locked dependencies and reload the bot" },
+	run: () => operation("jingmei update", updateBot),
 });
 
 const pause = defineCommand({
@@ -413,8 +429,8 @@ const logout = defineCommand({
 await runMain(
 	defineCommand({
 		meta: { name: "jingmei", description: "精魅 operator commands; run without a command for the interactive menu" },
-		subCommands: { start, init, doctor, telemetry, login, logout, model, pause, resume, stats },
-		// citty also calls this after a subcommand (only `start` returns), so act only on a bare invocation.
+		subCommands: { start, update, init, doctor, telemetry, login, logout, model, pause, resume, stats },
+		// Only a bare invocation opens the menu.
 		run: ({ rawArgs }) => (rawArgs.length ? undefined : menu()),
 	}),
 );

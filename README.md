@@ -51,7 +51,7 @@
 
 ## 架构一览
 
-一个进程、一个对话核心、两个薄平台适配器。平台差异（格式、长度上限、表情集合）全部留在适配器里，核心只认 `InboundMessage`（进）和 `PlatformTransport`（出）。
+一个监护进程、一个 bot 工作进程；工作进程内是一个对话核心、两个薄平台适配器。平台差异（格式、长度上限、表情集合）全部留在适配器里，核心只认 `InboundMessage`（进）和 `PlatformTransport`（出）。
 
 ```mermaid
 flowchart LR
@@ -208,7 +208,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `search` | 没有 `search_web`，也不预取搜索结果；`DEEPSEEK_API_KEY` 仍是默认模型的凭据 |
 | `audit` | 不再对最终文字做自然度审查（泄漏标记检查仍在）；接话判断由 `jev.replyDecision` 单独控制 |
 
-`run_js` 始终启用。开关在启动时读取一次，改动后需重启。
+`run_js` 始终启用。修改配置后会自动优雅重载，当前对话完成后应用新开关。
 
 **Jev**（秒回表情、记忆排序，接话判断也会使用）：远程 Jev 需要 `TYPESAFE_API_KEY`；省略 `apiKeyEnv` 则只用进程内包装器，此时必须有 `DEEPSEEK_API_KEY`（或写 `localJev`），否则启动报配置错误。详见 [Jev](#jev)。
 
@@ -263,13 +263,14 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 
 ## 运维命令
 
-在项目目录、以运行 bot 的同一个用户执行。除 `init` 与 `doctor` 外只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`bun run jingmei --help` 列出全部命令。
+在项目目录、以运行 bot 的同一个用户执行。登录、切换模型、暂停 / 恢复与统计只读 `jingmei.config.json` 的 `dataDir` 和角色的 `provider`/`model`，不需要 bot token；`update` 也不需要配置或 token。`bun run jingmei --help` 列出全部命令。
 
 | 命令 | 作用 |
 |---|---|
-| `bun run jingmei` | 交互菜单（尚无配置时只有“Set up”，即 `init`）：状态、自检、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
+| `bun run jingmei` | 交互菜单（尚无配置时只有“Set up”，即 `init`）：状态、自检、更新、切换模型、暂停 / 恢复、登录、登出；每项做完回到菜单，选 Exit 退出 |
 | `bun run jingmei init` | 首次配置向导：生成 `jingmei.config.json`、`.env`（0600）和角色文件，实时验证 bot token；已有配置时拒绝运行，需要交互终端 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
+| `bun run update` / `bun run jingmei update` | 快进拉取当前分支的 upstream、安装锁定依赖、检查 TypeScript，成功后通知运行中的 bot 优雅重载；未运行时只更新文件，不启动 bot |
 | `bun run jingmei doctor` | 只读自检：配置、`run_js` 沙箱、模型与凭据、Discord / Telegram token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg、字体、sqlite-vec、embedding 缓存；逐项 OK / WARN / FAIL，附一行修复提示，有 FAIL 时退出码非 0。不打印任何 token |
 | `bun run jingmei telemetry` | 打印本实例下一次会上报的完整内容，并说明是否开启，见[使用统计](#使用统计)。需要完整配置 |
 | `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |
@@ -282,6 +283,8 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 - **运行状态**：bot 每分钟写一次心跳，超过两分钟没有心跳即视为已停止（包括崩溃）。回复数从引入这个命令的版本开始统计；消息等数据统计全部历史。
 - **切换模型**：只能在服务器上用 CLI 切换，群里没有对应命令。选择存在数据库里，运行中的 bot 在每个频道下一次回复前换过去，不用重启，重启后保留；`default` 恢复 `jingmei.config.json` 里的 `provider`/`model`。`reasoningEffort` 不变，新模型不支持时由 Pi 自动降级。要用其他 provider 先 `login`，或把 API key 放进服务进程环境。选中的模型 bot 找不到时（例如 provider 被删除），它会记 `model_override_unavailable` 警告并继续用配置模型。切换会让 provider 前缀缓存失效一次。
 - **上下文与对话段**：每个频道、每个角色的会话使用模型自己的 `contextWindow`（例如 Gemini 的 1M），不再统一截断。常规情况下对话段在 5 分钟无回复、积累超过 30 条消息或会话超过 40,000 tokens 时就在下一次触发时换新，所以回复输入量保持在较小范围，不再依赖压缩。接近真实窗口上限（窗口减 16,384 tokens）仍由 Pi 自动压缩兜底，provider 溢出恢复也保留；管理员仍可 `/compact` 手动压缩；`/context` 显示当前用量、窗口条数与对话段上限。压缩后保留最近约 1.5–2 万真实 token（Pi 对中文按字符估算低估约 5 倍，因此保留量仍设为 3000 估算 token）；对话段内历史只在末尾追加，有利于前缀缓存。
+
+- **热更新**：所有启动入口（含现有 systemd 服务）自动监测 `jingmei.config.json`、`.env` 与配置引用的角色文件（支持项目外路径），由文件系统事件通知，防抖 500ms 后发起重载，空闲时不扫描文件；代码通过 `update` 更新。先校验配置，再等待旧 bot 完成当前对话及后台写入、关闭数据库后启动新 bot，期间平台会短暂重连。配置校验失败时记 `reload_rejected`、保留旧 bot，修好后自动重试。新配置的 token / 模型等运行时问题仍可能导致新 bot 启动失败，查看 `startup_failed`。有未提交的 tracked 改动、分支分叉、安装或类型检查失败时，`update` 退出且不请求重载；已拉取的代码不会自动回滚，修复后可重试。首次升级需手动重启一次以启用监护进程，见 [部署更新说明](docs/deploy.md#更新)。
 
 ## 配置参考
 

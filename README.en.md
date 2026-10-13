@@ -51,7 +51,7 @@ Jingmei is an AI group pet that lives in Discord and Telegram groups. One config
 
 ## Architecture at a glance
 
-One process, one conversation core, two thin platform adapters. Platform differences (formatting, length limits, emoji sets) stay in the adapters; the core only knows `InboundMessage` (in) and `PlatformTransport` (out).
+One supervisor and one bot worker; the worker contains one conversation core and two thin platform adapters. Platform differences (formatting, length limits, emoji sets) stay in the adapters; the core only knows `InboundMessage` (in) and `PlatformTransport` (out).
 
 ```mermaid
 flowchart LR
@@ -208,7 +208,7 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 | `search` | No `search_web` and no prefetched search results; `DEEPSEEK_API_KEY` remains the default model's credential |
 | `audit` | No natural-tone audit of final text (the leak-marker check still runs); reply decisions are controlled separately by `jev.replyDecision` |
 
-`run_js` is always on. Switches are read once at startup; restart after changing them.
+`run_js` is always on. Configuration edits trigger a graceful reload; new switches apply after current conversations finish.
 
 **Jev** (quick reactions, memory ranking; participation decisions use it too): remote Jev needs `TYPESAFE_API_KEY`; omit `apiKeyEnv` to use only the in-process wrapper, which then requires `DEEPSEEK_API_KEY` (or a `localJev` section), otherwise startup fails with a configuration error. See [Jev](#jev).
 
@@ -263,13 +263,14 @@ The second snippet goes in the persona object under `personas[]`, next to `disco
 
 ## Operator commands
 
-Run them in the project directory as the same user that runs the bot. Apart from `init` and `doctor`, they read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `bun run jingmei --help` lists every command.
+Run them in the project directory as the same user that runs the bot. Login, model selection, pause / resume and statistics read only `dataDir` and each persona's `provider`/`model` from `jingmei.config.json` and need no bot tokens; `update` needs neither configuration nor tokens. `bun run jingmei --help` lists every command.
 
 | Command | What it does |
 |---|---|
-| `bun run jingmei` | Interactive menu (before a config exists it offers only "Set up", i.e. `init`): status, check install, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
+| `bun run jingmei` | Interactive menu (before a config exists it offers only "Set up", i.e. `init`): status, check install, update, switch model, pause / resume, sign in, sign out; each action returns to the menu until you pick Exit |
 | `bun run jingmei init` | First-run wizard: creates `jingmei.config.json`, `.env` (mode 0600) and a persona file, verifying bot tokens live; refuses to run when a config exists and needs an interactive terminal |
 | `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
+| `bun run update` / `bun run jingmei update` | Fast-forward the current branch from its upstream, install locked dependencies, check TypeScript, then request a graceful reload of any running bot; when stopped, only updates files |
 | `bun run jingmei doctor` | Read-only self-check: config, the `run_js` sandbox, models and credentials, Discord / Telegram tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg, fonts, sqlite-vec and the embedding cache for the features you enabled. One OK / WARN / FAIL line each with a one-line fix hint; exits non-zero on any FAIL. Never prints a token |
 | `bun run jingmei telemetry` | Print exactly what this instance would report next and whether it is on; see [Usage statistics](#usage-statistics). Needs the full config |
 | `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential; signing in refreshes that provider's model list |
@@ -282,6 +283,8 @@ Run them in the project directory as the same user that runs the bot. Apart from
 - **Status**: the bot writes a heartbeat every minute; with no heartbeat for two minutes it counts as stopped (including crashes). Replies are counted from the release that introduced this command; message and other totals cover all history.
 - **Switch model**: only the CLI on the server can switch models; there is no chat command for it. The choice is stored in the database, the running bot moves each channel over before its next reply without a restart, and it survives restarts. `default` restores `provider`/`model` from `jingmei.config.json`. `reasoningEffort` is kept and Pi clamps it when the new model does not support it. To use another provider, `login` first or put its API key in the service environment. If the bot cannot find the chosen model (for example its provider was removed), it logs `model_override_unavailable` and keeps using the configured model. A switch invalidates the provider's prefix cache once.
 - **Context and conversation segments**: each character's channel session uses the model's own `contextWindow` (for example Gemini's 1M), without a shared cap. In normal operation a segment is replaced at the next trigger once 5 minutes pass without a reply, more than 30 messages accumulate, or the session exceeds 40,000 tokens, so reply input stays small and does not depend on compaction. Pi still provides near-limit auto-compaction (window minus 16,384 tokens) and provider overflow recovery; administrators can still use `/compact`; `/context` shows current usage, the window size in messages and the segment limits. Compaction retains about 15–20k real recent tokens (Pi's character estimate undercounts Chinese about fivefold, so the kept tail remains 3,000 estimated tokens); within a segment history grows only at the end, helping prefix caches.
+
+- **Hot updates**: every entrypoint (including the existing systemd service) watches `jingmei.config.json`, `.env` and configured persona files, including paths outside the project. Filesystem events request a reload after a 500ms debounce, with no idle file scanning; use `update` for code changes. The supervisor validates configuration, waits for current conversations and background writes, then closes the old worker's database before starting its replacement. Platforms briefly reconnect. Invalid configuration logs `reload_rejected`, keeps the old worker and retries after repairs. Runtime problems such as invalid tokens or unavailable models can still prevent startup; inspect `startup_failed`. Tracked local edits, divergent history, failed installs or failed type checks stop `update` without requesting a reload; fetched code is not rolled back automatically, so fix the cause and retry. The first upgrade needs one manual restart to activate the supervisor; see [deployment updates](docs/deploy.md#更新).
 
 ## Configuration reference
 

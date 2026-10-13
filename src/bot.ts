@@ -183,23 +183,23 @@ async function main(): Promise<AppConfig> {
 		});
 	}
 
-	let shuttingDown = false;
+	let shutdownPromise: Promise<void> | undefined;
 	let heartbeat: Timer | undefined;
-	const shutdown = async (signal: string) => {
-		if (shuttingDown) return;
-		shuttingDown = true;
-		log.info("core", "shutdown", { signal });
-		await scheduler?.stop();
-		await Promise.allSettled(platforms.map((platform) => platform.stop()));
-		await core.close();
-		await events?.idle();
-		await messageIndex?.idle();
-		clearInterval(heartbeat);
-		botState.stopRun();
-		db.close();
-	};
-	process.once("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
-	process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
+	const shutdown = (signal: string) =>
+		(shutdownPromise ??= (async () => {
+			log.info("core", "shutdown", { signal });
+			await scheduler?.stop();
+			await Promise.allSettled(platforms.map((platform) => platform.stop()));
+			await core.close();
+			await events?.idle();
+			await messageIndex?.idle();
+			clearInterval(heartbeat);
+			botState.stopRun();
+			db.close();
+		})());
+	// A terminal or systemd can signal both supervisor and worker; every handler awaits the same drain.
+	process.on("SIGINT", () => void shutdown("SIGINT").then(() => process.exit(process.exitCode ?? 0)));
+	process.on("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(process.exitCode ?? 0)));
 
 	for (const platform of platforms) await platform.start();
 	// Recovered turns run in their channel lanes; startup (heartbeat, run record) must not wait for model calls.

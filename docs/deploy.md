@@ -1,6 +1,6 @@
 # 部署
 
-精魅是一个常驻前台进程：`bun run start` 或 `bun run jingmei start`（本地），或 systemd 运行的 `bun run src/discord/main.ts`，三者进入同一个 `startBot()`。进程只向 stdout 写结构化 JSONL 日志，收到 SIGINT/SIGTERM 时停止各平台、等待进行中的对话及后台事件刷新后关闭数据库。
+精魅由一个常驻监护进程管理一个 bot 工作进程：`bun run start` 或 `bun run jingmei start`（本地），或 systemd 运行的 `bun run src/discord/main.ts`，三者进入同一个监护入口。工作进程调用 `startBot()`，只向 stdout 写结构化 JSONL 日志；收到 SIGINT/SIGTERM 时停止各平台、等待进行中的对话及后台事件刷新后关闭数据库。
 
 ## 准备
 
@@ -83,13 +83,26 @@ sudo loginctl enable-linger <linux-user>
 
 ## 更新
 
+首次升级到带热更新的版本，需要先按旧方式更新并重启一次，启用监护进程（前台运行时用 Ctrl+C 后重新 `bun run start`）：
+
 ```bash
-git pull
+git pull --ff-only
 bun install --frozen-lockfile
 systemctl --user restart pi-discord-agent
 ```
 
-改了 `jingmei.config.json`、`.env` 或 persona 文件后同样需要重启。persona 文件在创建或重载会话时读取：重启后已有会话重载时生效，不重启则要等该角色下一次开新对话段。
+以后在项目目录、以运行 bot 的同一个用户执行即可，不必手动重启：
+
+```bash
+bun run update
+# 等价：bun run jingmei update；交互菜单也有 Update
+```
+
+命令快进拉取**当前分支的 upstream**，运行 `bun install --frozen-lockfile` 和 `bun run check`，全部成功后写入 `.jingmei-reload` 请求重载。即使已经是最新提交，也重新检查依赖并通知重载，便于失败后重试。未运行的 bot 不会被启动。tracked 文件有未提交改动、detached HEAD、未设置 upstream、分支分叉或步骤失败时退出，不 stash、不 reset、不请求重载；已经拉取的代码不会自动回滚。个人 `.env`、配置、角色文件、`data/` 应保持未跟踪 / 忽略。
+
+监护进程通过 `fs.watch` 监听配置、`.env` 与 `personaPath` 引用的文件（含项目外路径）的父目录；收到目录事件后防抖 500ms，比较实际文件内容，再校验并优雅重载，空闲时不扫描文件。目录事件仅作为变化提示，不依赖回调一定给出目标文件名，以兼容编辑器原子替换保存及合并的事件；角色文件暂缺或目录被替换时会重新挂载监听。同内容保存、无关文件变化与重复事件不会重启 bot。更新锁释放也由目录事件唤醒，不轮询等待。语法 / 字段校验失败记 `reload_rejected`，旧 bot 保持运行，修复后自动重试。旧工作进程退出前等待当前对话与后台写入完成；最多 210 秒，超时记 `shutdown_timeout` 并强制结束，随后重建工作进程，因此不是零断线更新。新 bot 启动失败时查看 `startup_failed`，退出码与原有 systemd 策略一致。数据库、记忆、暂停状态、模型选择保留；对话段沿用原有重启边界，在下一次触发时开新段。
+
+更新期间 `.jingmei-update.lock` 防止并发更新并暂停自动重载；依赖安装 / 类型检查失败时不会发出代码重载请求。正常结束会删除锁；若更新被强制中断，确认没有其他更新进程后删除该锁再运行 `bun run update`。这两个控制文件已加入 `.gitignore`。直接手动修改源码或图库 catalog 后仍需手动重启；监护进程自身的代码变动也在下次完整重启时加载。
 
 ## 数据目录
 
