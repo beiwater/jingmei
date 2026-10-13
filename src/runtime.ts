@@ -43,6 +43,7 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 	let wakeUpdateWait: (() => void) | undefined;
 	let child: ReturnType<typeof Bun.spawn>;
 	const watchers = new Map<string, { watcher: FSWatcher; dev: number; ino: number }>();
+	let targetDirectories = new Set<string>();
 	const stopWorker = (signal: "SIGINT" | "SIGTERM") => {
 		child.kill(signal);
 		forceStop = setTimeout(() => {
@@ -71,10 +72,12 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 			// A partial JSON edit retains the last known targets until its next filesystem event.
 		}
 		const directories = new Set<string>();
+		const nextTargetDirectories = new Set<string>();
 		for (const path of next) {
 			let directory = dirname(path);
 			while (!existsSync(directory)) directory = dirname(directory);
 			// Parent-directory watches survive atomic file saves; the extra parent handles directory replacement.
+			nextTargetDirectories.add(directory);
 			directories.add(directory);
 			directories.add(dirname(directory));
 		}
@@ -84,9 +87,19 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 				const { dev, ino } = statSync(directory);
 				const previous = watchers.get(directory);
 				if (previous?.dev === dev && previous.ino === ino) continue;
+				// Release the old inode before reopening the same path; runtimes can share native watchers by path.
+				previous?.watcher.close();
+				watchers.delete(directory);
 				const watcher = watch(directory, (_event, filename) => {
 					const changed = filename === null ? undefined : resolve(directory, filename);
-					if (changed && ![...paths, lock].some((path) => path === changed || path.startsWith(changed + sep))) return;
+					// A directory event is a hint: atomic saves can report only the temporary name (Bun #36328).
+					// Compare actual contents after debounce, and filter unrelated events only on extra parent watches.
+					if (
+						!targetDirectories.has(directory) &&
+						changed &&
+						![...paths, lock].some((path) => path === changed || path.startsWith(changed + sep))
+					)
+						return;
 					schedule();
 				});
 				watcher.on("error", (error) => {
@@ -94,7 +107,6 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 					watchFailed = true;
 					stop("SIGTERM");
 				});
-				previous?.watcher.close();
 				watchers.set(directory, { watcher, dev, ino });
 				added.push(directory);
 			}
@@ -111,6 +123,7 @@ export async function superviseBot(options: RuntimeOptions = {}): Promise<number
 			watchers.delete(directory);
 		}
 		paths = next;
+		targetDirectories = nextTargetDirectories;
 	};
 	function reconcile() {
 		if (stopping || reloading || existsSync(lock)) return;
