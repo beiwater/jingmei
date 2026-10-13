@@ -27,6 +27,7 @@
 	},
 	"scripts": {
 		"start": "bun run src/main.ts",
+		"update": "bun run src/cli.ts update",
 		"jingmei": "bun run src/cli.ts",
 		"test": "bun test",
 		"check": "tsc --noEmit",

@@ -4,7 +4,7 @@
 
 ## 总览
 
-一个进程、一个对话核心、两个薄平台适配器。
+一个监护进程、一个 bot 工作进程；工作进程内是一个对话核心、两个薄平台适配器。
 
 ```mermaid
 flowchart LR
@@ -34,10 +34,12 @@ flowchart LR
 
 | 路径 | 职责 |
 |---|---|
-| `src/main.ts` | `bun run start` 的入口，只调用 `startBot()` |
+| `src/main.ts` | 公共启动入口；监护模式与内部 bot 工作进程入口 |
+| `src/runtime.ts` | 单工作进程监护、配置 / 角色文件校验与优雅重载、信号转发；旧进程退出后才创建新进程 |
+| `src/update.ts` | 受锁保护的快进更新、锁定依赖安装与类型检查，成功后通知监护进程重载 |
 | `src/bot.ts` | 启动编排：配置 → DB → 平台 → 模型运行时 → 核心 → 祝福调度 → 开始接收 → 记录运行与心跳；信号关闭 |
 | `src/discord/main.ts` | systemd 使用的入口，只有一行 `import "../main.ts"` |
-| `src/cli.ts` | 运维 CLI（citty + clack）：`start`、`login`/`logout`（Pi `ModelRuntime.login`）、`pause`/`resume`、`stats` |
+| `src/cli.ts` | 运维 CLI（citty + clack）：`start`、`update`、`login`/`logout`（Pi `ModelRuntime.login`）、`pause`/`resume`、`stats` |
 | `src/config.ts` | 读取并校验 `jingmei.config.json` + `.env`；生成 DeepSeek 模型目录 |
 | `src/core/types.ts` | 平台无关的类型契约 |
 | `src/core/conversation.ts` | 对话核心：存消息、路由、对话段与会话、图片落盘、搜索预取、发送 |
@@ -63,7 +65,7 @@ flowchart LR
 
 ## 启动
 
-重依赖按需加载，只有对应功能开启才进入进程：`fastembed`（含 onnxruntime）仅在 `features.history` 开启时由 `bot.ts` 动态导入 `embedding.ts`；`sqlite-vec` 在 `MessageIndex` / `EventTracker` 首次加载向量扩展时 `require`；`lunar-typescript` 仅在配置了 `celebrations` 时随动态导入的 `celebrations.ts` 加载；`notjev` 在本地决策客户端第一次请求时动态导入。`src/cli.ts` 只在 `start` 子命令里动态导入 `bot.ts`，因此 `pause` / `resume` / `stats` / `model` / `login` / `logout` 不加载这些包（`test/lazy-modules.test.ts` 守护）。
+重依赖按需加载，只有对应功能开启才进入进程：`fastembed`（含 onnxruntime）仅在 `features.history` 开启时由 `bot.ts` 动态导入 `embedding.ts`；`sqlite-vec` 在 `MessageIndex` / `EventTracker` 首次加载向量扩展时 `require`；`lunar-typescript` 仅在配置了 `celebrations` 时随动态导入的 `celebrations.ts` 加载；`notjev` 在本地决策客户端第一次请求时动态导入。`src/cli.ts` 的 `start` 启动监护进程，再由内部工作进程动态导入 `bot.ts`；其他运维命令不加载这些包（`test/lazy-modules.test.ts` 守护）。
 
 1. `loadConfig()`：校验失败收集全部错误后一次抛出 `ConfigError`，错误信息不含密钥。
 2. 在 `data/pi-agent/` 写入非敏感的 DeepSeek `models.json`；有 `DEEPSEEK_API_KEY` 时把它放进进程环境供 Pi 解析。
@@ -90,7 +92,7 @@ flowchart LR
 9. 回复：本轮已点过表情、`send_reply` 已发出（哪怕只发出一部分）或被扣留就结束；启用 `textImage` 时，模型本轮结束后若仍没发送且最终文字超过 `thresholdChars`，在同一个总期限内追加一条隐藏的 `jingmei_length_gate_v1` 自定义消息（`triggerTurn: true`，说明字数与上限、要求改用 `send_reply` 的 `text_image` 部分）让模型重试一次；重试后已发出则结束，仍超长就继续下面的流程，文字按原样分条发送。否则最终文字先通过泄漏检查与自然度审查，再发送文字（明确要求语音且配置了语音时改发 MP3），回复原消息。被扣留的文字不发送、不补写 `messages`、不计回复数。
 10. transport 的 `echoesOwnMessages = false` 时，文字、语音及 `send_reply` 每个成功发出的部分都补写 `messages`：bot 账号 ID/用户名、正文或媒体文字稿/说明、被回复消息 ID（只有真正作为平台回复发出的消息才有，`send_reply` 只有第一部分回复原消息）、发送时间，并继承本轮触发消息的 `event_id`，同时排入消息索引。Discord 依旧等 Gateway 回声入库。每次逻辑发送只按 transport 返回的首条消息 ID 记录一行；超长回复的后续分段不单独入库。
 
-启动时 `Conversation` 快照已有 pending（避免平台启动期间新接收的正常任务被再次恢复），平台全部启动后调用 `recoverPending()`，按 `received_at, rowid` 的原接收顺序排入频道 lane；启动流程不等待恢复的模型轮次（心跳与运行记录照常开始），异常只记 `inbound_recovery_failed { error_category }`。消息年龄采用平台 `timestamp`，缺失则接受时补为 `received_at`；年龄 ≤ `STALE_MESSAGE_MS = 180000` 毫秒才恢复，更旧的删除 pending、保留历史，不写入会话（之后若角色被触发，仍会作为积累的消息进入）。仅在计数非零时记录一次 `inbound_recovered { recovered, expired }`。单进程，不引入 lease、worker 或 poller 偏移变更。
+启动时 `Conversation` 快照已有 pending（避免平台启动期间新接收的正常任务被再次恢复），平台全部启动后调用 `recoverPending()`，按 `received_at, rowid` 的原接收顺序排入频道 lane；启动流程不等待恢复的模型轮次（心跳与运行记录照常开始），异常只记 `inbound_recovery_failed { error_category }`。消息年龄采用平台 `timestamp`，缺失则接受时补为 `received_at`；年龄 ≤ `STALE_MESSAGE_MS = 180000` 毫秒才恢复，更旧的删除 pending、保留历史，不写入会话（之后若角色被触发，仍会作为积累的消息进入）。仅在计数非零时记录一次 `inbound_recovered { recovered, expired }`。只有一个 bot 工作进程处理消息，不引入 lease、并发消息 worker 或 poller 偏移变更。
 
 pending 的 `payload` 是归一化 `InboundMessage` JSON，保留路由与回复所需 ID、提及、文字、时间，不保存图片 base64：每条可有四张图片，避免短暂队列放大 SQLite/WAL 和重复持久媒体。恢复文字附 `[图片在崩溃恢复后不可用；无法查看图片内容]`，不假装看过；正常处理仍使用原图。SQLite 与 Pi 会话/平台发送不组成一个事务：发送后、pending 删除前的崩溃可能重复回复，恢复也可能再次追加已经落盘的上下文；这不是 exactly-once 平台投递。
 
