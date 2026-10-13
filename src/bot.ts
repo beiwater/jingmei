@@ -3,7 +3,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { withLoader } from "fox-girl-loader";
-import { ConfigError, ensureDeepSeekModelsFile, loadConfig, piAgentDir } from "./config.ts";
+import { type AppConfig, ConfigError, ensureDeepSeekModelsFile, loadConfig, piAgentDir } from "./config.ts";
 import { BotState, HEARTBEAT_MS } from "./core/bot-state.ts";
 import type { CelebrationScheduler } from "./core/celebrations.ts";
 import { Conversation } from "./core/conversation.ts";
@@ -29,9 +29,10 @@ import { createDiscordPlatform } from "./platforms/discord/index.ts";
 import { createTelegramPlatform } from "./platforms/telegram/index.ts";
 import { ANTIGRAVITY_PROVIDER_ID, AntigravityImageError, generateAntigravityImage } from "./tools/antigravity-image.ts";
 import { assertRunJsSandbox, RunJsSandboxError } from "./tools/run-js.ts";
+import { startTelemetry } from "./tools/telemetry.ts";
 import type { ImageGenerator } from "./core/tools.ts";
 
-async function main(): Promise<void> {
+async function main(): Promise<AppConfig> {
 	const config = loadConfig();
 	await assertRunJsSandbox();
 	const agentDir = piAgentDir(config.dataDir);
@@ -232,13 +233,16 @@ async function main(): Promise<void> {
 		celebration_targets: config.celebrations.length,
 		paused: botState.pausedAt() !== null,
 	});
+	return config;
 }
 
 /** Start every configured platform; a startup failure is logged and sets a nonzero exit code. */
 export async function startBot(): Promise<void> {
 	try {
 		// Draws only on a terminal (no-op under systemd); startup logs are held and replayed once it finishes.
-		await withLoader({ text: "Waking jingmei", doneText: "Ready" }, main);
+		const config = await withLoader({ text: "Waking jingmei", doneText: "Ready" }, main);
+		// After the loader finishes, so the first-run notice is not drawn over it.
+		startTelemetry({ config });
 	} catch (error) {
 		// `detail` goes through the logger's token/key/URL/path redaction; operators need the reason.
 		log.error("core", "startup_failed", {

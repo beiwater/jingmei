@@ -85,6 +85,22 @@ describe("config", () => {
 		expect(errorsOf(() => validateConfig(base({ kline: true }), root, env))).toEqual(["kline must be an object"]);
 	});
 
+	test("telemetry is on by default and off by config or DO_NOT_TRACK", () => {
+		expect(validateConfig(base(), root, env).telemetry).toBe(true);
+		expect(validateConfig(base({ telemetry: { enabled: true } }), root, env).telemetry).toBe(true);
+		expect(validateConfig(base({ telemetry: { enabled: false } }), root, env).telemetry).toBe(false);
+		for (const value of ["1", "true", "yes"])
+			expect(validateConfig(base(), root, { ...env, DO_NOT_TRACK: value }).telemetry).toBe(false);
+		for (const value of ["", "0", "false"])
+			expect(validateConfig(base(), root, { ...env, DO_NOT_TRACK: value }).telemetry).toBe(true);
+		expect(errorsOf(() => validateConfig(base({ telemetry: { enabled: "no" } }), root, env))).toEqual([
+			"telemetry.enabled must be a boolean",
+		]);
+		expect(errorsOf(() => validateConfig(base({ telemetry: false }), root, env))).toEqual([
+			"telemetry must be an object",
+		]);
+	});
+
 	test("applies defaults and resolves secrets", () => {
 		const config = validateConfig(base({ jev: { apiKeyEnv: "TYPESAFE_API_KEY" } }), root, env);
 		expect(config.dataDir).toBe(join(root, "data"));

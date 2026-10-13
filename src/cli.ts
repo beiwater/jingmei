@@ -8,7 +8,7 @@ import * as p from "@clack/prompts";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { defineCommand, runMain } from "citty";
-import { loadOperatorConfig, type OperatorConfig, piAgentDir } from "./config.ts";
+import { loadConfig, loadOperatorConfig, type OperatorConfig, piAgentDir } from "./config.ts";
 import { BotState, type BotSummary } from "./core/bot-state.ts";
 import { openDatabase } from "./core/db.ts";
 import { createInstalledPiModelRuntime } from "./core/model-runtime.ts";
@@ -163,6 +163,17 @@ function showStats(): string {
 	return summary.pausedAt !== null ? "Paused: resume with `bun run jingmei resume`" : "Done";
 }
 
+/** Print the exact report the bot would send, and whether it is on. Needs the full config, like `doctor`. */
+async function showTelemetry(): Promise<string> {
+	const config = loadConfig();
+	const { TELEMETRY_ENDPOINT, buildTelemetryPayload, loadTelemetryState } = await import("./tools/telemetry.ts");
+	p.note(JSON.stringify(buildTelemetryPayload(config, loadTelemetryState(config.dataDir).instance), null, 2), "Report");
+	if (!config.telemetry) return "Disabled: nothing is sent";
+	return TELEMETRY_ENDPOINT
+		? "Enabled: sent at start and every 24 hours. Turn off with telemetry.enabled=false or DO_NOT_TRACK=1"
+		: "This build has no receiver configured: nothing is sent";
+}
+
 /** First-run wizard: writes jingmei.config.json, .env and a persona file; it never overwrites. */
 async function createInstall(): Promise<string> {
 	if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -293,6 +304,7 @@ const MENU_ACTIONS: Record<string, () => Promise<string> | string> = {
 	init: createInstall,
 	stats: showStats,
 	doctor: checkInstall,
+	telemetry: showTelemetry,
 	model: () => switchModel(),
 	pause: pauseBot,
 	resume: resumeBot,
@@ -367,6 +379,11 @@ const doctor = defineCommand({
 	run: () => operation("jingmei doctor", checkInstall),
 });
 
+const telemetry = defineCommand({
+	meta: { name: "telemetry", description: "Show the anonymous usage report this install sends, and whether it is on" },
+	run: () => operation("jingmei telemetry", showTelemetry),
+});
+
 const model = defineCommand({
 	meta: { name: "model", description: "Show or switch a persona's chat model (picker when no model is given)" },
 	args: {
@@ -396,7 +413,7 @@ const logout = defineCommand({
 await runMain(
 	defineCommand({
 		meta: { name: "jingmei", description: "精魅 operator commands; run without a command for the interactive menu" },
-		subCommands: { start, init, doctor, login, logout, model, pause, resume, stats },
+		subCommands: { start, init, doctor, telemetry, login, logout, model, pause, resume, stats },
 		// citty also calls this after a subcommand (only `start` returns), so act only on a bare invocation.
 		run: ({ rawArgs }) => (rawArgs.length ? undefined : menu()),
 	}),

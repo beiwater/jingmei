@@ -1,0 +1,10 @@
+name = "jingmei-telemetry"
+main = "index.ts"
+compatibility_date = "2025-01-01"
+
+# Create with `wrangler d1 create jingmei-telemetry`, paste the id here, then
+# `wrangler d1 execute jingmei-telemetry --remote --file schema.sql` and `wrangler deploy`.
+[[d1_databases]]
+binding = "DB"
+database_name = "jingmei-telemetry"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"

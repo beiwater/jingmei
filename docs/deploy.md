@@ -102,6 +102,7 @@ systemctl --user restart pi-discord-agent
 | `media/` | 进入上下文的图片与视频帧（`img-*.jpg` / `img-*.png`） |
 | `models/` | fastembed 模型下载缓存（消息检索向量与话题共用，默认模型约 96 MB；`features.history` 关闭时不创建） |
 | `pi-agent/models.json` | 启动时生成的 DeepSeek 模型目录，不含密钥 |
+| `telemetry.json` | 随机实例 ID 与“已显示告知”标记（权限 0600）；删除后该实例会被当作新实例统计 |
 | `pi-agent/auth.json` | `bun run jingmei login` 保存的 OAuth 凭据（权限 0600，勿入库） |
 
 消息和媒体不会自动清理。需要腾空间时可以删除较早的 `media/img-*` 文件：上下文里缺失的图片会被跳过，不影响对话。备份时停止服务后复制整个 `data/`。
@@ -121,6 +122,19 @@ nice -n 10 bun scripts/backfill-message-index.ts [delayMs]
 - 按时间从新到旧处理，每 500 条打印一次进度，结束打印 `done`。可以随时中断（Ctrl+C）再重跑，已建好索引的消息会被跳过。
 - 向量使用 `events.embeddingModel`（未开话题时用默认模型）与 `data/models` 里的模型缓存。已 `/forget` 的成员的消息不会被索引。
 - 回填与 bot 共用同一个 `data/jingmei.db`，部署新版本后运行一次即可，之后无需再跑。
+
+## 部署遥测接收端
+
+[使用统计](../README.md#使用统计)的接收端在 `deploy/telemetry-worker`（Cloudflare Worker + D1）。只有维护发行版的人需要部署；自己跑 bot 的人不需要。
+
+```bash
+cd deploy/telemetry-worker
+bunx wrangler d1 create jingmei-telemetry        # 把输出的 database_id 填进 wrangler.toml
+bunx wrangler d1 execute jingmei-telemetry --remote --file schema.sql
+bunx wrangler deploy                              # 输出 https://jingmei-telemetry.<账号>.workers.dev
+```
+
+然后把该地址写进 `src/tools/telemetry.ts` 的 `TELEMETRY_ENDPOINT` 并发布新版本；在此之前发行版不会发送任何东西。`GET /stats` 返回最近 90 天与 30 天内上报过的实例数。Worker 不读取也不存储请求 IP，但 Cloudflare 本身会在边缘看到连接；对外说明时应如实写出这一点。
 
 ## 排查
 

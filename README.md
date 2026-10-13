@@ -271,6 +271,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `bun run jingmei init` | 首次配置向导：生成 `jingmei.config.json`、`.env`（0600）和角色文件，实时验证 bot token；已有配置时拒绝运行，需要交互终端 |
 | `bun run jingmei start` | 前台启动 bot，等同 `bun run start` |
 | `bun run jingmei doctor` | 只读自检：配置、`run_js` 沙箱、模型与凭据、Discord / Telegram token 与权限（Message Content Intent、privacy mode、群 ID）、按已启用功能检查 ffmpeg、字体、sqlite-vec、embedding 缓存；逐项 OK / WARN / FAIL，附一行修复提示，有 FAIL 时退出码非 0。不打印任何 token |
+| `bun run jingmei telemetry` | 打印本实例下一次会上报的完整内容，并说明是否开启，见[使用统计](#使用统计)。需要完整配置 |
 | `bun run jingmei login [provider]` / `logout [provider]` | OAuth 登录 / 删除已保存的凭据；登录后刷新该 provider 的模型列表 |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | 查看并切换角色的聊天模型；不带模型时刷新模型列表后弹出选择 |
 | `bun run jingmei pause` / `resume` | 暂停 / 恢复 |
@@ -300,6 +301,7 @@ Telegram 回复把 Markdown 转成消息实体，超过 4096 字符分条发送�
 | `kline` | 可选，`{ enabled }`：`enabled` 默认 `false`，见[K 线图](#k-线图) |
 | `textImage` | 可选，`{ enabled, thresholdChars }`：`enabled` 默认 `false`；`thresholdChars` 是文字回复的字数上限（50–8000 的整数，默认 `300`），见[长文转图](#长文转图) |
 | `features` | 可选，`history`、`memory`、`soul`、`search`、`audit` 五个布尔开关，默认全为 `true`，见[可选功能](#可选功能) |
+| `telemetry` | 可选，`{ enabled }`：匿名实例统计，`enabled` 默认 `true`；环境里设置 `DO_NOT_TRACK=1` 同样关闭，见[使用统计](#使用统计) |
 | `jev` | 可选，见 [Jev](#jev) |
 | `localJev` | 可选，进程内 LLM→Jev 包装器：`baseUrl`（http(s)）、`model`（必填）、`apiKeyEnv`（可省略，供无鉴权本地服务）。接口需兼容 OpenAI 且支持 logprobs；省略整个段落且有 `DEEPSEEK_API_KEY` 时默认 DeepSeek / `deepseek-flash` |
 | `events` | 可选，存在即启用话题：`summaryModel` 必填，`"provider/model"`（第一个 `/` 拆分，启动时校验模型与认证）；`embeddingModel` 默认 `fast-bge-small-zh-v1.5`（512 维），须是 fastembed 支持的模型，同时用于消息检索向量（不开话题时消息检索用默认模型）。必须能解析出远程 Jev 或本地 LLM 决策客户端 |
@@ -474,6 +476,17 @@ Telegram 自定义表情表中不在 Bot API 允许集合里的表情会被丢�
 回复某条已有话题的消息时，直接沿用该话题，不调用决策模型（bot 消息同理，未回复的 bot 消息无话题）。去掉 `[贴纸 …]`、`[视频 N帧]`、`[文件]` 等裸媒体占位后不足 2 个字母/数字的人类消息，并入 10 分钟内最近活跃的话题。其余人类消息在有候选话题时由决策客户端选择归属：短回复、追问和情绪反应倾向延续正在进行的话题；决策选“新话题”但其概率低于 0.6 时，改归概率最高的现有话题。最近 2 小时有消息的话题视为活跃，每次最多提供 5 个活跃话题、2 个同频道向量召回的旧话题，以及“新话题”选项。累计消息数达到 3、6、12、24……时，后台生成/刷新标题描述、参与度与向量；同一事件只同时刷新一次，不阻塞频道处理。摘要使用独立的 `summaryModel`；话题说明只在触发回复的那一轮附在消息后面，下一轮起不再留在历史里，也不写入 system prompt。
 
 话题摘要要求中性地描述正在讨论或玩的内容：接梗仍是接梗，不评价成员行为，不给角色安排管理任务，也不保留与话题无关的成员隐私。
+
+## 使用统计
+
+为了知道有多少人在用精魅，bot 会**匿名上报实例级统计**，默认开启，首次启动时会在日志里打印一次说明。
+
+- **上报内容**：本地随机生成的实例 ID（存在 `<dataDir>/telemetry.json`，与 token、群 ID 无关）、精魅版本、Bun 版本、操作系统与架构、启用了哪些平台、启用了哪些功能（布尔值）、角色数和频道数（只分档：`0`、`1`、`2-5`、`6-20`、`21+`）。
+- **不会上报**：token 与密钥、群 / 频道 / 成员 ID、消息与 prompt 内容、路径、主机名、模型名。接收端不记录请求 IP，超过 90 天没有上报的实例会被删除。
+- **频率**：启动时一次，之后每 24 小时一次；失败静默，不影响 bot。
+- **查看**：`bun run jingmei telemetry` 打印下一次要发送的完整 JSON。
+- **关闭**：`jingmei.config.json` 写 `"telemetry": { "enabled": false }`，或设置环境变量 `DO_NOT_TRACK=1`。
+- **接收端**：[`deploy/telemetry-worker`](deploy/telemetry-worker)（Cloudflare Worker + D1），源码就是上面承诺的全部逻辑。发行版没有配置接收端时什么都不会发送，部署方式见 [docs/deploy.md](docs/deploy.md#部署遥测接收端)。
 
 ## 部署
 

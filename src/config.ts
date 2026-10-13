@@ -73,6 +73,8 @@ export interface AppConfig {
 	/** Present when `kline.enabled`: personas may send live Binance candlestick charts. */
 	kline?: Record<string, never>;
 	features: Features;
+	/** Anonymous instance-level usage report (see `src/tools/telemetry.ts`); on unless `telemetry.enabled` is false or `DO_NOT_TRACK` is set. */
+	telemetry: boolean;
 	/** DEEPSEEK_API_KEY: server-side web search (unless `features.search` is off) and the default model's credential. */
 	webSearchApiKey?: string;
 	/** Optional image describer for personas whose main model is text-only. */
@@ -643,6 +645,16 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 			}
 	}
 
+	let telemetry = true;
+	if (input.telemetry !== undefined) {
+		if (!isObject(input.telemetry)) errors.push("telemetry must be an object");
+		else if (input.telemetry.enabled !== undefined && typeof input.telemetry.enabled !== "boolean")
+			errors.push("telemetry.enabled must be a boolean");
+		else telemetry = input.telemetry.enabled !== false;
+	}
+	// https://consoledonottrack.com: any value other than empty / 0 / false means "do not track".
+	if (!["", "0", "false"].includes((env.DO_NOT_TRACK ?? "").trim().toLowerCase())) telemetry = false;
+
 	const webSearchApiKey = env.DEEPSEEK_API_KEY || undefined;
 	let localJev: AppConfig["localJev"];
 	if (input.localJev !== undefined) {
@@ -752,6 +764,7 @@ export function validateConfig(input: unknown, rootDir: string, env: Readonly<Re
 		...(telegram ? { telegram } : {}),
 		...(voice ? { voice } : {}),
 		features,
+		telemetry,
 		imageModel,
 		...(textImage ? { textImage } : {}),
 		...(kline ? { kline } : {}),

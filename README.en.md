@@ -271,6 +271,7 @@ Run them in the project directory as the same user that runs the bot. Apart from
 | `bun run jingmei init` | First-run wizard: creates `jingmei.config.json`, `.env` (mode 0600) and a persona file, verifying bot tokens live; refuses to run when a config exists and needs an interactive terminal |
 | `bun run jingmei start` | Run the bot in the foreground, same as `bun run start` |
 | `bun run jingmei doctor` | Read-only self-check: config, the `run_js` sandbox, models and credentials, Discord / Telegram tokens and permissions (Message Content Intent, privacy mode, group ids), and ffmpeg, fonts, sqlite-vec and the embedding cache for the features you enabled. One OK / WARN / FAIL line each with a one-line fix hint; exits non-zero on any FAIL. Never prints a token |
+| `bun run jingmei telemetry` | Print exactly what this instance would report next and whether it is on; see [Usage statistics](#usage-statistics). Needs the full config |
 | `bun run jingmei login [provider]` / `logout [provider]` | Sign in with OAuth / remove a stored credential; signing in refreshes that provider's model list |
 | `bun run jingmei model [provider/model\|default] [--persona <id>]` | Show and switch a persona's chat model; without a model it refreshes the model lists and opens a picker |
 | `bun run jingmei pause` / `resume` | Pause / resume |
@@ -300,6 +301,7 @@ There are exactly two sources: `jingmei.config.json` for settings and `.env` for
 | `kline` | Optional `{ enabled }`: `enabled` defaults to `false`, see [Candlestick charts](#candlestick-charts) |
 | `textImage` | Optional `{ enabled, thresholdChars }`: `enabled` defaults to `false`; `thresholdChars` is the length limit of a text reply (integer 50–8000, default `300`), see [Long text as an image](#long-text-as-an-image) |
 | `features` | Optional; boolean switches `history`, `memory`, `soul`, `search`, `audit`, all `true` by default; see [Optional features](#optional-features) |
+| `telemetry` | Optional, `{ enabled }`: anonymous instance stats; `enabled` defaults to `true`, and `DO_NOT_TRACK=1` in the environment also turns it off; see [Usage statistics](#usage-statistics) |
 | `jev` | Optional, see [Jev](#jev) |
 | `localJev` | Optional in-process LLM→Jev wrapper: required `baseUrl` (http(s)) and `model`, optional `apiKeyEnv` (omit for unauthenticated local services). Requires an OpenAI-compatible endpoint with logprobs. If the section is absent and `DEEPSEEK_API_KEY` resolves, defaults to DeepSeek / `deepseek-flash` |
 | `events` | Optional; presence enables topics. Required `summaryModel`: `"provider/model"` (first slash splits; model and authentication checked at startup). `embeddingModel` defaults to `fast-bge-small-zh-v1.5` (512 dimensions), and must be supported by fastembed; it also supplies the message-search vectors (without topics, message search uses the default model). Requires a remote Jev or local LLM decision client |
@@ -474,6 +476,17 @@ Emojis in a custom Telegram table that the Bot API does not allow are dropped wi
 A reply to a message that already has an event inherits that event without a decision call (bot replies too; bot messages that reply to nothing have no event). A human message with fewer than 2 letters/digits after removing bare media placeholders such as `[贴纸 …]`, `[视频 N帧]` and `[文件]` joins the most recently active topic from the last 10 minutes. Other human messages go through the decision client whenever topic candidates exist: short replies, follow-ups and emotional reactions lean towards the ongoing topic, and a “new” decision whose probability is below 0.6 is reassigned to the most probable existing topic. Topics with a message in the last 2 hours are active. Candidates are up to 5 recent active topics, 2 older topics recalled by vector similarity within the same space/channel, and “new”. At 3, 6, 12, 24… messages, a background single-flight refresh generates the title/description, scores participation and updates the embedding without blocking channel processing. Summaries use the independent `summaryModel`; the event note is attached only to the triggering input for that turn, dropped from history from the next turn on, and never enters the system prompt.
 
 Topic summaries are instructed to neutrally describe what is being discussed or played: a running joke stays a joke, without judging members' behavior, assigning moderation tasks to the character, or retaining private member details unrelated to the topic.
+
+## Usage statistics
+
+To learn how many people run Jingmei, the bot **sends an anonymous instance-level report**. It is on by default, and the first start prints a notice once.
+
+- **Sent**: a random instance id generated locally (kept in `<dataDir>/telemetry.json`, unrelated to tokens or group ids), the Jingmei and Bun versions, OS and architecture, which platforms and features are enabled (booleans), and the number of personas and channels, bucketed only (`0`, `1`, `2-5`, `6-20`, `21+`).
+- **Never sent**: tokens or keys, group / channel / member ids, message or prompt content, paths, hostnames, model names. The receiver does not store request IPs and deletes instances not seen for 90 days.
+- **Frequency**: once at start, then every 24 hours; failures are silent and never affect the bot.
+- **Inspect**: `bun run jingmei telemetry` prints the exact JSON that would be sent next.
+- **Turn off**: set `"telemetry": { "enabled": false }` in `jingmei.config.json`, or set `DO_NOT_TRACK=1` in the environment.
+- **Receiver**: [`deploy/telemetry-worker`](deploy/telemetry-worker) (Cloudflare Worker + D1); its source is the whole of what is promised above. A build with no receiver configured sends nothing. Deployment is in [docs/deploy.md](docs/deploy.md#部署遥测接收端) (Chinese).
 
 ## Deployment
 
