@@ -12,7 +12,7 @@ import { errorCategory, log } from "../observability/log.ts";
 /** PostHog ingestion host: `https://us.i.posthog.com` or `https://eu.i.posthog.com`, matching the project's region. */
 export const POSTHOG_HOST = "https://us.i.posthog.com";
 /** The PostHog project token (`phc_...`). It is write-only and meant to ship in client code. Empty keeps the report off. */
-export const POSTHOG_KEY = "";
+export const POSTHOG_KEY = "phc_zkeoKvvJ3BqSsTTVC2TspWoje6RiGLdiRHjr5f2oVd6a";
 const EVENT_NAME = "jingmei_report";
 const INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TIMEOUT_MS = 5_000;
