@@ -21,6 +21,7 @@
 - `docs/architecture.md` — 架构、数据流、表结构、上下文投影、Jev、run_js 威胁模型
 - `docs/testing.md` — 测试清单与验证漏斗
 - `docs/deploy.md` — 部署、数据目录、迁移
+- `website/` — GitHub Pages 文档站（VitePress，独立依赖与锁文件）；页面由 `website/sync.ts` 从 README 与 `docs/` 生成，`website/pages.ts` 决定每个 README `##` 章节放在哪页，新增章节须在此登记，否则站点构建失败
 
 动手前只读与改动相关的章节。
 

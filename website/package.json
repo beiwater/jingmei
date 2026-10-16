@@ -1,0 +1,16 @@
+{
+	"name": "jingmei-website",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"sync": "bun run sync.ts",
+		"dev": "bun run sync.ts && vitepress dev",
+		"build": "bun run sync.ts && vitepress build",
+		"preview": "vitepress preview"
+	},
+	"devDependencies": {
+		"github-slugger": "2.0.0",
+		"mermaid": "11.17.2",
+		"vitepress": "1.6.4"
+	}
+}
